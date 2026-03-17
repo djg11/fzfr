@@ -1,0 +1,49 @@
+PREFIX  ?= $(HOME)/.local
+BINDIR  := $(PREFIX)/bin
+SCRIPT  := fzfr
+SYMLINKS := fzfr-preview fzfr-open fzfr-remote-reload fzfr-remote-preview fzfr-copy
+
+.PHONY: install uninstall check test examples
+
+install: check
+	@mkdir -p $(BINDIR)
+	install -m 755 $(SCRIPT) $(BINDIR)/$(SCRIPT)
+	@for name in $(SYMLINKS); do \
+	    ln -sf $(BINDIR)/$(SCRIPT) $(BINDIR)/$$name; \
+	    echo "  symlink: $(BINDIR)/$$name"; \
+	done
+	@echo "Installed $(BINDIR)/$(SCRIPT)"
+	@echo ""
+	@echo "Make sure $(BINDIR) is in your PATH:"
+	@echo "  echo 'export PATH=\"$$HOME/.local/bin:\$$PATH\"' >> ~/.bashrc"
+
+uninstall:
+	@rm -f $(BINDIR)/$(SCRIPT)
+	@for name in $(SYMLINKS); do \
+	    rm -f $(BINDIR)/$$name; \
+	    echo "  removed: $(BINDIR)/$$name"; \
+	done
+	@echo "Removed $(BINDIR)/$(SCRIPT)"
+
+test:
+	@command -v python3 >/dev/null 2>&1 || { echo "Error: python3 not found."; exit 1; }
+	@if command -v pytest >/dev/null 2>&1; then \
+	    pytest tests/ -v; \
+	else \
+	    python3 -m unittest discover -s tests -v; \
+	fi
+
+examples:
+	python3 scripts/generate_examples.py
+
+check:
+	@command -v python3 >/dev/null 2>&1 || { \
+	    echo "Error: python3 is required but not found in PATH."; exit 1; }
+	@python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null || { \
+	    echo "Error: Python 3.10 or later is required."; \
+	    echo "Found: $$(python3 --version)"; exit 1; }
+	@command -v fzf >/dev/null 2>&1 || \
+	    echo "Warning: fzf not found — install it before running fzfr."
+	@command -v fd >/dev/null 2>&1 || \
+	    echo "Warning: fd not found — install it before running fzfr."
+	@echo "Prerequisites OK"
