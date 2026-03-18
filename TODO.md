@@ -66,3 +66,17 @@ Manage files directly from the fzf interface after finding them.
 - Start with `rm` only; add `mv`/`cp` once `rm` is proven solid
 
 **Complexity:** Low (leverages existing fzf patterns and `_tty_prompt`)
+
+---
+
+## Core Features / UI
+
+### Major Mode Switcher
+*   **Goal:** Provide an intuitive way to switch between different major operational modes (e.g., `files`, `git-log`, `docker-ps`).
+*   **User Benefit:** Improves navigability and makes `fzfr` more versatile without restarting the terminal.
+*   **Implementation Notes:**
+    *   Implement as a global keybinding (e.g., `ctrl-m`).
+    *   The keybinding will launch a *new, temporary `fzf` instance* displaying a list of available major modes.
+    *   Selecting a mode from this list will cause the current `fzfr` session to exit and immediately re-launch itself in the chosen mode (e.g., `fzfr git-log`).
+    *   This requires changes to the configuration structure to support mode-specific keybindings, and a way to load the appropriate keybindings when `fzfr` starts in a given mode.
+*   **Complexity:** Medium (Requires careful coordination of config, state, and relaunch logic.)
