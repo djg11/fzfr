@@ -60,10 +60,13 @@ Make sure `~/.local/bin` is in your `PATH`:
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 ```
 
-**Via pipx** (once published to PyPI):
+**Via pipx or pip:**
 
 ```sh
 pipx install fzfr
+```
+```sh
+pip install fzfr
 ```
 
 **Uninstall:**
@@ -71,6 +74,7 @@ pipx install fzfr
 ```sh
 make uninstall        # if installed via make
 pipx uninstall fzfr   # if installed via pipx
+pip uninstall fzfr    # if installed via pip
 ```
 
 ---
