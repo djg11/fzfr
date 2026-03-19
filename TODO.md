@@ -104,3 +104,73 @@ Manage files directly from the fzf interface after finding them.
     *   Selecting a mode from this list will cause the current `fzfr` session to exit and immediately re-launch itself in the chosen mode (e.g., `fzfr git-log`).
     *   This requires changes to the configuration structure to support mode-specific keybindings, and a way to load the appropriate keybindings when `fzfr` starts in a given mode.
 *   **Complexity:** Medium (Requires careful coordination of config, state, and relaunch logic.)
+
+---
+
+## Remote Agent: Transience Improvements (Zero Friction)
+
+The current remote execution model pipes the full script to `python3 -` on the
+remote host and caches it at `~/.cache/fzfr/<hash>.py` for performance. Two
+improvements add "transience" without any user-facing friction or setup:
+
+### 1. In-Memory Execution via `memfd_create`
+
+On Linux, `memfd_create` creates a file descriptor backed entirely
+by RAM — nothing ever touches disk. The bootstrap would be modified to write
+the script to a `memfd` and exec from it, rather than caching to `~/.cache`.
+
+```python
+import ctypes, os, sys
+fd = ctypes.CDLL(None).memfd_create(b"fzfr", 0)
+os.write(fd, script_bytes)
+os.execve(f"/proc/self/fd/{fd}", [sys.executable] + sys.argv, os.environ)
+```
+
+- **Security win:** No files ever touch the remote disk.
+- **Fallback:** macOS has no `memfd_create`. Instead of falling back to `~/.cache`,
+  use the same WORK_BASE logic as the local side — prefer `/dev/shm` (tmpfs, RAM-only)
+  via `mkstemp`, fall back to `tempfile.gettempdir()`. The file is unlinked immediately
+  after `exec` — on Linux, unlinking removes the directory entry while the process keeps
+  the file open via its fd, so no trace remains on disk.
+
+  Priority order on the remote:
+  1. `memfd_create` — Linux, truly anonymous, never touches any filesystem
+  2. `/dev/shm` via `mkstemp` + immediate unlink — Linux/some BSDs, RAM-backed
+  3. `tempfile.gettempdir()` via `mkstemp` + immediate unlink — universal fallback
+- **Performance:** First call still pays the 60KB transfer cost. Subsequent calls
+  re-pipe since there's no cache — consider a session-scoped in-memory cache
+  (store bytes in a variable) so repeated previews within one session stay fast.
+
+### 2. Rename Process Name
+
+The remote agent currently appears in `ps`/`top` as `python3 /path/to/script.py`
+or `python3 -`. It could rename itself to:
+
+```python
+# At the top of the remote agent, after startup:
+import ctypes
+libc = ctypes.CDLL(None)
+new_name = b"python3 fzfr\x00"
+libc.prctl(15, new_name, 0, 0, 0)  # PR_SET_NAME = 15
+```
+
+- **Friction:** Zero.
+- **Result:** Appears as plain `python3 fzfr` in `ps`. Reduces "visual noise".
+- **Note:** Only affects the process name, not the cmdline in `/proc/N/cmdline`.
+
+### 3. What NOT to do
+
+Cryptographic signatures (GPG, Ed25519) were considered and rejected:
+- SSH is already the security boundary.
+- Managing keypairs turns a tool you "just use" into a tool you "have to manage."
+
+**Script size:** Currently 139KB uncompressed / ~40KB with SSH compression.
+This is acceptable for a one-time-per-host transfer — the bootstrap ensures
+subsequent preview calls send only 200 bytes. If `memfd_create` is implemented
+without caching, every preview call pays the transfer cost, making size critical.
+A minification pass in the build script (strip comments, collapse whitespace)
+would target ~20-30KB and should be implemented alongside `memfd_create`.
+
+**Complexity:** Low for process obfuscation; Medium for `memfd_create` with
+fallback and session-scoped caching.
+
