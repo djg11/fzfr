@@ -28,6 +28,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install build
 
+      - name: Build single-file script
+        run: python3 scripts/build_single_file.py
+
       - name: Rename fzfr → fzfr.py for packaging
         # setuptools requires a .py extension to import the module and read
         # VERSION via the dynamic version attr directive in pyproject.toml.

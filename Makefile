@@ -3,14 +3,22 @@ BINDIR  := $(PREFIX)/bin
 SCRIPT  := fzfr
 SYMLINKS := fzfr-preview fzfr-open fzfr-remote-reload fzfr-remote-preview fzfr-copy
 
-.PHONY: install uninstall check test examples
+.PHONY: install uninstall check test build examples
 
-install: check
+build:
+	python3 scripts/build_single_file.py
+	@if command -v pytest >/dev/null 2>&1; then \
+	    pytest tests/ -q; \
+	else \
+	    python3 -m unittest discover -s tests -q; \
+	fi
+
+install: build check
 	@mkdir -p $(BINDIR)
 	install -m 755 $(SCRIPT) $(BINDIR)/$(SCRIPT)
 	@for name in $(SYMLINKS); do \
-	    ln -sf $(BINDIR)/$(SCRIPT) $(BINDIR)/$$name; \
-	    echo "  symlink: $(BINDIR)/$$name"; \
+	    ln -sf $(SCRIPT) $(BINDIR)/$$name; \
+	    echo "  symlink: $(BINDIR)/$$name -> $(SCRIPT)"; \
 	done
 	@echo "Installed $(BINDIR)/$(SCRIPT)"
 	@echo ""

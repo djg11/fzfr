@@ -138,21 +138,22 @@ All keys are configurable — see [Configuration](#configuration).
   "show_hidden": false,
   "path_format": "relative",
   "exclude_patterns": [],
+  "max_stream_mb": 100,
   "keybindings": {
-    "toggle_mode":          "ctrl-t",
-    "toggle_ftype":         "ctrl-d",
-    "toggle_hidden":        "ctrl-h",
-    "filter_ext":           "ctrl-f",
-    "add_exclude":          "ctrl-x",
-    "refresh_list":         "ctrl-r",
-    "sort_list":            "ctrl-s",
-    "copy_path":            "ctrl-c",
-    "open_file":            "enter",
+    "toggle_mode":            "ctrl-t",
+    "toggle_ftype":           "ctrl-d",
+    "toggle_hidden":          "ctrl-h",
+    "filter_ext":             "ctrl-f",
+    "add_exclude":            "ctrl-x",
+    "refresh_list":           "ctrl-r",
+    "sort_list":              "ctrl-s",
+    "copy_path":              "ctrl-c",
+    "open_file":              "enter",
     "preview_half_page_down": "alt-j",
     "preview_half_page_up":   "alt-k",
-    "history_prev":         "ctrl-p",
-    "history_next":         "ctrl-n",
-    "exit":                 "esc"
+    "history_prev":           "ctrl-p",
+    "history_next":           "ctrl-n",
+    "exit":                   "esc"
   }
 }
 ```
@@ -165,6 +166,7 @@ All keys are configurable — see [Configuration](#configuration).
 - `editor` — overrides `$EDITOR`. Supports flags, e.g. `"code --wait"`.
 - `search_history` — set to `true` to persist search queries across sessions. Disabled by default as queries may contain sensitive terms (filenames, hostnames). Use `CTRL-P`/`CTRL-N` to navigate history when enabled.
 - `exclude_patterns` — glob patterns always excluded from search, e.g. `[".git", "node_modules", "*.pyc"]`. Additional patterns can be added at runtime with `CTRL-X`.
+- `max_stream_mb` — maximum size in MB for streaming a remote binary file locally for opening. Files larger than this are refused with an error. Set to `0` to disable the limit. Default: `100`.
 
 ---
 
@@ -210,9 +212,10 @@ Sub-commands are created as symlinks by `make install` and can also be called di
 make test       # run unit tests (no dependencies beyond python3)
 ```
 
-The unit tests cover the pure-Python logic layer — quoting, path safety,
-config merging, extension parsing, and argument building. They run without
-`fzf`, `fd`, `rga`, or SSH.
+104 unit tests cover the pure-Python logic: quoting, path safety, config merging,
+extension parsing, argument building, archive classification, state management,
+backend dispatch, and script self-location. They run without `fzf`, `fd`, `rga`,
+or SSH.
 
 The subprocess, SSH, and fzf integration paths require live tools. Use this
 manual battery to verify those:
@@ -233,11 +236,57 @@ fzfr local . name
 
 Confirm: preview works for all files, nothing executes, filenames display correctly.
 
-> **Known limitation:** filenames containing a literal newline character (e.g. `$'newline\nfile.txt'`)
-> will appear as two separate entries in the list — one for each fragment. Selecting a fragment
-> shows `[File not found: ...]` in the preview pane. This is an inherent limitation of
-> newline-delimited tools: `fd`, `rga`, and `grep` all use newlines as output separators.
-> Filenames with newlines are extremely rare in practice.
+> **Known limitation:** filenames containing a literal newline character will appear as two
+> separate entries in the list. This is an inherent limitation of newline-delimited tools
+> (`fd`, `rga`, `grep`). Filenames with newlines are extremely rare in practice.
+
+---
+
+## Contributing
+
+The distributable `fzfr` script is built from the source modules in `src/fzfr/`:
+
+```
+src/fzfr/
+  _script.py    VERSION, SELF, SCRIPT_BYTES and bootstrap constants
+  utils.py      subprocess helpers, MIME detection
+  workbase.py   session working directory (prefers /dev/shm)
+  config.py     default config and user config loading
+  tty.py        /dev/tty prompt helper
+  ssh.py        SSH option construction
+  state.py      session state load/save/mutate
+  cache.py      preview output cache
+  archive.py    archive format detection and listing
+  backends.py   LocalBackend / RemoteBackend
+  preview.py    file preview rendering
+  internal.py   fzf callback sub-commands (_internal-*)
+  dispatch.py   _internal-dispatch router
+  open.py       file open logic
+  copy.py       clipboard copy
+  remote.py     SSH remote search and preview
+  search.py     main fzf UI entry point
+scripts/
+  build_single_file.py   concatenates src/ → fzfr
+```
+
+**Workflow:**
+
+```sh
+# Edit a source module, then:
+make build      # rebuild fzfr + run tests
+make install    # install to ~/.local/bin
+
+# Run tests without rebuilding:
+make test
+
+# Run directly from source (local search only — SSH remote preview
+# requires the built file):
+PYTHONPATH=src python3 -m fzfr
+```
+
+The built `fzfr` is committed to the repo so `git clone && make install` works
+without a Python build step. Never edit `fzfr` directly — always edit `src/fzfr/`
+and run `make build`.
 
 ---
 

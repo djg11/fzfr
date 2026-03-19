@@ -2,6 +2,30 @@
 
 ---
 
+## ~~Refactor: Split Source Into Modules + Build Script~~ ✓ Done
+
+The source has been split into `src/fzfr/` modules with `scripts/build_single_file.py`
+producing the distributable `fzfr` file. See the repo structure for details.
+
+---
+
+## Ship src/fzfr/ Package on PyPI (Low Priority)
+
+Currently PyPI and GitHub both ship the built monolithic `fzfr` script.
+This works correctly for all users including SSH remote preview (SCRIPT_BYTES
+contains the full script). The `src/fzfr/` package is development-only.
+
+When the feature set is stable, consider shipping the package instead:
+- Pros: clean Python package structure, individual modules importable
+- Cons: SSH remote preview needs rethinking — SCRIPT_BYTES must still contain
+  the full built script, not just _script.py. Likely solution: ship both the
+  package and the built script, with _find_self() finding the latter.
+
+**Do not attempt until Docker backend, Git integration, and Interactive File
+Operations are implemented and stable.**
+
+---
+
 ## Multi-Host Search
 
 Search across multiple remote machines simultaneously, aggregating results into a single fzf session.

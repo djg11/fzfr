@@ -103,129 +103,122 @@ tokens automatically. These placeholders must therefore be left UNQUOTED in
 the --preview and --bind strings we pass to fzf. Quoting them (e.g. '{q}')
 would cause double-escaping and break filenames with spaces or special chars.
 
-Sub-commands (usable as symlinks or inline sub-commands):
-  fzfr-preview         Preview a file (text / archive / PDF)
-  fzfr-open            Open a selected file in editor or xdg-open
-  fzfr-remote-reload   List or search files on a remote host via ssh+fd/rga
-  fzfr-remote-preview  Preview a file on a remote host
-  fzfr-copy            Copy the selected file path to the clipboard
+Source layout
+-------------
+The distributable fzfr script is built from src/fzfr/ by
+scripts/build_single_file.py. Each module is self-contained with correct
+imports so linters work per-file. The build script strips intra-package
+imports and deduplicates stdlib imports into one block at the top.
 
-Usage (main):
-  fzfr [TARGET] [BASE_PATH] [MODE] [--exclude PATTERN ...]
-  fzfr --help | --version
-
-Arguments:
-  TARGET      local (default) | <ssh-host>
-  BASE_PATH   base directory to search (default: nearest git root or cwd)
-  MODE        name | content (default: content)
-  --exclude   glob pattern to exclude from search (repeatable)
-
-Examples:
-  fzfr
-  fzfr local ~/projects name
-  fzfr user@server ~/documents
-  fzfr myserver /var/log content
-  fzfr local . content --exclude '*.pyc' --exclude '.git'
-
-Configuration (~/.config/fzfr/config):
-  JSON file. All keys are optional; missing keys use the defaults shown.
-
-  {
-    "ssh_multiplexing": false,          // true = fzfr manages its own socket
-    "ssh_control_persist": 60,          // seconds the SSH socket stays open after last use
-    "ssh_strict_host_key_checking": true, // false = defer host key check to ~/.ssh/config
-    "editor": "",                       // override $EDITOR (e.g. "nvim", "code --wait")
-    "default_mode": "content",          // "name" or "content"
-    "search_history": false,             // true = persist search queries across sessions (disabled by default — queries may contain sensitive terms)
-    "show_hidden": false,               // true = show hidden files by default
-    "path_format": "relative",          // "absolute" = full paths, "relative" = paths relative to search root
-    "exclude_patterns": [],             // glob patterns always excluded (e.g. [".git", "*.pyc"])
-    "keybindings": {                    // override any default keybinding
-      "toggle_mode":   "ctrl-t",
-      "toggle_ftype":  "ctrl-d",
-      "toggle_hidden": "ctrl-h",
-      "filter_ext":    "ctrl-f",
-      "add_exclude":   "ctrl-x",
-      "refresh_list":  "ctrl-r",
-      "sort_list":     "ctrl-s",
-      "copy_path":     "ctrl-c",
-      "open_file":     "enter",
-      "history_prev":  "ctrl-p",
-      "history_next":  "ctrl-n",
-      "exit":          "esc"
-    }
-  }
+  _script.py   VERSION, SELF, SCRIPT_BYTES — no intra-package imports
+  utils.py     subprocess helpers, MIME detection, extension parsing
+  workbase.py  session working directory (prefers /dev/shm)
+  config.py    defaults and user config loading
+  tty.py       /dev/tty prompt helper
+  ssh.py       SSH option construction
+  state.py     session state load/save/mutate
+  cache.py     preview output cache
+  archive.py   archive format detection and listing
+  backends.py  Backend protocol, LocalBackend, RemoteBackend
+  preview.py   file preview rendering
+  internal.py  fzf callback sub-commands (_internal-*)
+  dispatch.py  _internal-dispatch router
+  open.py      file open logic (editor, xdg-open, remote streaming)
+  copy.py      clipboard copy sub-command
+  remote.py    SSH remote search and preview
+  search.py    main fzf UI entry point, session lifecycle
 """
 
 import sys as _sys
 
 if _sys.version_info < (3, 10):  # type: ignore[comparison-overlap, unreachable]
-    print(
+    print(  # type: ignore[unreachable]
         f"Error: fzfr requires Python 3.10 or later "
         f"(found {_sys.version_info.major}.{_sys.version_info.minor}).",
         file=_sys.stderr,
     )
     _sys.exit(1)
 
+from dataclasses import dataclass, field
+from enum import Enum, auto
+from pathlib import Path
+from typing import Callable
+from typing import Protocol, runtime_checkable
 import atexit
+import hashlib
 import json
-import re
 import os
+import re
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import sys as _sys
 import tempfile
-
-# DESIGN: time is imported at module level, not inside _cleanup(). Imports
-#         inside functions can fail during interpreter shutdown when the module
-#         table is being torn down — exactly when _cleanup() is most likely to run.
-import hashlib
+import threading
 import time
-from dataclasses import dataclass, field
-from enum import Enum, auto
-from pathlib import Path
-from typing import Callable, Protocol, runtime_checkable
 
-VERSION = "0.9.1"
+# =============================================================================
+# _script.py
+# =============================================================================
 
-# DESIGN: Absolute path to this script, embedded into every fzf --bind and
-#         --preview string as: python3 <SELF> <subcommand> [args]
-#         Using an absolute path instead of the command name means callbacks
-#         work even when this script's directory is not in PATH — the normal
-#         situation when fzf spawns a sub-shell to run a --bind action.
-SELF = (
-    str(Path(__file__).resolve())
-    if "__file__" in globals() and Path(__file__).exists()
-    else None
-)
+VERSION = "0.9.2"
+
+_SHEBANG = b"#!/usr/bin/env python3"
+
+def _is_built_script(path: Path) -> bool:
+    """Return True if path is the built single-file fzfr script.
+
+    Checks for the shebang line rather than file size — size thresholds are
+    fragile as the codebase grows or shrinks.
+    """
+    try:
+        with path.open("rb") as f:
+            return f.read(len(_SHEBANG)) == _SHEBANG
+    except OSError:
+        return False
+
+def _find_self() -> str | None:
+    """Locate the built single-file fzfr script.
+
+    When running from the built file: returns __file__ (the script itself).
+    When running from the src/ package: walks up to the repo root to find
+    the built fzfr, so SCRIPT_BYTES contains the full script for SSH remote
+    preview. Falls back to __file__ if the built file is absent.
+    """
+    here = Path(__file__).resolve()
+    if _is_built_script(here):
+        return str(here)
+    # Package: look for the built fzfr two levels up (src/fzfr/ -> repo root)
+    built = here.parent.parent.parent / "fzfr"
+    if _is_built_script(built):
+        return str(built)
+    # Fallback: running from src/ without a built file.
+    # Local search works fine; SSH remote preview will send the wrong script.
+    import sys as _sys
+    print(
+        "fzfr: warning: built fzfr not found — run 'make build' for SSH remote preview.",
+        file=_sys.stderr,
+    )
+    return str(here) if here.exists() else None
+
+SELF = _find_self()
 
 # PERF:     Read once at import time and reused for every fzfr-remote-preview
 #           call. Without caching, each cursor movement would read ~60 KB from
 #           disk at fzf's typical 50-100 ms preview latency budget.
 # SECURITY: Snapshot is taken at process start. Replacing the source file on
-#           disk after launch has no effect on the running session. A compromised
-#           file before launch would however be frozen here — keep the script
-#           in a directory only writable by the owning user.
+#           disk after launch has no effect on the running session.
 # LIMITATION: If this script is executed via 'python3 -' (stdin), SELF is None
 #             and SCRIPT_BYTES is empty. Remote callbacks then have no script to
 #             pipe and will silently produce no preview output.
 SCRIPT_BYTES = Path(SELF).read_bytes() if SELF else b""
 
-# PERF: SHA-256 hash of the script, used as the remote cache filename.
-#       Computed once at import time from the already-loaded SCRIPT_BYTES.
-#       A new hash means a new cache path, so upgrades are picked up
-#       automatically without any cache invalidation logic.
 SCRIPT_HASH: str = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES else ""
 
-# PERF: Tiny bootstrap script (~200 bytes) sent to the remote instead of the
-#       full ~60 KB script on every preview call. It checks whether the full
-#       script is already cached at ~/.cache/fzfr/<hash>.py:
-#         - Cache hit  → exec the cached copy with the original argv (fast path)
-#         - Cache miss → exit 99 (sentinel) so the local side can upload once
-#       This turns a 60 KB stdin transfer into a ~200 byte transfer for all
-#       subsequent calls after the first visit to a given remote host.
+# PERF: Tiny bootstrap script sent to the remote instead of the full ~60 KB
+#       script on every preview call. Cache hit → exec cached copy; miss → 99.
 SCRIPT_BOOTSTRAP: bytes = f"""import sys,os,subprocess
 p=os.path.expanduser("~/.cache/fzfr/{SCRIPT_HASH}.py")
 if os.path.exists(p):
@@ -234,16 +227,216 @@ if os.path.exists(p):
 sys.exit(99)
 """.encode() if SCRIPT_HASH else b""
 
-# Sentinel exit code returned by SCRIPT_BOOTSTRAP when the remote cache is
-# missing. Must not clash with any exit code used by fzfr-preview itself.
-# fzfr-preview uses: 0 (success), 1 (usage/runtime error), 127 (tool not found).
-# 99 is deliberately chosen outside those ranges. If fzfr-preview ever gains
-# new exit codes, verify they do not collide with this value.
+# Sentinel exit code: remote cache miss. Must not clash with fzfr-preview's
+# own exit codes (0, 1, 127).
 _BOOTSTRAP_CACHE_MISS = 99
+# =============================================================================
+# utils.py
+# =============================================================================
 
+_CAPTURE_DEFAULT_MAX = 4096  # 4 KB
+
+# PDF text extraction can legitimately be large; we cap it here so that
+# a multi-hundred-page PDF does not load megabytes into RAM.
+_CAPTURE_PDF_MAX = 512 * 1024  # 512 KB (~250 pages of dense text)
+
+def _capture(cmd: list[str], max_bytes: int = _CAPTURE_DEFAULT_MAX) -> tuple[str, int]:
+    """Run a command, capture up to max_bytes of stdout, and return (stdout, rc).
+
+    Used when we need the output of a command as a Python string, e.g. to
+    detect MIME types or get the remote $HOME path. Stderr is captured and
+    discarded so it never leaks into the fzf preview pane.
+
+    PERF/SAFETY: Uses Popen + a bounded read instead of
+    subprocess.run(capture_output=True) so that commands producing large
+    output (e.g. pdftotext on a large PDF) cannot exhaust process memory.
+    Output beyond max_bytes is silently truncated; callers that need the
+    full output should use _passthrough() instead.
+
+    Returns ("", 127) if the executable is not found, matching the shell
+    convention for "command not found".
+    """
+    try:
+        with subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        ) as proc:
+            assert proc.stdout is not None
+            chunk = proc.stdout.read(max_bytes)
+            # Drain and discard any remaining output so the child is not
+            # blocked on a full pipe buffer when we call wait().
+            proc.stdout.read()
+            proc.wait()
+            return chunk.decode("utf-8", errors="replace"), proc.returncode
+    except FileNotFoundError:
+        return "", 127
+
+def _passthrough(cmd: list[str], head_n: int | None = None) -> int:
+    """Run a command and let its stdout flow directly to our stdout.
+
+    This is the correct way to run preview commands. Using _capture() and
+    then print()ing the result would buffer the entire output in memory and
+    also strip ANSI colour codes that bat/rga/grep emit — causing the fzf
+    preview pane to show plain, uncoloured text.
+
+    If head_n is given, the output is piped through `head -n <head_n>` so
+    we don't flood the preview pane with thousands of lines from large archives.
+
+    Stderr is suppressed so tool-not-found errors don't appear in the pane;
+    the caller is responsible for printing a user-friendly fallback message.
+
+    Returns the exit code of the main command (not head's exit code), so
+    callers can decide whether to try a fallback tool.
+    """
+    try:
+        if head_n is not None:
+            p1 = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            p2 = subprocess.Popen(["head", "-n", str(head_n)], stdin=p1.stdout)
+            assert p1.stdout is not None
+            p1.stdout.close()  # allows p1 to receive SIGPIPE when p2 exits early
+            p2.wait()
+            p1.wait()
+            # DESIGN: p1 may exit with SIGPIPE (rc=141) because head closed the
+            #         read end of the pipe before p1 finished writing. That is
+            #         normal and expected; we treat p2's success as overall success.
+            return 0 if p2.returncode == 0 else p1.returncode
+        else:
+            r = subprocess.run(cmd, stderr=subprocess.DEVNULL)
+            return r.returncode
+    except FileNotFoundError:
+        return 127
+
+def _try_run(commands: list[list[str]], status_msg: str) -> int:
+    """Execute each command in sequence until one returns success (0).
+
+    Three outcomes per command:
+      rc == 0    success → return immediately, no message printed.
+      rc == 127  tool not installed → skip silently, try next in chain.
+      anything else  tool ran but failed (e.g. no matches) → stop here,
+                     print status_msg, return rc. No point trying the next
+                     tool; the failure is definitive.
+
+    DESIGN: Centralises tool-fallback logic (e.g. bat → cat) so each call site
+            states the preference chain rather than implementing it. rc==127 is
+            the shell convention for "command not found" and is the only case
+            where we silently move to the next option; any other failure is
+            definitive and stops the chain.
+    """
+    last_rc = 127
+    for cmd in commands:
+        # PERF: Skip the fork entirely if the tool is known-absent at startup.
+        #       _passthrough() would catch FileNotFoundError and return 127,
+        #       but that still costs a fork()+exec() pair on every call.
+        if cmd[0] not in AVAILABLE_TOOLS:
+            continue
+        rc = _passthrough(cmd)
+        if rc == 0:
+            return 0
+        last_rc = rc
+        if rc == 127:
+            continue  # tool not found (PATH changed at runtime), try next
+        break  # tool ran but failed — stop here
+    if status_msg:
+        print(f"[{status_msg}]")
+    return last_rc
+
+def _get_mime(filepath: str) -> str:
+    """Return the MIME type of a file as reported by file(1), e.g. 'text/plain'.
+
+    Uses the -b (brief) flag to suppress the filename prefix in the output.
+    Uses -L to dereference symlinks and report the type of the target file.
+    Returns an empty string if file(1) is unavailable or fails.
+    """
+    out, rc = _capture(["file", "-L", "--mime-type", "-b", filepath])
+    return out.strip() if rc == 0 else ""
+
+def _is_text_mime(mime: str) -> bool:
+    """Return True if the MIME type indicates a file that can be opened in a text editor.
+
+    Covers plain text and the most common structured-text application types.
+    Used to decide between opening with an editor vs. xdg-open.
+
+    inode/x-empty is included because zero-byte files should open in the editor
+    rather than xdg-open — a new empty file is almost always a text file.
+    """
+    return mime.startswith("text/") or mime in (
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "inode/x-empty",
+    )
+
+def _parse_extensions(ext_str: str) -> list[str]:
+    """Sanitize and split a whitespace-separated string of extensions.
+
+    Removes leading dots, strips whitespace, and discards empty entries.
+    Example: ".txt  .pdf py" -> ["txt", "pdf", "py"]
+
+    SECURITY: Only alphanumeric characters are accepted after dot-stripping.
+    A crafted extension like "py $(rm -rf ~)" or "py;evil" would survive
+    shlex.quote at one shell level but could break out at a second level
+    (e.g. inside a remote shell command or a glob argument). Rejecting
+    non-alphanumeric values here closes that path entirely — the offending
+    token is silently dropped rather than passed to fd/rga/grep.
+    """
+    result = []
+    for raw in ext_str.split():
+        e = raw.lstrip(".").strip()
+        if not e:
+            continue
+        if not re.fullmatch(r"[A-Za-z0-9]+", e):
+            print(
+                f"Warning: ignoring unsafe extension {raw!r} "
+                "(only alphanumeric characters are allowed)",
+                file=sys.stderr,
+            )
+            continue
+        result.append(e)
+    return result
 
 # =============================================================================
-# User configuration
+# workbase.py
+# =============================================================================
+
+def _get_work_base() -> Path:
+    """Find the best place for temporary files (RAM-backed if possible).
+
+    Prefers /dev/shm (Linux tmpfs) for low-latency I/O; falls back to the
+    system temp directory on macOS and BSD.
+    """
+    shm = Path("/dev/shm")
+    if shm.is_dir() and os.access(shm, os.W_OK):
+        return shm / "fzfr"
+    return Path(tempfile.gettempdir()) / "fzfr"
+
+WORK_BASE = _get_work_base()
+# PERF: /dev/shm is a RAM-backed tmpfs on Linux. Placing the session directory,
+#       state file, and preview temp files here avoids disk I/O for files that
+#       are created and deleted on every cursor movement.
+# SECURITY: /dev/shm has the sticky bit set but is world-writable, so an
+#           attacker on the same machine could pre-create a symlink at our
+#           intended path to redirect session files to a location they control.
+#           We check for a symlink both before and after mkdir to close the
+#           TOCTOU window: an attacker who wins the race between the first check
+#           and mkdir would cause mkdir to follow the symlink and create a
+#           directory at the symlink target — the post-mkdir check catches that.
+def _assert_not_symlink(p: Path) -> None:
+    if p.is_symlink():
+        print(
+            f"Error: {p} is a symlink — refusing to use it as the work "
+            "directory. Remove the symlink and retry.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+_assert_not_symlink(WORK_BASE)
+WORK_BASE.mkdir(parents=True, exist_ok=True)
+_assert_not_symlink(WORK_BASE)
+# =============================================================================
+# config.py
 # =============================================================================
 
 CONFIG_PATH = Path.home() / ".config" / "fzfr" / "config"
@@ -278,6 +471,11 @@ _CONFIG_DEFAULTS: dict = {
     # by default. Can be toggled at runtime with a keybinding.
     "show_hidden": False,
     "exclude_patterns": [],  # List of glob patterns to exclude from search
+    # Maximum size in MB for streaming a remote binary file to a local temp
+    # file for xdg-open. Files larger than this are refused with an error
+    # message. WORK_BASE is on tmpfs (RAM-backed), so large files consume
+    # memory. Set to 0 to disable the limit (not recommended).
+    "max_stream_mb": 100,
     "keybindings": {
         "toggle_mode": "ctrl-t",
         "toggle_ftype": "ctrl-d",
@@ -299,7 +497,6 @@ _CONFIG_DEFAULTS: dict = {
     # "relative" — paths relative to the search root (e.g. src/foo.py)
     "path_format": "relative",
 }
-
 
 def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) -> None:
     """Validate and merge one user config value into cfg.
@@ -352,7 +549,6 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
             return
         cfg[key] = user_value
 
-
 def load_config() -> dict:
     """Load ~/.config/fzfr/config (JSON) and merge with defaults.
 
@@ -374,7 +570,6 @@ def load_config() -> dict:
     except json.JSONDecodeError as exc:
         print(f"Warning: could not parse {CONFIG_PATH}: {exc}", file=sys.stderr)
     return cfg
-
 
 # PERF: Loaded once at import time so every sub-command invocation (including
 #       the short-lived fzf callback processes) shares the same config without
@@ -435,474 +630,135 @@ HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
 #           fzf creates the file if it doesn't exist, so we touch it here to
 #           ensure correct permissions from the start.
 HISTORY_PATH.touch(mode=0o600, exist_ok=True)
-
-
 # =============================================================================
-# Core data structures
+# tty.py
 # =============================================================================
 
+def _tty_prompt(prompt_text: str) -> str | None:
+    """Display a prompt on the terminal and return the user's input.
 
-@dataclass
-class SearchContext:
-    """Consolidates path and connection state for a fzfr session."""
+    Opens /dev/tty directly so the prompt works even when fzf has redirected
+    stdin and stdout for its own UI. Clears the screen before showing the
+    prompt so the fzf UI does not visually interfere with the input line.
 
-    remote: str  # SSH host string, e.g. "user@host", or "" for local
-    safe_remote: str  # shlex.quote(remote)
-    base_path: str  # absolute base directory to search
-    safe_base: str  # shlex.quote(base_path)
-    target: str = "local"
-    # ControlPath socket managed by fzfr, or "" to rely on ~/.ssh/config.
-    # Non-empty only when config["ssh_multiplexing"] is True.
-    ssh_control: str = field(default="")
-    ftype: str = "f"  # "f" for files, "d" for directories
-    ext: str = ""  # file extension filter, e.g. "py"
-    exclude_patterns: list[str] = field(default_factory=list)  # exclude patterns
-    self_path: Path | None = None  # path to the script (original or frozen)
+    Returns the stripped input string, or None if /dev/tty is unavailable
+    (e.g. Docker containers without a TTY, CI runners, nested fzf sessions).
 
-
-# =============================================================================
-# Backend abstraction  (LocalBackend / RemoteBackend)
-# =============================================================================
-#
-# Almost every action in fzfr has a local variant and a remote variant.
-# Previously this split lived as inline `if ctx.remote:` branches scattered
-# across cmd_dispatch and _open.
-#
-# The Backend Protocol centralises the divergence into two concrete classes.
-# Call sites ask the backend what to do; they never inspect ctx.remote directly.
-#
-# The backend instance is constructed once in cmd_search (from SearchContext)
-# and re-constructed from the state dict in cmd_dispatch — exactly the places
-# where we already know whether the session is local or remote.
-
-
-@runtime_checkable
-class Backend(Protocol):
-    """Operations that differ between local-filesystem and SSH-remote sessions."""
-
-    base_path: str  # absolute search root for this session
-    ssh_control: str  # ControlPath socket, or "" to defer to ~/.ssh/config
-
-    def resolve_base(self, raw: str) -> str:
-        """Expand a raw path argument to an absolute path for this backend.
-
-        For local backends, resolves relative paths and ~ via pathlib.
-        For remote backends, asks the remote shell to expand ~ and pwd.
-        """
-        ...
-
-    def is_safe_subpath(self, path: str) -> bool:
-        """Return True if path resolves to a location inside base_path.
-
-        Uses realpath / os.path.realpath to follow symlinks before checking,
-        so symlinks pointing outside the search root are correctly blocked.
-        """
-        ...
-
-    def is_dir(self, path: str) -> bool:
-        """Return True if path is a directory (following symlinks)."""
-        ...
-
-    def get_mime(self, path: str) -> str:
-        """Return the MIME type string for path, e.g. 'text/plain'.
-
-        Returns "" if file(1) is unavailable or fails.
-        """
-        ...
-
-    def preview(self, filename: str, query: str, mode: str) -> int:
-        """Render a preview of filename to stdout. Returns exit code."""
-        ...
-
-    def reload(self, query: str, ftype: str, ext: str, mode: str) -> int:
-        """Emit the file/match list to stdout for fzf to display. Returns exit code."""
-        ...
-
-    def initial_list_cmd(self, frozen_self: Path) -> list[str]:
-        """Return the argv list for the initial file list (name-mode only)."""
-        ...
-
-
-class LocalBackend:
-    """Backend implementation for local filesystem searches."""
-
-    def __init__(
-        self,
-        base_path: str,
-        ssh_control: str = "",
-        cache: "_PreviewCache | None" = None,
-        frozen_self: "Path | None" = None,
-        exclude_patterns: list[str] | None = None,
-    ) -> None:
-        self.base_path = base_path
-        self.ssh_control = ssh_control  # unused locally; kept for Protocol compat
-        self._cache = cache
-        self._frozen_self = frozen_self  # frozen script path for cache-miss subprocess
-        self.exclude_patterns = exclude_patterns if exclude_patterns is not None else []
-
-    def resolve_base(self, raw: str) -> str:
-        if raw:
-            return str(Path(raw).resolve())
-        git_root = _find_git_root()
-        return git_root if git_root else str(Path.cwd().resolve())
-
-    def is_safe_subpath(self, path: str) -> bool:
-        try:
-            return Path(path).resolve().is_relative_to(Path(self.base_path).resolve())
-        except (FileNotFoundError, ValueError):
-            return False
-
-    def is_dir(self, path: str) -> bool:
-        return Path(path).is_dir()
-
-    def get_mime(self, path: str) -> str:
-        return _get_mime(path)
-
-    def preview(self, filename: str, query: str, mode: str) -> int:
-        # PERF: Check the preview cache before spawning any subprocess.
-        #       Cache key: path + nanosecond mtime (detects file changes) + query
-        #       (different queries produce different highlighted output).
-        cache = self._cache
-        mtime: int | None = None
-        cache_key: str = ""
-        if cache is not None:
-            mtime = _PreviewCache._local_mtime(filename)
-            if mtime is not None:
-                cache_key = f"local:{filename}:{mtime}:{query}"
-                hit = cache.get(cache_key)
-                if hit is not None:
-                    sys.stdout.buffer.write(hit)
-                    sys.stdout.buffer.flush()
-                    return 0
-
-        # Cache miss: build the argv for cmd_preview.
-        preview_args = [filename]
-        if mode == "content":
-            preview_args.append(query)
-
-        if cache is not None and mtime is not None and self._frozen_self is not None:
-            # DESIGN: _passthrough() uses subprocess.run with inherited stdout,
-            #         so Python-level stdout redirection cannot capture its output.
-            #         We re-invoke this script as a subprocess with capture_output=True
-            #         to collect the rendered bytes, then replay them and cache.
-            #         The extra fork cost (~5 ms) is paid only on a cache miss;
-            #         all subsequent visits to the same file cost ~0.1 ms.
-            r = subprocess.run(
-                [sys.executable, str(self._frozen_self), "fzfr-preview"] + preview_args,
-                capture_output=True,
-            )
-            data = r.stdout
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-            if r.returncode == 0:
-                cache.put(cache_key, data)
-            return r.returncode
-
-        return cmd_preview(preview_args)
-
-    def reload(
-        self,
-        query: str,
-        ftype: str,
-        ext: str,
-        mode: str,
-        hidden: bool = False,
-        exclude_patterns: list[str] | None = None,
-        path_format: str = "absolute",
-    ) -> int:
-        if exclude_patterns is None:
-            exclude_patterns = []
-        fd_args = ["fd", "-L", "--type", ftype]
-        if hidden:
-            fd_args.append("--hidden")
-        for e in _parse_extensions(ext):
-            fd_args += ["-e", e]
-        for p in exclude_patterns:
-            fd_args += ["-E", p]
-
-        # DESIGN: For relative paths, run fd from base_path (cwd) with root "."
-        #         so output is relative to the search root. For absolute paths,
-        #         pass base_path as the search root so fd emits full paths.
-        if path_format == "relative":
-            fd_root, fd_cwd = ["."], self.base_path
-        else:
-            fd_root, fd_cwd = [".", self.base_path], None
-
-        if mode == "name":
-            return subprocess.run(fd_args + fd_root, cwd=fd_cwd).returncode
-
-        if query:
-            return _local_content_search(
-                fd_args, fd_root, fd_cwd, query, ext, hidden, self.base_path, path_format
-            )
-
-        return subprocess.run(fd_args + fd_root, cwd=fd_cwd).returncode
-
-    def initial_list_cmd(
-        self, __: Path, hidden: bool = False, exclude_patterns: list[str] | None = None,
-        path_format: str = "absolute",
-    ) -> list[str]:
-        if exclude_patterns is None:
-            exclude_patterns = []
-        args = ["fd", "-L", "--type", "f"]
-        if hidden:
-            args.append("--hidden")
-        for p in exclude_patterns:
-            args += ["-E", p]
-        if path_format == "relative":
-            return args + ["."]
-        return args + [".", self.base_path]
-
-
-class RemoteBackend:
-    """Backend implementation for SSH-remote searches."""
-
-    def __init__(
-        self,
-        remote: str,
-        base_path: str,
-        ssh_control: str = "",
-        cache: "_PreviewCache | None" = None,
-        exclude_patterns: list[str] | None = None,
-    ) -> None:
-        self.remote = remote
-        self.base_path = base_path
-        self.ssh_control = ssh_control
-        self._cache = cache
-        self.exclude_patterns = exclude_patterns if exclude_patterns is not None else []
-
-    def _ssh(self) -> list[str]:
-        """Return the base SSH argv prefix: ["ssh", <opts...>, <remote>]."""
-        return ["ssh"] + _ssh_opts(self.ssh_control) + [self.remote]
-
-    def resolve_base(self, raw: str) -> str:
-        return _resolve_remote_path(self.remote, raw, self.ssh_control)
-
-    def is_safe_subpath(self, path: str) -> bool:
-        ssh_base = self._ssh()
-        out_path, rc_path = _capture(
-            ssh_base + [shlex.join(["realpath", "-e", "--", path])]
-        )
-        if rc_path != 0:
-            return False
-        out_base, rc_base = _capture(
-            ssh_base + [shlex.join(["realpath", "-e", "--", self.base_path])]
-        )
-        if rc_base != 0:
-            return False
-        resolved_path = out_path.strip()
-        resolved_base = out_base.strip()
-        if not resolved_path or not resolved_base:
-            return False
-        base_prefix = resolved_base.rstrip("/") + "/"
-        return resolved_path == resolved_base or resolved_path.startswith(base_prefix)
-
-    def is_dir(self, path: str) -> bool:
-        _, rc = _capture(self._ssh() + [shlex.join(["test", "-d", path])])
-        return rc == 0
-
-    def get_mime(self, path: str) -> str:
-        out, rc = _capture(
-            self._ssh()
-            + [shlex.join(["file", "-L", "--mime-type", "-b", path]) + " 2>/dev/null"]
-        )
-        return out.strip() if rc == 0 else ""
-
-    def preview(self, filename: str, query: str, mode: str) -> int:
-        # PERF: Debounce remote previews to avoid thrashing SSH connections
-        #       during fast scrolling. 50 ms is negligible for SSH latency but
-        #       saves many redundant round-trips during fast cursor movement.
-        time.sleep(0.05)
-
-        full_path = (
-            filename
-            if Path(filename).is_absolute()
-            else str(Path(self.base_path) / filename)
-        )
-
-        # PERF: Check cache before paying the SSH round-trip + ~60 KB script
-        #       transfer cost. Remote mtime requires one extra SSH call, but on
-        #       a multiplexed connection that is ~5 ms vs ~200 ms for the full
-        #       preview — a net saving of ~195 ms on every cache hit.
-        cache = self._cache
-        mtime: str | None = None
-        cache_key: str = ""
-        if cache is not None:
-            mtime = _PreviewCache._remote_mtime(self._ssh(), full_path)
-            if mtime is not None:
-                cache_key = f"remote:{self.remote}:{full_path}:{mtime}:{query}"
-                hit = cache.get(cache_key)
-                if hit is not None:
-                    sys.stdout.buffer.write(hit)
-                    sys.stdout.buffer.flush()
-                    return 0
-
-        args = [self.remote, self.base_path, self.ssh_control, filename]
-        if mode == "content":
-            args.append(query)
-
-        if cache is not None and mtime is not None:
-            # Capture the SSH preview output so we can cache it before replay.
-            rc, data = _cmd_remote_preview_capture(args)
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
-            if rc == 0:
-                cache.put(cache_key, data)
-            return rc
-
-        return cmd_remote_preview(args)
-
-    def reload(
-        self,
-        query: str,
-        ftype: str,
-        ext: str,
-        mode: str,
-        hidden: bool = False,
-        exclude_patterns: list[str] | None = None,
-        path_format: str = "absolute",
-    ) -> int:
-        if exclude_patterns is None:
-            exclude_patterns = []
-        args = [self.remote, self.base_path, self.ssh_control, ftype, ext]
-        # DESIGN: query is only a content search term in content mode.
-        #         In name mode it is fzf's fuzzy filter string — it must NOT
-        #         be forwarded to cmd_remote_reload, which would interpret any
-        #         non-empty string as a grep/rga content query and return
-        #         content matches instead of a file listing for fzf to filter.
-        if mode == "content" and query:
-            args.append(query)
-        if hidden:
-            args.append("--hidden")
-        for p in exclude_patterns:
-            args.append("--exclude")
-            args.append(p)
-        if path_format == "relative":
-            args.append("--relative")
-        return cmd_remote_reload(args)
-
-    def initial_list_cmd(
-        self, frozen_self: Path, hidden: bool = False, exclude_patterns: list[str] | None = None,
-        path_format: str = "absolute",
-    ) -> list[str]:
-        if exclude_patterns is None:
-            exclude_patterns = []
-        args = [
-            sys.executable,
-            str(frozen_self),
-            "fzfr-remote-reload",
-            self.remote,
-            self.base_path,
-            self.ssh_control,
-            "f",
-            "",
-        ]
-        if hidden:
-            args.append("--hidden")
-        for p in exclude_patterns:
-            args.append("--exclude")
-            args.append(p)
-        if path_format == "relative":
-            args.append("--relative")
-        return args
-
-
-def backend_from_state(state: dict) -> LocalBackend | RemoteBackend:
-    """Reconstruct the appropriate backend from a persisted state dict.
-
-    Called at the start of every cmd_dispatch invocation. The state dict
-    carries all the fields needed to build either backend type, including
-    the session dir (derived from self_path) needed to locate the cache.
+    DESIGN: Centralises all tty interaction so any future prompt (extension
+            filter, search query, rename, etc.) reuses the same clear-and-ask
+            pattern without duplicating tty open/close or error handling.
     """
-    remote = state.get("remote", "")
-    base_path = state.get("base_path", "")
-    ssh_control = state.get("ssh_control", "")
-    exclude_patterns = state.get("exclude_patterns", [])
-    cache = _PreviewCache.from_state(state)
-    if remote:
-        return RemoteBackend(
-            remote,
-            base_path,
-            ssh_control,
-            cache=cache,
-            exclude_patterns=exclude_patterns,
-        )
-    self_path_str = state.get("self_path", "")
-    frozen_self = (
-        Path(self_path_str) if self_path_str and self_path_str != "None" else None
-    )
-    return LocalBackend(
-        base_path,
-        ssh_control,
-        cache=cache,
-        frozen_self=frozen_self,
-        exclude_patterns=exclude_patterns,
-    )
+    try:
+        with open("/dev/tty", "w") as tty_out:
+            # Clear screen and move cursor to top-left before prompting so the
+            # fzf UI does not visually bleed into the input line.
+            tty_out.write("\033[2J\033[H")
+            tty_out.write(prompt_text)
+            tty_out.flush()
+        with open("/dev/tty", "r") as tty_in:
+            return tty_in.readline().strip()
+    except OSError:
+        return None
 
 
 # =============================================================================
-# Local content search helper
+# ssh.py
 # =============================================================================
 
+def _ssh_opts(ssh_control: str) -> list[str]:
+    """Return SSH multiplexing flags, or [] to let ~/.ssh/config decide.
 
-def _local_content_search(
-    fd_args: list[str],
-    fd_root: list[str],
-    fd_cwd: str | None,
-    query: str,
-    ext: str,
-    hidden: bool,
-    base_path: str,
-    path_format: str,
-) -> int:
-    """Run a local content search using rga or fd+grep fallback.
+    Empty ssh_control (the default) → no flags injected. ssh falls through
+    to whatever ControlMaster/ControlPath is in ~/.ssh/config. This is the
+    right behaviour for users who already have multiplexing configured and
+    don't want a second master connection (e.g. YubiKey users).
 
-    Returns the exit code of the search command. rga is preferred when
-    available; fd | xargs grep is used as a fallback.
+    Non-empty ssh_control → inject ControlMaster=auto + the given socket
+    path so fzfr manages its own dedicated multiplexed connection.
+    Activated only when config["ssh_multiplexing"] is True.
     """
-    if "rga" in AVAILABLE_TOOLS:
-        # PERF: Check AVAILABLE_TOOLS before forking. Previously this called
-        #       subprocess.run(["rga", ...]) and caught FileNotFoundError —
-        #       a wasted fork()+exec() on every keystroke when rga is absent.
-        rga_cmd = ["rga"]
-        if hidden:
-            rga_cmd.append("--hidden")
-        for e in _parse_extensions(ext):
-            rga_cmd += ["-g", f"*.{e}"]
-        rga_cmd += [
-            "--files-with-matches",
-            "--fixed-strings",
-            query,
-            "." if path_format == "relative" else base_path,
+    opts = []
+    if ssh_control:
+        persist = int(CONFIG.get("ssh_control_persist", 60))
+        opts += [
+            "-o",
+            "ControlMaster=auto",
+            "-o",
+            f"ControlPath={ssh_control}",
+            "-o",
+            f"ControlPersist={persist}",
         ]
-        r = subprocess.run(rga_cmd, cwd=fd_cwd, stderr=subprocess.DEVNULL)
-        if r.returncode == 0:
-            return 0
-        # rga found but returned non-zero — no matches, don't fallback
-        # to grep (different tool, different scope). Return as-is.
-        return r.returncode
+        # SECURITY: Enforce host key checking and use a temporary known_hosts
+        #           file to prevent MITM attacks and avoid modifying the user's
+        #           global ~/.ssh/known_hosts for transient connections.
+        if CONFIG.get("ssh_strict_host_key_checking", True):
+            known_hosts_path = Path(ssh_control).parent / "known_hosts"
+            # SECURITY: Touch the known_hosts file with 0o600 before the first
+            #           SSH call. Without this, the file inherits the user's
+            #           umask (often 0o644), making host keys world-readable.
+            #           touch() is a no-op if the file already exists.
+            known_hosts_path.touch(mode=0o600, exist_ok=True)
+            opts += [
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                f"UserKnownHostsFile={known_hosts_path}",
+            ]
+    return opts
 
-    # grep fallback (rga absent): fd -0 | xargs -P4 grep
-    # PERF: -P4 parallelises grep across up to 4 worker processes,
-    #       significantly speeding up content searches on large repos.
-    p1 = subprocess.Popen(
-        fd_args + ["-0"] + fd_root,
-        cwd=fd_cwd,
-        stdout=subprocess.PIPE,
-    )
-    assert p1.stdout is not None
-    p1.stdout.close()
-    p2 = subprocess.run(
-        ["xargs", "-P4", "-0", "grep", "-ilF", query], stdin=p1.stdout
-    )
-    p1.wait()
-    return p2.returncode
+def _ssh_opts_str(ssh_control: str) -> str:
+    """Shell-quoted string form of _ssh_opts(), for embedding in shell commands."""
+    return " ".join(shlex.quote(o) for o in _ssh_opts(ssh_control))
+
+# =============================================================================
+# state.py
+# =============================================================================
+
+def _save_state(path: Path, state: dict) -> None:
+    """Atomically save the session state to a JSON file."""
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state))
+    tmp.replace(path)
+
+def _load_state(path: Path) -> dict:
+    """Load the session state from a JSON file.
+
+    SECURITY: Validates that the path is inside WORK_BASE before reading.
+              State paths arrive as argv elements from fzf bind callbacks;
+              rejecting paths outside our session directory prevents an
+              attacker from pointing fzfr at an arbitrary file on disk.
+    """
+    try:
+        if not path.resolve().is_relative_to(WORK_BASE.resolve()):
+            return {}
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return {}
+
+def _mutate_state(path: Path, fn: "Callable[[dict], None]") -> int:
+    """Load the state file, apply fn(state) in-place, then save atomically.
+
+    All three internal state commands (set, toggle, prompt) share the same
+    load → mutate → save pattern. Centralising it here removes the repeated
+    boilerplate and ensures every mutation goes through the atomic _save_state
+    path rather than a direct write.
+
+    Returns 0 on success, 1 if the state file is missing or fn raises.
+    """
+    state = _load_state(path)
+    if not state:
+        return 1
+    try:
+        fn(state)
+    except Exception:
+        return 1
+    _save_state(path, state)
+    return 0
 
 
 # =============================================================================
-# Preview result cache
+# cache.py
 # =============================================================================
-
 
 class _PreviewCache:
     """File-backed preview output cache keyed on (path, mtime_ns, query).
@@ -998,668 +854,10 @@ class _PreviewCache:
             return None
 
 
-def _get_work_base() -> Path:
-    """Find the best place for temporary files (RAM-backed if possible).
-
-    Prefers /dev/shm (Linux tmpfs) for low-latency I/O; falls back to the
-    system temp directory on macOS and BSD.
-    """
-    shm = Path("/dev/shm")
-    if shm.is_dir() and os.access(shm, os.W_OK):
-        return shm / "fzfr"
-    return Path(tempfile.gettempdir()) / "fzfr"
-
-
-WORK_BASE = _get_work_base()
-# PERF: /dev/shm is a RAM-backed tmpfs on Linux. Placing the session directory,
-#       state file, and preview temp files here avoids disk I/O for files that
-#       are created and deleted on every cursor movement.
-# SECURITY: /dev/shm has the sticky bit set but is world-writable, so an
-#           attacker on the same machine could pre-create a symlink at our
-#           intended path to redirect session files to a location they control.
-#           We check for a symlink both before and after mkdir to close the
-#           TOCTOU window: an attacker who wins the race between the first check
-#           and mkdir would cause mkdir to follow the symlink and create a
-#           directory at the symlink target — the post-mkdir check catches that.
-def _assert_not_symlink(p: Path) -> None:
-    if p.is_symlink():
-        print(
-            f"Error: {p} is a symlink — refusing to use it as the work "
-            "directory. Remove the symlink and retry.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-_assert_not_symlink(WORK_BASE)
-WORK_BASE.mkdir(parents=True, exist_ok=True)
-_assert_not_symlink(WORK_BASE)
-
-
 # =============================================================================
-# SSH helpers
+# archive.py
 # =============================================================================
 
-
-def _ssh_opts(ssh_control: str) -> list[str]:
-    """Return SSH multiplexing flags, or [] to let ~/.ssh/config decide.
-
-    Empty ssh_control (the default) → no flags injected. ssh falls through
-    to whatever ControlMaster/ControlPath is in ~/.ssh/config. This is the
-    right behaviour for users who already have multiplexing configured and
-    don't want a second master connection (e.g. YubiKey users).
-
-    Non-empty ssh_control → inject ControlMaster=auto + the given socket
-    path so fzfr manages its own dedicated multiplexed connection.
-    Activated only when config["ssh_multiplexing"] is True.
-    """
-    opts = []
-    if ssh_control:
-        persist = int(CONFIG.get("ssh_control_persist", 60))
-        opts += [
-            "-o",
-            "ControlMaster=auto",
-            "-o",
-            f"ControlPath={ssh_control}",
-            "-o",
-            f"ControlPersist={persist}",
-        ]
-        # SECURITY: Enforce host key checking and use a temporary known_hosts
-        #           file to prevent MITM attacks and avoid modifying the user's
-        #           global ~/.ssh/known_hosts for transient connections.
-        if CONFIG.get("ssh_strict_host_key_checking", True):
-            known_hosts_path = Path(ssh_control).parent / "known_hosts"
-            # SECURITY: Touch the known_hosts file with 0o600 before the first
-            #           SSH call. Without this, the file inherits the user's
-            #           umask (often 0o644), making host keys world-readable.
-            #           touch() is a no-op if the file already exists.
-            known_hosts_path.touch(mode=0o600, exist_ok=True)
-            opts += [
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "-o",
-                f"UserKnownHostsFile={known_hosts_path}",
-            ]
-    return opts
-
-
-def _ssh_opts_str(ssh_control: str) -> str:
-    """Shell-quoted string form of _ssh_opts(), for embedding in shell commands."""
-    return " ".join(shlex.quote(o) for o in _ssh_opts(ssh_control))
-
-
-# =============================================================================
-# State management
-# =============================================================================
-
-
-def _save_state(path: Path, state: dict) -> None:
-    """Atomically save the session state to a JSON file."""
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state))
-    tmp.replace(path)
-
-
-def _load_state(path: Path) -> dict:
-    """Load the session state from a JSON file.
-
-    SECURITY: Validates that the path is inside WORK_BASE before reading.
-              State paths arrive as argv elements from fzf bind callbacks;
-              rejecting paths outside our session directory prevents an
-              attacker from pointing fzfr at an arbitrary file on disk.
-    """
-    try:
-        if not path.resolve().is_relative_to(WORK_BASE.resolve()):
-            return {}
-        return json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError, ValueError):
-        return {}
-
-
-def _mutate_state(path: Path, fn: "Callable[[dict], None]") -> int:
-    """Load the state file, apply fn(state) in-place, then save atomically.
-
-    All three internal state commands (set, toggle, prompt) share the same
-    load → mutate → save pattern. Centralising it here removes the repeated
-    boilerplate and ensures every mutation goes through the atomic _save_state
-    path rather than a direct write.
-
-    Returns 0 on success, 1 if the state file is missing or fn raises.
-    """
-    state = _load_state(path)
-    if not state:
-        return 1
-    try:
-        fn(state)
-    except Exception:
-        return 1
-    _save_state(path, state)
-    return 0
-
-
-def _tty_prompt(prompt_text: str) -> str | None:
-    """Display a prompt on the terminal and return the user's input.
-
-    Opens /dev/tty directly so the prompt works even when fzf has redirected
-    stdin and stdout for its own UI. Clears the screen before showing the
-    prompt so the fzf UI does not visually interfere with the input line.
-
-    Returns the stripped input string, or None if /dev/tty is unavailable
-    (e.g. Docker containers without a TTY, CI runners, nested fzf sessions).
-
-    DESIGN: Centralises all tty interaction so any future prompt (extension
-            filter, search query, rename, etc.) reuses the same clear-and-ask
-            pattern without duplicating tty open/close or error handling.
-    """
-    try:
-        with open("/dev/tty", "w") as tty_out:
-            # Clear screen and move cursor to top-left before prompting so the
-            # fzf UI does not visually bleed into the input line.
-            tty_out.write("\033[2J\033[H")
-            tty_out.write(prompt_text)
-            tty_out.flush()
-        with open("/dev/tty", "r") as tty_in:
-            return tty_in.readline().strip()
-    except OSError:
-        return None
-
-
-def cmd_internal_prompt(argv: list[str]) -> int:
-    """Internal: prompt for input on the terminal and update the state file.
-
-    Usage: fzfr _internal-prompt <path> <key> <prompt_text>
-
-    LIMITATION: /dev/tty is unavailable in some environments (Docker containers
-                without a TTY, certain CI runners, nested fzf sessions). When
-                _tty_prompt returns None, the state update is skipped silently.
-    """
-    if len(argv) < 3:
-        return 1
-    path, key, prompt_text = Path(argv[0]), argv[1], argv[2]
-    # Extension filter is meaningless in directory mode — silently no-op.
-    if key == "ext":
-        state = _load_state(path)
-        if state.get("ftype") == "d":
-            return 0
-    value = _tty_prompt(prompt_text)
-    if value is None:
-        return 1
-    return _mutate_state(path, lambda s: s.update({key: value}))
-
-
-def cmd_internal_exclude(argv: list[str]) -> int:
-    """Internal: prompt for a glob pattern and append it to exclude_patterns.
-
-    Usage: fzfr _internal-exclude <state_path>
-
-    Unlike _internal-prompt which replaces a value, this appends to the list.
-    An empty input clears all runtime-added patterns back to the config default.
-    """
-    if not argv:
-        return 1
-    path = Path(argv[0])
-    value = _tty_prompt("Exclude pattern (empty to clear): ")
-    if value is None:
-        return 1
-
-    def _update(s: dict) -> None:
-        if not value:
-            # Reset to the original config-level patterns.
-            s["exclude_patterns"] = list(CONFIG.get("exclude_patterns", []))
-        else:
-            patterns = list(s.get("exclude_patterns", []))
-            if value not in patterns:
-                patterns.append(value)
-            s["exclude_patterns"] = patterns
-
-    return _mutate_state(path, _update)
-
-
-def _prompt_str(state: dict) -> str:
-    """Return the fzf prompt string for the given state."""
-    mode = state.get("mode", "content")
-    ftype = state.get("ftype", "f")
-    ext = state.get("ext", "")
-    remote = state.get("remote", "")
-    base_path = state.get("base_path", "")
-    hidden = state.get("show_hidden", False)
-
-    exclude_patterns = state.get("exclude_patterns", [])
-
-    if ftype == "d":
-        prompt_icon = "📁 Dir Name"
-    elif mode == "name":
-        prompt_icon = "📄 File Name"
-    else:
-        prompt_icon = "🔍 Content"
-    # Extension filter is only meaningful for file searches, not dir mode.
-    if ftype != "d":
-        exts = _parse_extensions(ext)
-        if exts:
-            prompt_icon += f" [{','.join(exts)}]"
-    if hidden:
-        prompt_icon += " (incl. hidden)"
-    if exclude_patterns:
-        # Show a summary of excluded patterns if there are many.
-        if len(exclude_patterns) > 2:
-            prompt_icon += f" (excl: {exclude_patterns[0]}, ...)"
-        else:
-            prompt_icon += f" (excl: {', '.join(exclude_patterns)})"
-
-    return f"{remote} [{base_path}] {prompt_icon}: " if remote else f"{prompt_icon}: "
-
-
-def _header_str(state: dict) -> str:
-    """Return the fzf header string for the given state."""
-    mode = state.get("mode", "content")
-    ftype = state.get("ftype", "f")
-    hidden = state.get("show_hidden", False)
-    keybindings = CONFIG.get("keybindings", {})
-
-    def _kb(name: str) -> str:
-        return keybindings.get(name, _CONFIG_DEFAULTS["keybindings"][name]).upper()
-
-    exit_key = _kb("exit")
-    toggle_key = _kb("toggle_mode")
-    ftype_key = _kb("toggle_ftype")
-    hidden_key = _kb("toggle_hidden")
-    filter_key = _kb("filter_ext")
-    exclude_key = _kb("add_exclude")
-    refresh_key = _kb("refresh_list")
-    sort_key = _kb("sort_list")
-    copy_key = _kb("copy_path")
-
-    # CTRL-T label: in dir mode the search is always by name, so show what
-    # CTRL-T would do if the user were back in file mode.
-    if ftype == "d":
-        toggle_label = "Dir Name (name only)"
-    else:
-        toggle_label = "Content" if mode == "name" else "File Name"
-    toggle_type_label = "Dirs" if ftype == "f" else "Files"
-    hidden_label = "Hide" if hidden else "Show"
-    filter_hint = "" if ftype == "d" else f" | {filter_key}: Filter | {exclude_key}: Exclude"
-    return (
-        f"{toggle_key}: {toggle_label} | {ftype_key}: {toggle_type_label}"
-        f" | {hidden_key}: {hidden_label} Hidden"
-        f"{filter_hint}"
-        f" | {refresh_key}: Refresh | {sort_key}: Sort | {copy_key}: Copy"
-        f" | Enter: Open | {exit_key}: Exit"
-    )
-
-
-def cmd_internal_get_prompt(argv: list[str]) -> int:
-    """Internal: print the current prompt based on state (used by transform-prompt).
-
-    Usage: fzfr _internal-get-prompt <path>
-    """
-    if not argv:
-        return 1
-    state = _load_state(Path(argv[0]))
-    if not state:
-        return 1
-    print(_prompt_str(state), end="")
-    return 0
-
-
-def cmd_internal_get_header(argv: list[str]) -> int:
-    """Internal: print the current header based on state (used by transform-header).
-
-    Usage: fzfr _internal-get-header <path>
-    """
-    if not argv:
-        return 1
-    state = _load_state(Path(argv[0]))
-    if not state:
-        return 1
-    print(_header_str(state), end="")
-    return 0
-
-
-def cmd_internal_get_search_action(argv: list[str]) -> int:
-    """Internal: print 'disable-search' or 'enable-search' based on current mode.
-
-    Used as the target of a fzf transform() action so fzf applies the correct
-    search-filter state after a mode toggle, without needing the full transform
-    action (which requires fzf >= 0.45).
-
-    Usage: fzfr _internal-get-search-action <state_path>
-    """
-    if not argv:
-        return 1
-    state = _load_state(Path(argv[0]))
-    if not state:
-        return 1
-    # Content mode: fzf must not re-filter the search results with its own
-    # fuzzy engine — the item list IS the result. Name mode: fzf fuzzy-filters.
-    print(
-        (
-            "disable-search"
-            if state.get("mode", "content") == "content"
-            else "enable-search"
-        ),
-        end="",
-    )
-    return 0
-
-
-def cmd_internal_toggle_mode(argv: list[str]) -> int:
-    """Internal: toggle mode between 'name' and 'content' in the state file.
-
-    Thin wrapper around _mutate_state used as the execute-silent target for
-    CTRL-T. Kept separate from _internal-toggle so the binding string is
-    shorter and the operation is self-documenting.
-
-    Usage: fzfr _internal-toggle-mode <state_path>
-    """
-    if not argv:
-        return 1
-    path = Path(argv[0])
-    return _mutate_state(
-        path,
-        lambda s: s.update({"mode": "content" if s.get("mode") == "name" else "name"}),
-    )
-
-
-def cmd_internal_toggle_ftype(argv: list[str]) -> int:
-    """Internal: toggle ftype between 'f' (files) and 'd' (dirs).
-
-    DESIGN: Directory mode is always a name search and extension filters are
-            meaningless for directories (fd ignores -e with --type d). So:
-              - Entering dir mode (f→d): save the current mode and ext filter
-                as mode_before_dir / ext_before_dir, force mode="name", and
-                clear ext to "".
-              - Leaving dir mode (d→f): restore mode and ext from the saved
-                values, clear mode_before_dir and ext_before_dir.
-
-            This means CTRL-D is independent of CTRL-T and CTRL-F: the user
-            can have an active extension filter and content mode, press CTRL-D
-            to browse directories by name, then press CTRL-D again to return
-            to their previous state automatically.
-
-    Usage: fzfr _internal-toggle-ftype <state_path>
-    """
-    if not argv:
-        return 1
-    path = Path(argv[0])
-
-    def _toggle(s: dict) -> None:
-        if s.get("ftype") == "f":
-            # Entering dir mode: save current mode and ext filter, force name
-            # search, and clear the extension filter — fd ignores -e with
-            # --type d and would silently return no results if ext is set.
-            s["mode_before_dir"] = s.get("mode", "content")
-            s["ext_before_dir"] = s.get("ext", "")
-            s["ftype"] = "d"
-            s["mode"] = "name"
-            s["ext"] = ""
-        else:
-            # Leaving dir mode: restore previous mode and ext filter.
-            s["mode"] = s.pop("mode_before_dir", "content")
-            s["ext"] = s.pop("ext_before_dir", "")
-            s["ftype"] = "f"
-
-    return _mutate_state(path, _toggle)
-
-
-def cmd_internal_toggle_hidden(argv: list[str]) -> int:
-    """Internal: toggle 'show_hidden' boolean in the state file.
-
-    Usage: fzfr _internal-toggle-hidden <state_path>
-    """
-    if not argv:
-        return 1
-    path = Path(argv[0])
-    return _mutate_state(
-        path, lambda s: s.update({"show_hidden": not s.get("show_hidden", False)})
-    )
-
-
-def cmd_dispatch(argv: list[str]) -> int:
-    """Internal: dispatch preview and reload actions using the session backend.
-
-    Reconstructs the appropriate backend (LocalBackend or RemoteBackend) from
-    the persisted state file on every call. All local/remote branching lives
-    inside the backend implementation; this function contains none of it.
-
-    Usage: _internal-dispatch <state_path> <command> [args...]
-    """
-    if len(argv) < 2:
-        return 1
-
-    state_path, command = Path(argv[0]), argv[1]
-    command_args = argv[2:]
-
-    state = _load_state(state_path)
-    if not state:
-        return 1
-
-    backend = backend_from_state(state)
-    mode = state.get("mode", "content")
-    ftype = state.get("ftype", "f")
-    ext = state.get("ext", "")
-    hidden = state.get("show_hidden", False)
-    exclude_patterns = state.get("exclude_patterns", [])
-    path_format = state.get("path_format", "absolute")
-
-    if command == "preview":
-        filename = command_args[0] if command_args else ""
-        query = command_args[1] if len(command_args) > 1 else ""
-        # DESIGN: In relative path_format mode, fzf passes a path like
-        #         "./src/foo.py" which is relative to base_path, not to the
-        #         cwd of the preview sub-shell. Resolve it to an absolute path
-        #         here so all preview tools (bat, file, pdftotext, etc.) find
-        #         the file regardless of what directory fzf spawned from.
-        if filename and not Path(filename).is_absolute():
-            base_path = state.get("base_path", "")
-            if base_path:
-                filename = str(Path(base_path) / filename.removeprefix("./"))
-        return backend.preview(filename, query, mode)
-
-    if command == "reload":
-        query = command_args[0] if command_args else ""
-        return backend.reload(
-            query, ftype, ext, mode,
-            hidden=hidden,
-            exclude_patterns=exclude_patterns,
-            path_format=path_format,
-        )
-
-    return 1  # Unknown command
-
-
-# =============================================================================
-# Shared helpers
-# =============================================================================
-
-
-# Maximum bytes read by _capture() for short-output commands (MIME type
-# strings, realpath output, SSH test exit codes). Large enough for any
-# realistic path or MIME string; small enough to bound memory usage.
-_CAPTURE_DEFAULT_MAX = 4096  # 4 KB
-
-# PDF text extraction can legitimately be large; we cap it here so that
-# a multi-hundred-page PDF does not load megabytes into RAM.
-_CAPTURE_PDF_MAX = 512 * 1024  # 512 KB (~250 pages of dense text)
-
-
-def _capture(cmd: list[str], max_bytes: int = _CAPTURE_DEFAULT_MAX) -> tuple[str, int]:
-    """Run a command, capture up to max_bytes of stdout, and return (stdout, rc).
-
-    Used when we need the output of a command as a Python string, e.g. to
-    detect MIME types or get the remote $HOME path. Stderr is captured and
-    discarded so it never leaks into the fzf preview pane.
-
-    PERF/SAFETY: Uses Popen + a bounded read instead of
-    subprocess.run(capture_output=True) so that commands producing large
-    output (e.g. pdftotext on a large PDF) cannot exhaust process memory.
-    Output beyond max_bytes is silently truncated; callers that need the
-    full output should use _passthrough() instead.
-
-    Returns ("", 127) if the executable is not found, matching the shell
-    convention for "command not found".
-    """
-    try:
-        with subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        ) as proc:
-            assert proc.stdout is not None
-            chunk = proc.stdout.read(max_bytes)
-            # Drain and discard any remaining output so the child is not
-            # blocked on a full pipe buffer when we call wait().
-            proc.stdout.read()
-            proc.wait()
-            return chunk.decode("utf-8", errors="replace"), proc.returncode
-    except FileNotFoundError:
-        return "", 127
-
-
-def _passthrough(cmd: list[str], head_n: int | None = None) -> int:
-    """Run a command and let its stdout flow directly to our stdout.
-
-    This is the correct way to run preview commands. Using _capture() and
-    then print()ing the result would buffer the entire output in memory and
-    also strip ANSI colour codes that bat/rga/grep emit — causing the fzf
-    preview pane to show plain, uncoloured text.
-
-    If head_n is given, the output is piped through `head -n <head_n>` so
-    we don't flood the preview pane with thousands of lines from large archives.
-
-    Stderr is suppressed so tool-not-found errors don't appear in the pane;
-    the caller is responsible for printing a user-friendly fallback message.
-
-    Returns the exit code of the main command (not head's exit code), so
-    callers can decide whether to try a fallback tool.
-    """
-    try:
-        if head_n is not None:
-            p1 = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-            )
-            p2 = subprocess.Popen(["head", "-n", str(head_n)], stdin=p1.stdout)
-            assert p1.stdout is not None
-            p1.stdout.close()  # allows p1 to receive SIGPIPE when p2 exits early
-            p2.wait()
-            p1.wait()
-            # DESIGN: p1 may exit with SIGPIPE (rc=141) because head closed the
-            #         read end of the pipe before p1 finished writing. That is
-            #         normal and expected; we treat p2's success as overall success.
-            return 0 if p2.returncode == 0 else p1.returncode
-        else:
-            r = subprocess.run(cmd, stderr=subprocess.DEVNULL)
-            return r.returncode
-    except FileNotFoundError:
-        return 127
-
-
-def _try_run(commands: list[list[str]], status_msg: str) -> int:
-    """Execute each command in sequence until one returns success (0).
-
-    Three outcomes per command:
-      rc == 0    success → return immediately, no message printed.
-      rc == 127  tool not installed → skip silently, try next in chain.
-      anything else  tool ran but failed (e.g. no matches) → stop here,
-                     print status_msg, return rc. No point trying the next
-                     tool; the failure is definitive.
-
-    DESIGN: Centralises tool-fallback logic (e.g. bat → cat) so each call site
-            states the preference chain rather than implementing it. rc==127 is
-            the shell convention for "command not found" and is the only case
-            where we silently move to the next option; any other failure is
-            definitive and stops the chain.
-    """
-    last_rc = 127
-    for cmd in commands:
-        # PERF: Skip the fork entirely if the tool is known-absent at startup.
-        #       _passthrough() would catch FileNotFoundError and return 127,
-        #       but that still costs a fork()+exec() pair on every call.
-        if cmd[0] not in AVAILABLE_TOOLS:
-            continue
-        rc = _passthrough(cmd)
-        if rc == 0:
-            return 0
-        last_rc = rc
-        if rc == 127:
-            continue  # tool not found (PATH changed at runtime), try next
-        break  # tool ran but failed — stop here
-    if status_msg:
-        print(f"[{status_msg}]")
-    return last_rc
-
-
-def _get_mime(filepath: str) -> str:
-    """Return the MIME type of a file as reported by file(1), e.g. 'text/plain'.
-
-    Uses the -b (brief) flag to suppress the filename prefix in the output.
-    Uses -L to dereference symlinks and report the type of the target file.
-    Returns an empty string if file(1) is unavailable or fails.
-    """
-    out, rc = _capture(["file", "-L", "--mime-type", "-b", filepath])
-    return out.strip() if rc == 0 else ""
-
-
-def _is_text_mime(mime: str) -> bool:
-    """Return True if the MIME type indicates a file that can be opened in a text editor.
-
-    Covers plain text and the most common structured-text application types.
-    Used to decide between opening with an editor vs. xdg-open.
-
-    inode/x-empty is included because zero-byte files should open in the editor
-    rather than xdg-open — a new empty file is almost always a text file.
-    """
-    return mime.startswith("text/") or mime in (
-        "application/json",
-        "application/xml",
-        "application/javascript",
-        "inode/x-empty",
-    )
-
-
-def _parse_extensions(ext_str: str) -> list[str]:
-    """Sanitize and split a whitespace-separated string of extensions.
-
-    Removes leading dots, strips whitespace, and discards empty entries.
-    Example: ".txt  .pdf py" -> ["txt", "pdf", "py"]
-
-    SECURITY: Only alphanumeric characters are accepted after dot-stripping.
-    A crafted extension like "py $(rm -rf ~)" or "py;evil" would survive
-    shlex.quote at one shell level but could break out at a second level
-    (e.g. inside a remote shell command or a glob argument). Rejecting
-    non-alphanumeric values here closes that path entirely — the offending
-    token is silently dropped rather than passed to fd/rga/grep.
-    """
-    result = []
-    for raw in ext_str.split():
-        e = raw.lstrip(".").strip()
-        if not e:
-            continue
-        if not re.fullmatch(r"[A-Za-z0-9]+", e):
-            print(
-                f"Warning: ignoring unsafe extension {raw!r} "
-                "(only alphanumeric characters are allowed)",
-                file=sys.stderr,
-            )
-            continue
-        result.append(e)
-    return result
-
-
-# =============================================================================
-# fzfr-preview
-# =============================================================================
-#
-# fzf calls this sub-command once for every item the cursor rests on.
-# It receives the file path (absolute, as emitted by fd) and optionally the
-# current search query so it can highlight matching terms.
-#
-# DESIGN: All output goes directly to stdout via _passthrough(), never via
-#         _capture()+print(). This preserves streaming (no full-file buffering)
-#         and ANSI colour codes. --color=always is passed to every tool because
-#         fzf's preview sub-shell is a pipe, not a TTY, causing tools to strip
-#         colour automatically unless forced.
-
-# Known archive extensions, split into simple and compound (.tar.gz etc.)
-# so we can match them correctly with _hint_suffix().
 ARCHIVE_EXTENSIONS = {
     ".cbt",
     ".tbz2",
@@ -1761,7 +959,6 @@ ARCHIVE_INSTALL_HINTS = {
     ".zst": "zst: install zstd",
 }
 
-
 def _hint_suffix(hint: str) -> str:
     """Extract the longest matching extension from a filename.
 
@@ -1778,11 +975,9 @@ def _hint_suffix(hint: str) -> str:
             return ext
     return Path(lower).suffix
 
-
 # =============================================================================
 # File classification
 # =============================================================================
-
 
 class FileKind(Enum):
     """The categories the preview and open logic cares about.
@@ -1803,7 +998,6 @@ class FileKind(Enum):
     DIRECTORY = auto()
     BINARY = auto()
     TEXT = auto()
-
 
 def classify(hint: str, mime: str = "") -> FileKind:
     """Return the FileKind for a file given its name hint and optional MIME type.
@@ -1843,7 +1037,6 @@ def classify(hint: str, mime: str = "") -> FileKind:
         return FileKind.BINARY
 
     return FileKind.TEXT
-
 
 def _list_archive(filepath: str, hint: str) -> None:
     """List the contents of an archive file to stdout (max 50 lines).
@@ -1935,6 +1128,470 @@ def _list_archive(filepath: str, hint: str) -> None:
     rga_fallback("unknown archive format")
 
 
+# =============================================================================
+# backends.py
+# =============================================================================
+
+@dataclass
+class SearchContext:
+    """Consolidates path and connection state for a fzfr session."""
+
+    remote: str  # SSH host string, e.g. "user@host", or "" for local
+    safe_remote: str  # shlex.quote(remote)
+    base_path: str  # absolute base directory to search
+    safe_base: str  # shlex.quote(base_path)
+    target: str = "local"
+    # ControlPath socket managed by fzfr, or "" to rely on ~/.ssh/config.
+    # Non-empty only when config["ssh_multiplexing"] is True.
+    ssh_control: str = field(default="")
+    ftype: str = "f"  # "f" for files, "d" for directories
+    ext: str = ""  # file extension filter, e.g. "py"
+    exclude_patterns: list[str] = field(default_factory=list)  # exclude patterns
+    self_path: Path | None = None  # path to the script (original or frozen)
+
+# =============================================================================
+# Backend abstraction  (LocalBackend / RemoteBackend)
+# =============================================================================
+#
+# Almost every action in fzfr has a local variant and a remote variant.
+# Previously this split lived as inline `if ctx.remote:` branches scattered
+# across cmd_dispatch and _open.
+#
+# The Backend Protocol centralises the divergence into two concrete classes.
+# Call sites ask the backend what to do; they never inspect ctx.remote directly.
+#
+# The backend instance is constructed once in cmd_search (from SearchContext)
+# and re-constructed from the state dict in cmd_dispatch — exactly the places
+# where we already know whether the session is local or remote.
+
+@runtime_checkable
+class Backend(Protocol):
+    """Operations that differ between local-filesystem and SSH-remote sessions."""
+
+    base_path: str  # absolute search root for this session
+    ssh_control: str  # ControlPath socket, or "" to defer to ~/.ssh/config
+
+    def resolve_base(self, raw: str) -> str:
+        """Expand a raw path argument to an absolute path for this backend.
+
+        For local backends, resolves relative paths and ~ via pathlib.
+        For remote backends, asks the remote shell to expand ~ and pwd.
+        """
+        ...
+
+    def is_safe_subpath(self, path: str) -> bool:
+        """Return True if path resolves to a location inside base_path.
+
+        Uses realpath / os.path.realpath to follow symlinks before checking,
+        so symlinks pointing outside the search root are correctly blocked.
+        """
+        ...
+
+    def is_dir(self, path: str) -> bool:
+        """Return True if path is a directory (following symlinks)."""
+        ...
+
+    def get_mime(self, path: str) -> str:
+        """Return the MIME type string for path, e.g. 'text/plain'.
+
+        Returns "" if file(1) is unavailable or fails.
+        """
+        ...
+
+    def preview(self, filename: str, query: str, mode: str) -> int:
+        """Render a preview of filename to stdout. Returns exit code."""
+        ...
+
+    def reload(self, query: str, ftype: str, ext: str, mode: str) -> int:
+        """Emit the file/match list to stdout for fzf to display. Returns exit code."""
+        ...
+
+    def initial_list_cmd(self, frozen_self: Path) -> list[str]:
+        """Return the argv list for the initial file list (name-mode only)."""
+        ...
+
+class LocalBackend:
+    """Backend implementation for local filesystem searches."""
+
+    def __init__(
+        self,
+        base_path: str,
+        ssh_control: str = "",
+        cache: "_PreviewCache | None" = None,
+        frozen_self: "Path | None" = None,
+        exclude_patterns: list[str] | None = None,
+    ) -> None:
+        self.base_path = base_path
+        self.ssh_control = ssh_control  # unused locally; kept for Protocol compat
+        self._cache = cache
+        self._frozen_self = frozen_self  # frozen script path for cache-miss subprocess
+        self.exclude_patterns = exclude_patterns if exclude_patterns is not None else []
+
+    def resolve_base(self, raw: str) -> str:
+        if raw:
+            return str(Path(raw).resolve())
+        _find_git_root = globals()["_find_git_root"]
+        git_root = _find_git_root()
+        return git_root if git_root else str(Path.cwd().resolve())
+
+    def is_safe_subpath(self, path: str) -> bool:
+        try:
+            return Path(path).resolve().is_relative_to(Path(self.base_path).resolve())
+        except (FileNotFoundError, ValueError):
+            return False
+
+    def is_dir(self, path: str) -> bool:
+        return Path(path).is_dir()
+
+    def get_mime(self, path: str) -> str:
+        return _get_mime(path)
+
+    def preview(self, filename: str, query: str, mode: str) -> int:
+        # PERF: Check the preview cache before spawning any subprocess.
+        #       Cache key: path + nanosecond mtime (detects file changes) + query
+        #       (different queries produce different highlighted output).
+        cache = self._cache
+        mtime: int | None = None
+        cache_key: str = ""
+        if cache is not None:
+            mtime = _PreviewCache._local_mtime(filename)
+            if mtime is not None:
+                cache_key = f"local:{filename}:{mtime}:{query}"
+                hit = cache.get(cache_key)
+                if hit is not None:
+                    sys.stdout.buffer.write(hit)
+                    sys.stdout.buffer.flush()
+                    return 0
+
+        # Cache miss: build the argv for cmd_preview.
+        preview_args = [filename]
+        if mode == "content":
+            preview_args.append(query)
+
+        if cache is not None and mtime is not None and self._frozen_self is not None:
+            # DESIGN: _passthrough() uses subprocess.run with inherited stdout,
+            #         so Python-level stdout redirection cannot capture its output.
+            #         We re-invoke this script as a subprocess with capture_output=True
+            #         to collect the rendered bytes, then replay them and cache.
+            #         The extra fork cost (~5 ms) is paid only on a cache miss;
+            #         all subsequent visits to the same file cost ~0.1 ms.
+            r = subprocess.run(
+                [sys.executable, str(self._frozen_self), "fzfr-preview"] + preview_args,
+                capture_output=True,
+            )
+            data = r.stdout
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+            if r.returncode == 0:
+                cache.put(cache_key, data)
+            return r.returncode
+
+        cmd_preview = globals()["cmd_preview"]
+        return cmd_preview(preview_args)
+
+    def reload(
+        self,
+        query: str,
+        ftype: str,
+        ext: str,
+        mode: str,
+        hidden: bool = False,
+        exclude_patterns: list[str] | None = None,
+        path_format: str = "absolute",
+    ) -> int:
+        if exclude_patterns is None:
+            exclude_patterns = []
+        fd_args = ["fd", "-L", "--type", ftype]
+        if hidden:
+            fd_args.append("--hidden")
+        for e in _parse_extensions(ext):
+            fd_args += ["-e", e]
+        for p in exclude_patterns:
+            fd_args += ["-E", p]
+
+        # DESIGN: For relative paths, run fd from base_path (cwd) with root "."
+        #         so output is relative to the search root. For absolute paths,
+        #         pass base_path as the search root so fd emits full paths.
+        if path_format == "relative":
+            fd_root, fd_cwd = ["."], self.base_path
+        else:
+            fd_root, fd_cwd = [".", self.base_path], None
+
+        if mode == "name":
+            return subprocess.run(fd_args + fd_root, cwd=fd_cwd).returncode
+
+        if query:
+            return _local_content_search(
+                fd_args, fd_root, fd_cwd, query, ext, hidden, self.base_path, path_format
+            )
+
+        return subprocess.run(fd_args + fd_root, cwd=fd_cwd).returncode
+
+    def initial_list_cmd(
+        self, _frozen_self: Path, hidden: bool = False, exclude_patterns: list[str] | None = None,
+        path_format: str = "absolute",
+    ) -> list[str]:
+        # _frozen_self unused here — LocalBackend lists files directly via fd.
+        # RemoteBackend uses it to locate the script for SSH upload.
+        if exclude_patterns is None:
+            exclude_patterns = []
+        args = ["fd", "-L", "--type", "f"]
+        if hidden:
+            args.append("--hidden")
+        for p in exclude_patterns:
+            args += ["-E", p]
+        if path_format == "relative":
+            return args + ["."]
+        return args + [".", self.base_path]
+
+class RemoteBackend:
+    """Backend implementation for SSH-remote searches."""
+
+    def __init__(
+        self,
+        remote: str,
+        base_path: str,
+        ssh_control: str = "",
+        cache: "_PreviewCache | None" = None,
+        exclude_patterns: list[str] | None = None,
+    ) -> None:
+        self.remote = remote
+        self.base_path = base_path
+        self.ssh_control = ssh_control
+        self._cache = cache
+        self.exclude_patterns = exclude_patterns if exclude_patterns is not None else []
+
+    def _ssh(self) -> list[str]:
+        """Return the base SSH argv prefix: ["ssh", <opts...>, <remote>]."""
+        return ["ssh"] + _ssh_opts(self.ssh_control) + [self.remote]
+
+    def resolve_base(self, raw: str) -> str:
+        _resolve_remote_path = globals()["_resolve_remote_path"]
+        return _resolve_remote_path(self.remote, raw, self.ssh_control)
+
+    def is_safe_subpath(self, path: str) -> bool:
+        ssh_base = self._ssh()
+        out_path, rc_path = _capture(
+            ssh_base + [shlex.join(["realpath", "-e", "--", path])]
+        )
+        if rc_path != 0:
+            return False
+        out_base, rc_base = _capture(
+            ssh_base + [shlex.join(["realpath", "-e", "--", self.base_path])]
+        )
+        if rc_base != 0:
+            return False
+        resolved_path = out_path.strip()
+        resolved_base = out_base.strip()
+        if not resolved_path or not resolved_base:
+            return False
+        base_prefix = resolved_base.rstrip("/") + "/"
+        return resolved_path == resolved_base or resolved_path.startswith(base_prefix)
+
+    def is_dir(self, path: str) -> bool:
+        _, rc = _capture(self._ssh() + [shlex.join(["test", "-d", path])])
+        return rc == 0
+
+    def get_mime(self, path: str) -> str:
+        out, rc = _capture(
+            self._ssh()
+            + [shlex.join(["file", "-L", "--mime-type", "-b", path]) + " 2>/dev/null"]
+        )
+        return out.strip() if rc == 0 else ""
+
+    def preview(self, filename: str, query: str, mode: str) -> int:
+        # PERF: Debounce remote previews to avoid thrashing SSH connections
+        #       during fast scrolling. 50 ms is negligible for SSH latency but
+        #       saves many redundant round-trips during fast cursor movement.
+        time.sleep(0.05)
+
+        full_path = (
+            filename
+            if Path(filename).is_absolute()
+            else str(Path(self.base_path) / filename)
+        )
+
+        # PERF: Check cache before paying the SSH round-trip + ~60 KB script
+        #       transfer cost. Remote mtime requires one extra SSH call, but on
+        #       a multiplexed connection that is ~5 ms vs ~200 ms for the full
+        #       preview — a net saving of ~195 ms on every cache hit.
+        cache = self._cache
+        mtime: str | None = None
+        cache_key: str = ""
+        if cache is not None:
+            mtime = _PreviewCache._remote_mtime(self._ssh(), full_path)
+            if mtime is not None:
+                cache_key = f"remote:{self.remote}:{full_path}:{mtime}:{query}"
+                hit = cache.get(cache_key)
+                if hit is not None:
+                    sys.stdout.buffer.write(hit)
+                    sys.stdout.buffer.flush()
+                    return 0
+
+        args = [self.remote, self.base_path, self.ssh_control, filename]
+        if mode == "content":
+            args.append(query)
+
+        if cache is not None and mtime is not None:
+            # Capture the SSH preview output so we can cache it before replay.
+            _cmd_remote_preview_capture = globals()["_cmd_remote_preview_capture"]
+            rc, data = _cmd_remote_preview_capture(args)
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+            if rc == 0:
+                cache.put(cache_key, data)
+            return rc
+
+        cmd_remote_preview = globals()["cmd_remote_preview"]
+        return cmd_remote_preview(args)
+
+    def reload(
+        self,
+        query: str,
+        ftype: str,
+        ext: str,
+        mode: str,
+        hidden: bool = False,
+        exclude_patterns: list[str] | None = None,
+        path_format: str = "absolute",
+    ) -> int:
+        if exclude_patterns is None:
+            exclude_patterns = []
+        args = [self.remote, self.base_path, self.ssh_control, ftype, ext]
+        # DESIGN: query is only a content search term in content mode.
+        #         In name mode it is fzf's fuzzy filter string — it must NOT
+        #         be forwarded to cmd_remote_reload, which would interpret any
+        #         non-empty string as a grep/rga content query and return
+        #         content matches instead of a file listing for fzf to filter.
+        if mode == "content" and query:
+            args.append(query)
+        if hidden:
+            args.append("--hidden")
+        for p in exclude_patterns:
+            args.append("--exclude")
+            args.append(p)
+        if path_format == "relative":
+            args.append("--relative")
+        cmd_remote_reload = globals()["cmd_remote_reload"]
+        return cmd_remote_reload(args)
+
+    def initial_list_cmd(
+        self, frozen_self: Path, hidden: bool = False, exclude_patterns: list[str] | None = None,
+        path_format: str = "absolute",
+    ) -> list[str]:
+        if exclude_patterns is None:
+            exclude_patterns = []
+        args = [
+            sys.executable,
+            str(frozen_self),
+            "fzfr-remote-reload",
+            self.remote,
+            self.base_path,
+            self.ssh_control,
+            "f",
+            "",
+        ]
+        if hidden:
+            args.append("--hidden")
+        for p in exclude_patterns:
+            args.append("--exclude")
+            args.append(p)
+        if path_format == "relative":
+            args.append("--relative")
+        return args
+
+def backend_from_state(state: dict) -> LocalBackend | RemoteBackend:
+    """Reconstruct the appropriate backend from a persisted state dict.
+
+    Called at the start of every cmd_dispatch invocation. The state dict
+    carries all the fields needed to build either backend type, including
+    the session dir (derived from self_path) needed to locate the cache.
+    """
+    remote = state.get("remote", "")
+    base_path = state.get("base_path", "")
+    ssh_control = state.get("ssh_control", "")
+    exclude_patterns = state.get("exclude_patterns", [])
+    cache = _PreviewCache.from_state(state)
+    if remote:
+        return RemoteBackend(
+            remote,
+            base_path,
+            ssh_control,
+            cache=cache,
+            exclude_patterns=exclude_patterns,
+        )
+    self_path_str = state.get("self_path", "")
+    frozen_self = (
+        Path(self_path_str) if self_path_str and self_path_str != "None" else None
+    )
+    return LocalBackend(
+        base_path,
+        ssh_control,
+        cache=cache,
+        frozen_self=frozen_self,
+        exclude_patterns=exclude_patterns,
+    )
+
+# =============================================================================
+# Local content search helper
+# =============================================================================
+
+def _local_content_search(
+    fd_args: list[str],
+    fd_root: list[str],
+    fd_cwd: str | None,
+    query: str,
+    ext: str,
+    hidden: bool,
+    base_path: str,
+    path_format: str,
+) -> int:
+    """Run a local content search using rga or fd+grep fallback.
+
+    Returns the exit code of the search command. rga is preferred when
+    available; fd | xargs grep is used as a fallback.
+    """
+    if "rga" in AVAILABLE_TOOLS:
+        # PERF: Check AVAILABLE_TOOLS before forking. Previously this called
+        #       subprocess.run(["rga", ...]) and caught FileNotFoundError —
+        #       a wasted fork()+exec() on every keystroke when rga is absent.
+        rga_cmd = ["rga"]
+        if hidden:
+            rga_cmd.append("--hidden")
+        for e in _parse_extensions(ext):
+            rga_cmd += ["-g", f"*.{e}"]
+        rga_cmd += [
+            "--files-with-matches",
+            "--fixed-strings",
+            query,
+            "." if path_format == "relative" else base_path,
+        ]
+        r = subprocess.run(rga_cmd, cwd=fd_cwd, stderr=subprocess.DEVNULL)
+        if r.returncode == 0:
+            return 0
+        # rga found but returned non-zero — no matches, don't fallback
+        # to grep (different tool, different scope). Return as-is.
+        return r.returncode
+
+    # grep fallback (rga absent): fd -0 | xargs -P4 grep
+    # PERF: -P4 parallelises grep across up to 4 worker processes,
+    #       significantly speeding up content searches on large repos.
+    p1 = subprocess.Popen(
+        fd_args + ["-0"] + fd_root,
+        cwd=fd_cwd,
+        stdout=subprocess.PIPE,
+    )
+    assert p1.stdout is not None
+    p1.stdout.close()
+    p2 = subprocess.run(
+        ["xargs", "-P4", "-0", "grep", "-ilF", query], stdin=p1.stdout
+    )
+    p1.wait()
+    return p2.returncode
+# =============================================================================
+# preview.py
+# =============================================================================
+
 def _preview_pdf(filepath: str, query: str) -> None:
     """Render a PDF file in the preview pane.
 
@@ -1990,7 +1647,6 @@ def _preview_pdf(filepath: str, query: str) -> None:
             "PDF: no text layer, may be scanned or encrypted",
         )
 
-
 def _preview_text(filepath: str, query: str) -> None:
     """Render a text file (or any non-archive, non-PDF file) in the preview pane.
 
@@ -2031,7 +1687,6 @@ def _preview_text(filepath: str, query: str) -> None:
             "Preview failed",
         )
 
-
 def _preview_archive(filepath: str, hint: str, query: str) -> None:
     """Render an archive file in the preview pane.
 
@@ -2048,7 +1703,6 @@ def _preview_archive(filepath: str, hint: str, query: str) -> None:
             print("[Archive search requires rga with dependencies]")
     else:
         _list_archive(filepath, hint)
-
 
 def _preview_directory(filepath: str) -> None:
     """Render a directory listing in the preview pane.
@@ -2071,7 +1725,6 @@ def _preview_directory(filepath: str) -> None:
         "Directory preview failed",
     )
 
-
 def _preview_binary(filepath: str) -> None:
     """Render a truncated hexdump of a binary file.
 
@@ -2086,7 +1739,6 @@ def _preview_binary(filepath: str) -> None:
         ],
         "Binary preview failed",
     )
-
 
 def _dispatch_preview(filepath: str, hint: str, mime: str, query: str) -> None:
     """Dispatch to the correct renderer once MIME type is known.
@@ -2109,7 +1761,6 @@ def _dispatch_preview(filepath: str, hint: str, mime: str, query: str) -> None:
             _preview_binary(filepath)
         else:
             _preview_text(filepath, query)
-
 
 def cmd_preview(argv: list[str]) -> int:
     """Entry point for the fzfr-preview sub-command.
@@ -2205,16 +1856,311 @@ def cmd_preview(argv: list[str]) -> int:
         # Always delete the temp file, even if an exception propagated above.
         if tmpfile:
             Path(tmpfile).unlink(missing_ok=True)
+# =============================================================================
+# internal.py
+# =============================================================================
+
+def cmd_internal_prompt(argv: list[str]) -> int:
+    """Internal: prompt for input on the terminal and update the state file.
+
+    Usage: fzfr _internal-prompt <path> <key> <prompt_text>
+
+    LIMITATION: /dev/tty is unavailable in some environments (Docker containers
+                without a TTY, certain CI runners, nested fzf sessions). When
+                _tty_prompt returns None, the state update is skipped silently.
+    """
+    if len(argv) < 3:
+        return 1
+    path, key, prompt_text = Path(argv[0]), argv[1], argv[2]
+    # Extension filter is meaningless in directory mode — silently no-op.
+    if key == "ext":
+        state = _load_state(path)
+        if state.get("ftype") == "d":
+            return 0
+    value = _tty_prompt(prompt_text)
+    if value is None:
+        return 1
+    return _mutate_state(path, lambda s: s.update({key: value}))
+
+def cmd_internal_exclude(argv: list[str]) -> int:
+    """Internal: prompt for a glob pattern and append it to exclude_patterns.
+
+    Usage: fzfr _internal-exclude <state_path>
+
+    Unlike _internal-prompt which replaces a value, this appends to the list.
+    An empty input clears all runtime-added patterns back to the config default.
+    """
+    if not argv:
+        return 1
+    path = Path(argv[0])
+    value = _tty_prompt("Exclude pattern (empty to clear): ")
+    if value is None:
+        return 1
+
+    def _update(s: dict) -> None:
+        if not value:
+            # Reset to the original config-level patterns.
+            s["exclude_patterns"] = list(CONFIG.get("exclude_patterns", []))
+        else:
+            patterns = list(s.get("exclude_patterns", []))
+            if value not in patterns:
+                patterns.append(value)
+            s["exclude_patterns"] = patterns
+
+    return _mutate_state(path, _update)
+
+def _prompt_str(state: dict) -> str:
+    """Return the fzf prompt string for the given state."""
+    mode = state.get("mode", "content")
+    ftype = state.get("ftype", "f")
+    ext = state.get("ext", "")
+    remote = state.get("remote", "")
+    base_path = state.get("base_path", "")
+    hidden = state.get("show_hidden", False)
+
+    exclude_patterns = state.get("exclude_patterns", [])
+
+    if ftype == "d":
+        prompt_icon = "📁 Dir Name"
+    elif mode == "name":
+        prompt_icon = "📄 File Name"
+    else:
+        prompt_icon = "🔍 Content"
+    # Extension filter is only meaningful for file searches, not dir mode.
+    if ftype != "d":
+        exts = _parse_extensions(ext)
+        if exts:
+            prompt_icon += f" [{','.join(exts)}]"
+    if hidden:
+        prompt_icon += " (incl. hidden)"
+    if exclude_patterns:
+        # Show a summary of excluded patterns if there are many.
+        if len(exclude_patterns) > 2:
+            prompt_icon += f" (excl: {exclude_patterns[0]}, ...)"
+        else:
+            prompt_icon += f" (excl: {', '.join(exclude_patterns)})"
+
+    return f"{remote} [{base_path}] {prompt_icon}: " if remote else f"{prompt_icon}: "
+
+def _header_str(state: dict) -> str:
+    """Return the fzf header string for the given state."""
+    mode = state.get("mode", "content")
+    ftype = state.get("ftype", "f")
+    hidden = state.get("show_hidden", False)
+    keybindings = CONFIG.get("keybindings", {})
+
+    def _kb(name: str) -> str:
+        return keybindings.get(name, _CONFIG_DEFAULTS["keybindings"][name]).upper()
+
+    exit_key = _kb("exit")
+    toggle_key = _kb("toggle_mode")
+    ftype_key = _kb("toggle_ftype")
+    hidden_key = _kb("toggle_hidden")
+    filter_key = _kb("filter_ext")
+    exclude_key = _kb("add_exclude")
+    refresh_key = _kb("refresh_list")
+    sort_key = _kb("sort_list")
+    copy_key = _kb("copy_path")
+
+    # CTRL-T label: in dir mode the search is always by name, so show what
+    # CTRL-T would do if the user were back in file mode.
+    if ftype == "d":
+        toggle_label = "Dir Name (name only)"
+    else:
+        toggle_label = "Content" if mode == "name" else "File Name"
+    toggle_type_label = "Dirs" if ftype == "f" else "Files"
+    hidden_label = "Hide" if hidden else "Show"
+    filter_hint = "" if ftype == "d" else f" | {filter_key}: Filter | {exclude_key}: Exclude"
+    return (
+        f"{toggle_key}: {toggle_label} | {ftype_key}: {toggle_type_label}"
+        f" | {hidden_key}: {hidden_label} Hidden"
+        f"{filter_hint}"
+        f" | {refresh_key}: Refresh | {sort_key}: Sort | {copy_key}: Copy"
+        f" | Enter: Open | {exit_key}: Exit"
+    )
+
+def cmd_internal_get_prompt(argv: list[str]) -> int:
+    """Internal: print the current prompt based on state (used by transform-prompt).
+
+    Usage: fzfr _internal-get-prompt <path>
+    """
+    if not argv:
+        return 1
+    state = _load_state(Path(argv[0]))
+    if not state:
+        return 1
+    print(_prompt_str(state), end="")
+    return 0
+
+def cmd_internal_get_header(argv: list[str]) -> int:
+    """Internal: print the current header based on state (used by transform-header).
+
+    Usage: fzfr _internal-get-header <path>
+    """
+    if not argv:
+        return 1
+    state = _load_state(Path(argv[0]))
+    if not state:
+        return 1
+    print(_header_str(state), end="")
+    return 0
+
+def cmd_internal_get_search_action(argv: list[str]) -> int:
+    """Internal: print 'disable-search' or 'enable-search' based on current mode.
+
+    Used as the target of a fzf transform() action so fzf applies the correct
+    search-filter state after a mode toggle, without needing the full transform
+    action (which requires fzf >= 0.45).
+
+    Usage: fzfr _internal-get-search-action <state_path>
+    """
+    if not argv:
+        return 1
+    state = _load_state(Path(argv[0]))
+    if not state:
+        return 1
+    # Content mode: fzf must not re-filter the search results with its own
+    # fuzzy engine — the item list IS the result. Name mode: fzf fuzzy-filters.
+    print(
+        (
+            "disable-search"
+            if state.get("mode", "content") == "content"
+            else "enable-search"
+        ),
+        end="",
+    )
+    return 0
+
+def cmd_internal_toggle_mode(argv: list[str]) -> int:
+    """Internal: toggle mode between 'name' and 'content' in the state file.
+
+    Thin wrapper around _mutate_state used as the execute-silent target for
+    CTRL-T. Kept separate from _internal-toggle so the binding string is
+    shorter and the operation is self-documenting.
+
+    Usage: fzfr _internal-toggle-mode <state_path>
+    """
+    if not argv:
+        return 1
+    path = Path(argv[0])
+    return _mutate_state(
+        path,
+        lambda s: s.update({"mode": "content" if s.get("mode") == "name" else "name"}),
+    )
+
+def cmd_internal_toggle_ftype(argv: list[str]) -> int:
+    """Internal: toggle ftype between 'f' (files) and 'd' (dirs).
+
+    DESIGN: Directory mode is always a name search and extension filters are
+            meaningless for directories (fd ignores -e with --type d). So:
+              - Entering dir mode (f→d): save the current mode and ext filter
+                as mode_before_dir / ext_before_dir, force mode="name", and
+                clear ext to "".
+              - Leaving dir mode (d→f): restore mode and ext from the saved
+                values, clear mode_before_dir and ext_before_dir.
+
+            This means CTRL-D is independent of CTRL-T and CTRL-F: the user
+            can have an active extension filter and content mode, press CTRL-D
+            to browse directories by name, then press CTRL-D again to return
+            to their previous state automatically.
+
+    Usage: fzfr _internal-toggle-ftype <state_path>
+    """
+    if not argv:
+        return 1
+    path = Path(argv[0])
+
+    def _toggle(s: dict) -> None:
+        if s.get("ftype") == "f":
+            # Entering dir mode: save current mode and ext filter, force name
+            # search, and clear the extension filter — fd ignores -e with
+            # --type d and would silently return no results if ext is set.
+            s["mode_before_dir"] = s.get("mode", "content")
+            s["ext_before_dir"] = s.get("ext", "")
+            s["ftype"] = "d"
+            s["mode"] = "name"
+            s["ext"] = ""
+        else:
+            # Leaving dir mode: restore previous mode and ext filter.
+            s["mode"] = s.pop("mode_before_dir", "content")
+            s["ext"] = s.pop("ext_before_dir", "")
+            s["ftype"] = "f"
+
+    return _mutate_state(path, _toggle)
+
+def cmd_internal_toggle_hidden(argv: list[str]) -> int:
+    """Internal: toggle 'show_hidden' boolean in the state file.
+
+    Usage: fzfr _internal-toggle-hidden <state_path>
+    """
+    if not argv:
+        return 1
+    path = Path(argv[0])
+    return _mutate_state(
+        path, lambda s: s.update({"show_hidden": not s.get("show_hidden", False)})
+    )
 
 
 # =============================================================================
-# fzfr-open
+# dispatch.py
 # =============================================================================
-#
-# Called when the user presses Enter in fzf. Opens the selected file either
-# locally (editor in a new tmux window, or xdg-open) or on the remote host
-# (ssh -t for text files, stream-then-open for binaries).
 
+def cmd_dispatch(argv: list[str]) -> int:
+    """Internal: dispatch preview and reload actions using the session backend.
+
+    Reconstructs the appropriate backend (LocalBackend or RemoteBackend) from
+    the persisted state file on every call. All local/remote branching lives
+    inside the backend implementation; this function contains none of it.
+
+    Usage: _internal-dispatch <state_path> <command> [args...]
+    """
+    if len(argv) < 2:
+        return 1
+
+    state_path, command = Path(argv[0]), argv[1]
+    command_args = argv[2:]
+
+    state = _load_state(state_path)
+    if not state:
+        return 1
+
+    backend = backend_from_state(state)
+    mode = state.get("mode", "content")
+    ftype = state.get("ftype", "f")
+    ext = state.get("ext", "")
+    hidden = state.get("show_hidden", False)
+    exclude_patterns = state.get("exclude_patterns", [])
+    path_format = state.get("path_format", "absolute")
+
+    if command == "preview":
+        filename = command_args[0] if command_args else ""
+        query = command_args[1] if len(command_args) > 1 else ""
+        # DESIGN: In relative path_format mode, fzf passes a path like
+        #         "./src/foo.py" which is relative to base_path, not to the
+        #         cwd of the preview sub-shell. Resolve it to an absolute path
+        #         here so all preview tools (bat, file, pdftotext, etc.) find
+        #         the file regardless of what directory fzf spawned from.
+        if filename and not Path(filename).is_absolute():
+            base_path = state.get("base_path", "")
+            if base_path:
+                filename = str(Path(base_path) / filename.removeprefix("./"))
+        return backend.preview(filename, query, mode)
+
+    if command == "reload":
+        query = command_args[0] if command_args else ""
+        return backend.reload(
+            query, ftype, ext, mode,
+            hidden=hidden,
+            exclude_patterns=exclude_patterns,
+            path_format=path_format,
+        )
+
+    return 1  # Unknown command
+
+
+# =============================================================================
+# open.py
+# =============================================================================
 
 def _find_editor() -> str:
     """Return the editor to use.
@@ -2233,7 +2179,6 @@ def _find_editor() -> str:
             return c
     return "vi"
 
-
 def _in_tmux() -> bool:
     """Return True if we are running inside a tmux session.
 
@@ -2242,7 +2187,6 @@ def _in_tmux() -> bool:
     terminal, so fzf remains visible and reusable.
     """
     return bool(os.environ.get("TMUX"))
-
 
 def _dquote(s: str) -> str:
     """Wrap s in double quotes, escaping the characters special inside them:
@@ -2260,7 +2204,6 @@ def _dquote(s: str) -> str:
     for ch in ("\\", '"', "$", "`", "!", "}"):
         s = s.replace(ch, "\\" + str(ch))
     return f'"{s}"'
-
 
 def _open(
     choice: str,
@@ -2356,16 +2299,44 @@ def _open(
             )
 
     elif is_remote:
-        # Binary remote file: stream to a local temp file then xdg-open.
-        # DESIGN: Written to system temp dir (not session dir) so it survives
-        #         _cleanup(). xdg-open detaches immediately and may still be
-        #         reading the file when the session dir is removed.
+        # Binary remote file: stream into the session directory then xdg-open.
         #
-        # SECURITY: mkstemp() creates the file atomically with O_CREAT|O_EXCL,
-        #           preventing a symlink race attack where another user pre-creates
-        #           a symlink at the predictable PID-based path to hijack the write.
+        # DESIGN: The session dir (parent of self_path) is private to this
+        #         session (mode 0o700) and is removed entirely by _cleanup()
+        #         on exit. No separate cleanup logic needed here.
+        #
+        # SIZE GUARD: Refuse files over the configured limit (max_stream_mb, default 100 MB).
+        #             WORK_BASE is tmpfs (RAM-backed), so large files consume memory.
+        #
+        # SECURITY: mkstemp() creates the file with O_CREAT|O_EXCL (mode 0o600).
+        _max_mb = CONFIG.get("max_stream_mb", 100)
+        _MAX_OPEN_BYTES = _max_mb * 1024 * 1024 if _max_mb > 0 else float("inf")
+        # Use `ls -l` for remote size — POSIX, works on Linux and macOS,
+        # does not read file content. Output field 4 (0-indexed) is the size.
+        _size_result = subprocess.run(
+            ["ssh"] + _ssh_opts(backend.ssh_control)
+            + [backend.remote, shlex.join(["ls", "-l", full_path_str])],
+            capture_output=True, text=True,
+        )
+        if _size_result.returncode == 0:
+            try:
+                _remote_size = int(_size_result.stdout.split()[4])
+                if _remote_size > _MAX_OPEN_BYTES:
+                    print(
+                        f"Error: remote file is too large to stream "
+                        f"({_remote_size // 1024 // 1024} MB > {_max_mb} MB limit). "
+                        f"Use ssh to access it directly.",
+                        file=sys.stderr,
+                    )
+                    return
+            except (ValueError, IndexError):
+                pass  # unparseable — proceed and let cat fail naturally
+
+        session_dir = self_path.parent if self_path is not None else WORK_BASE
         suffix = Path(full_path_str).suffix or ""
-        fd, temp_local = tempfile.mkstemp(prefix="fzfr-open-", suffix=suffix)
+        fd, temp_local = tempfile.mkstemp(
+            prefix="fzfr-open-", suffix=suffix, dir=session_dir
+        )
         try:
             with os.fdopen(fd, "wb") as fh:
                 subprocess.run(
@@ -2405,7 +2376,6 @@ def _open(
             stderr=subprocess.DEVNULL,
         )
 
-
 def cmd_open(argv: list[str]) -> int:
     """Entry point for the fzfr-open sub-command.
 
@@ -2415,7 +2385,7 @@ def cmd_open(argv: list[str]) -> int:
         argv[0]  target      — "local" or the ssh host string
         argv[1]  base_path   — absolute base directory used by fd
         argv[2]  remote      — ssh host (same as target for remote, "" for local)
-        argv[3]  remote_dir  — reserved (was: local temp dir for streamed binary files; no longer used)
+        argv[3]  remote_dir  — unused, kept for argv compatibility with existing fzf bind strings
         argv[4]  ssh_control — ControlPath socket, or "" to use ~/.ssh/config
         argv[5]  state_path  — session state file
         argv[6]  self_path   — path to the script (original or frozen)
@@ -2477,328 +2447,9 @@ def cmd_open(argv: list[str]) -> int:
     for choice in choices:
         _open(choice, editor, state, self_path, be)
     return 0
-
-
 # =============================================================================
-# fzfr-remote-reload
+# copy.py
 # =============================================================================
-#
-# Runs fd on the remote host via SSH and streams the results back to local
-# fzf as its item list. Called once at startup and on every CTRL-R / CTRL-S
-# keystroke. The remote host only needs fd in its PATH; no Python required.
-
-
-def _build_remote_cmd(
-    fd_args: list[str],
-    rga_glob_args: list[str],
-    query: str,
-    base_path: str,
-    relative: bool,
-) -> str:
-    """Build the shell command string to run on the remote host via SSH.
-
-    Returns a shell fragment safe to pass as the final argument to ssh.
-    All tokens are built with shlex.join / shlex.quote so no injection
-    is possible from unusual base_path, query, or extension values.
-
-    relative=True  — cd to base_path first; fd/rga run from "." so output
-                     paths are relative to the search root.
-    relative=False — pass base_path directly; output paths are absolute.
-    """
-    safe_base = shlex.quote(base_path)
-    fd_cmd = shlex.join(fd_args)
-    grep_cmd = shlex.join(["xargs", "-P4", "-0", "grep", "-ilF", query])
-
-    if not query:
-        if relative:
-            return (
-                f"cd {safe_base} 2>/dev/null && {fd_cmd} . "
-                f"|| {{ echo 'Error: cannot access directory' >&2; exit 1; }}"
-            )
-        return (
-            f"{fd_cmd} . {safe_base} "
-            f"|| {{ echo 'Error: cannot access directory' >&2; exit 1; }}"
-        )
-
-    # Content search: rga preferred, fd | grep fallback.
-    # PERF: -P4 parallelises grep across up to 4 workers on the remote host,
-    #       matching the local grep fallback behaviour.
-    if relative:
-        rga_cmd = shlex.join(
-            ["rga"] + rga_glob_args
-            + ["--files-with-matches", "--fixed-strings", query, "."]
-        )
-        fd_grep_cmd = shlex.join(fd_args + ["-0", "."])
-        return (
-            f"cd {safe_base} 2>/dev/null && "
-            f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
-        )
-    else:
-        rga_cmd = shlex.join(
-            ["rga"] + rga_glob_args
-            + ["--files-with-matches", "--fixed-strings", query, base_path]
-        )
-        fd_grep_cmd = shlex.join(fd_args + ["-0", ".", base_path])
-        return (
-            f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
-        )
-
-
-@dataclass
-class _RemoteReloadArgs:
-    """Parsed arguments for cmd_remote_reload."""
-    remote: str
-    base_path: str
-    ssh_control: str
-    ftype: str
-    ext: str
-    query: str = ""
-    hidden: bool = False
-    relative: bool = False
-    exclude_patterns: list[str] = field(default_factory=list)
-
-
-def _parse_remote_reload_args(argv: list[str]) -> "_RemoteReloadArgs | None":
-    """Parse argv for cmd_remote_reload. Returns None on error."""
-    if len(argv) < 5:
-        print(
-            "Usage: fzfr-remote-reload <remote> <base_path> <ssh_control> <type> <ext> "
-            "[query] [--hidden] [--relative] [--exclude <pattern> ...]",
-            file=sys.stderr,
-        )
-        return None
-
-    args = _RemoteReloadArgs(argv[0], argv[1], argv[2], argv[3], argv[4])
-    i = 5
-    while i < len(argv):
-        token = argv[i]
-        if token == "--hidden":
-            args.hidden = True
-        elif token == "--relative":
-            args.relative = True
-        elif token == "--exclude":
-            if i + 1 < len(argv):
-                args.exclude_patterns.append(argv[i + 1])
-                i += 1
-            else:
-                print("Error: --exclude requires an argument.", file=sys.stderr)
-                return None
-        elif not args.query:
-            args.query = token
-        i += 1
-    return args
-
-
-def _build_fd_rga_args(
-    ftype: str,
-    ext: str,
-    hidden: bool,
-    exclude_patterns: list[str],
-) -> tuple[list[str], list[str]]:
-    """Build fd and rga argument lists from shared search parameters.
-
-    Returns (fd_args, rga_glob_args). Both lists are ready to be extended
-    with search root and query arguments before use.
-
-    DESIGN: shlex.join() quotes every element so the resulting shell fragment
-            is safe to embed in the remote shell command string sent over SSH.
-    """
-    fd_args = ["fd", "-L", "--type", ftype]
-    rga_glob_args: list[str] = []
-    if hidden:
-        fd_args.append("--hidden")
-        rga_glob_args.append("--hidden")
-    for e in _parse_extensions(ext):
-        fd_args += ["-e", e]
-        rga_glob_args += ["-g", f"*.{e}"]
-    for p in exclude_patterns:
-        fd_args += ["-E", p]
-        rga_glob_args += ["--exclude", p]
-    return fd_args, rga_glob_args
-
-
-def cmd_remote_reload(argv: list[str]) -> int:
-    """Entry point for the fzfr-remote-reload sub-command.
-
-    Unified remote reload handler. With no query it lists files via fd;
-    with a query it searches file contents via rga (falling back to
-    fd | xargs grep). The single entry point covers both list and search.
-
-    Usage: fzfr fzfr-remote-reload <remote> <base_path> <ssh_control>
-                                         <type> <ext> [query] [--hidden] [--relative] [--exclude <pattern> ...]
-    """
-    args = _parse_remote_reload_args(argv)
-    if args is None:
-        return 1
-
-    fd_args, rga_glob_args = _build_fd_rga_args(
-        args.ftype, args.ext, args.hidden, args.exclude_patterns
-    )
-    remote_cmd = _build_remote_cmd(
-        fd_args, rga_glob_args, args.query, args.base_path, args.relative
-    )
-    r = subprocess.run(["ssh"] + _ssh_opts(args.ssh_control) + [args.remote, remote_cmd])
-    return r.returncode
-
-
-# =============================================================================
-# fzfr-remote-preview
-# =============================================================================
-#
-# DESIGN: Script-over-SSH — the entire script is piped to 'python3 -' on the
-#         remote host via stdin on every preview call. The remote only needs
-#         python3 in its PATH; no installation or file copying is required.
-#         SCRIPT_BYTES is cached at startup (see top of file) so repeated
-#         preview calls read from memory rather than disk.
-# LIMITATION: The full script (~60 KB) is sent over the SSH connection on
-#             every cursor movement. On high-latency links this dominates
-#             preview latency; SSH multiplexing (reusing the transport TCP
-#             connection) mitigates most of the overhead.
-
-
-def _upload_remote_script(ssh_prefix: list[str]) -> bool:
-    """Upload SCRIPT_BYTES to the remote script cache in one SSH call.
-
-    Creates ~/.cache/fzfr/ if needed, then writes the full script to
-    ~/.cache/fzfr/<SCRIPT_HASH>.py and marks it executable.
-
-    Called exactly once per remote host per script version — when the
-    bootstrap script exits with _BOOTSTRAP_CACHE_MISS (99), indicating the
-    cached copy is absent (first launch or after a script upgrade).
-
-    Returns True on success, False if the upload failed (in which case the
-    caller falls back to piping the full script inline as before).
-    """
-    if not SCRIPT_BYTES or not SCRIPT_HASH:
-        return False
-    remote_cache_dir_relative = ".cache/fzfr"
-    script_file_name = f"{SCRIPT_HASH}.py"
-    script_file_tmp_name = f"{SCRIPT_HASH}.py.tmp"
-
-    install_cmd = (
-        f"REMOTE_HOME=$(echo ~); "
-        f'REMOTE_CACHE_DIR="$REMOTE_HOME/{remote_cache_dir_relative}"; '
-        f'REMOTE_SCRIPT_TMP="$REMOTE_CACHE_DIR/{script_file_tmp_name}"; '
-        f'REMOTE_SCRIPT="$REMOTE_CACHE_DIR/{script_file_name}"; '
-        f'mkdir -p "$REMOTE_CACHE_DIR" && '
-        f'cat > "$REMOTE_SCRIPT_TMP" && '
-        f'mv "$REMOTE_SCRIPT_TMP" "$REMOTE_SCRIPT" && '
-        f'chmod 700 "$REMOTE_SCRIPT"'
-    )
-    r = subprocess.run(
-        ssh_prefix + [install_cmd],
-        input=SCRIPT_BYTES,
-    )
-    return r.returncode == 0
-
-
-def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
-    """Capturing variant of cmd_remote_preview — returns (rc, stdout_bytes).
-
-    Uses the bootstrap/hash caching strategy (same as cmd_remote_preview) so
-    the caller gets the benefit of the ~200 byte bootstrap transfer on all
-    subsequent calls after the first visit. capture_output=True lets the
-    caller inspect and cache the rendered output before writing it to stdout.
-    """
-    if len(argv) < 4:
-        return 1, b""
-
-    remote, base_path, ssh_control, filename = argv[0], argv[1], argv[2], argv[3]
-    query = argv[4] if len(argv) > 4 else ""
-
-    full_path = (
-        filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
-    )
-    ssh_prefix = ["ssh"] + _ssh_opts(ssh_control) + [remote]
-    if query:
-        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path, query])
-    else:
-        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path])
-
-    # Try bootstrap first (fast path: ~200 bytes sent).
-    if SCRIPT_BOOTSTRAP:
-        r = subprocess.run(
-            ssh_prefix + [remote_cmd],
-            input=SCRIPT_BOOTSTRAP,
-            capture_output=True,
-        )
-        if r.returncode != _BOOTSTRAP_CACHE_MISS:
-            return r.returncode, r.stdout
-        # Cache miss: upload once, then retry.
-        if _upload_remote_script(ssh_prefix):
-            r = subprocess.run(
-                ssh_prefix + [remote_cmd],
-                input=SCRIPT_BOOTSTRAP,
-                capture_output=True,
-            )
-            return r.returncode, r.stdout
-
-    # Fallback: send full script inline (upload failed or SCRIPT_BOOTSTRAP empty).
-    r = subprocess.run(
-        ssh_prefix + [remote_cmd],
-        input=SCRIPT_BYTES,
-        capture_output=True,
-    )
-    return r.returncode, r.stdout
-
-
-def cmd_remote_preview(argv: list[str]) -> int:
-    """Entry point for the fzfr-remote-preview sub-command.
-
-    Generates a preview of a file on a remote host. Uses hash-based remote
-    script caching to avoid piping the full ~60 KB script on every call:
-
-      Steady state  — sends SCRIPT_BOOTSTRAP (~200 bytes). The remote finds
-                      the cached script at ~/.cache/fzfr/<hash>.py and
-                      executes it directly.
-      First call    — bootstrap exits 99 (cache miss). The local side uploads
-                      the full script once via _upload_remote_script(), then
-                      retries with the bootstrap.
-      Upload failed — falls back to piping SCRIPT_BYTES inline as before.
-
-    DESIGN: The remote command string is built with shlex.join() so every
-            token (path, query) is individually shell-quoted — no injection
-            risk from unusual filenames or query strings.
-    """
-    if len(argv) < 4:
-        print(
-            "Usage: fzfr-remote-preview <remote> <base_path> <ssh_control> <filename> [query]",
-            file=sys.stderr,
-        )
-        return 1
-
-    remote, base_path, ssh_control, filename = argv[0], argv[1], argv[2], argv[3]
-    query = argv[4] if len(argv) > 4 else ""
-
-    full_path = (
-        filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
-    )
-    ssh_prefix = ["ssh"] + _ssh_opts(ssh_control) + [remote]
-    if query:
-        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path, query])
-    else:
-        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path])
-
-    # Fast path: send only the bootstrap (~200 bytes). The bootstrap checks
-    # for the cached script and execs it if present.
-    if SCRIPT_BOOTSTRAP:
-        r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
-        if r.returncode != _BOOTSTRAP_CACHE_MISS:
-            return r.returncode
-        # Cache miss: upload the full script once, then retry with bootstrap.
-        if _upload_remote_script(ssh_prefix):
-            r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
-            return r.returncode
-
-    # Fallback: send full script inline (bootstrap empty or upload failed).
-    r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BYTES)
-    return r.returncode
-
-
-# =============================================================================
-# fzfr  (main UI)
-# =============================================================================
-
 
 def cmd_copy(argv: list[str]) -> int:
     """Entry point for the fzfr-copy sub-command.
@@ -2861,7 +2512,6 @@ def cmd_copy(argv: list[str]) -> int:
         print("Error: Clipboard tool not found.", file=sys.stderr)
         return 1
 
-
 def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
     """Expand a remote path to its absolute form by querying the remote host.
 
@@ -2910,6 +2560,307 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
     return raw
 
 
+# =============================================================================
+# remote.py
+# =============================================================================
+
+def _build_remote_cmd(
+    fd_args: list[str],
+    rga_glob_args: list[str],
+    query: str,
+    base_path: str,
+    relative: bool,
+) -> str:
+    """Build the shell command string to run on the remote host via SSH.
+
+    Returns a shell fragment safe to pass as the final argument to ssh.
+    All tokens are built with shlex.join / shlex.quote so no injection
+    is possible from unusual base_path, query, or extension values.
+
+    relative=True  — cd to base_path first; fd/rga run from "." so output
+                     paths are relative to the search root.
+    relative=False — pass base_path directly; output paths are absolute.
+    """
+    safe_base = shlex.quote(base_path)
+    fd_cmd = shlex.join(fd_args)
+    grep_cmd = shlex.join(["xargs", "-P4", "-0", "grep", "-ilF", query])
+
+    if not query:
+        if relative:
+            return (
+                f"cd {safe_base} 2>/dev/null && {fd_cmd} . "
+                f"|| {{ echo 'Error: cannot access directory' >&2; exit 1; }}"
+            )
+        return (
+            f"{fd_cmd} . {safe_base} "
+            f"|| {{ echo 'Error: cannot access directory' >&2; exit 1; }}"
+        )
+
+    # Content search: rga preferred, fd | grep fallback.
+    # PERF: -P4 parallelises grep across up to 4 workers on the remote host,
+    #       matching the local grep fallback behaviour.
+    if relative:
+        rga_cmd = shlex.join(
+            ["rga"] + rga_glob_args
+            + ["--files-with-matches", "--fixed-strings", query, "."]
+        )
+        fd_grep_cmd = shlex.join(fd_args + ["-0", "."])
+        return (
+            f"cd {safe_base} 2>/dev/null && "
+            f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
+        )
+    else:
+        rga_cmd = shlex.join(
+            ["rga"] + rga_glob_args
+            + ["--files-with-matches", "--fixed-strings", query, base_path]
+        )
+        fd_grep_cmd = shlex.join(fd_args + ["-0", ".", base_path])
+        return (
+            f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
+        )
+
+@dataclass
+class _RemoteReloadArgs:
+    """Parsed arguments for cmd_remote_reload."""
+    remote: str
+    base_path: str
+    ssh_control: str
+    ftype: str
+    ext: str
+    query: str = ""
+    hidden: bool = False
+    relative: bool = False
+    exclude_patterns: list[str] = field(default_factory=list)
+
+def _parse_remote_reload_args(argv: list[str]) -> "_RemoteReloadArgs | None":
+    """Parse argv for cmd_remote_reload. Returns None on error."""
+    if len(argv) < 5:
+        print(
+            "Usage: fzfr-remote-reload <remote> <base_path> <ssh_control> <type> <ext> "
+            "[query] [--hidden] [--relative] [--exclude <pattern> ...]",
+            file=sys.stderr,
+        )
+        return None
+
+    args = _RemoteReloadArgs(argv[0], argv[1], argv[2], argv[3], argv[4])
+    i = 5
+    while i < len(argv):
+        token = argv[i]
+        if token == "--hidden":
+            args.hidden = True
+        elif token == "--relative":
+            args.relative = True
+        elif token == "--exclude":
+            if i + 1 < len(argv):
+                args.exclude_patterns.append(argv[i + 1])
+                i += 1
+            else:
+                print("Error: --exclude requires an argument.", file=sys.stderr)
+                return None
+        elif not args.query:
+            args.query = token
+        i += 1
+    return args
+
+def _build_fd_rga_args(
+    ftype: str,
+    ext: str,
+    hidden: bool,
+    exclude_patterns: list[str],
+) -> tuple[list[str], list[str]]:
+    """Build fd and rga argument lists from shared search parameters.
+
+    Returns (fd_args, rga_glob_args). Both lists are ready to be extended
+    with search root and query arguments before use.
+
+    DESIGN: shlex.join() quotes every element so the resulting shell fragment
+            is safe to embed in the remote shell command string sent over SSH.
+    """
+    fd_args = ["fd", "-L", "--type", ftype]
+    rga_glob_args: list[str] = []
+    if hidden:
+        fd_args.append("--hidden")
+        rga_glob_args.append("--hidden")
+    for e in _parse_extensions(ext):
+        fd_args += ["-e", e]
+        rga_glob_args += ["-g", f"*.{e}"]
+    for p in exclude_patterns:
+        fd_args += ["-E", p]
+        rga_glob_args += ["--exclude", p]
+    return fd_args, rga_glob_args
+
+def cmd_remote_reload(argv: list[str]) -> int:
+    """Entry point for the fzfr-remote-reload sub-command.
+
+    Unified remote reload handler. With no query it lists files via fd;
+    with a query it searches file contents via rga (falling back to
+    fd | xargs grep). The single entry point covers both list and search.
+
+    Usage: fzfr fzfr-remote-reload <remote> <base_path> <ssh_control>
+                                         <type> <ext> [query] [--hidden] [--relative] [--exclude <pattern> ...]
+    """
+    args = _parse_remote_reload_args(argv)
+    if args is None:
+        return 1
+
+    fd_args, rga_glob_args = _build_fd_rga_args(
+        args.ftype, args.ext, args.hidden, args.exclude_patterns
+    )
+    remote_cmd = _build_remote_cmd(
+        fd_args, rga_glob_args, args.query, args.base_path, args.relative
+    )
+    r = subprocess.run(["ssh"] + _ssh_opts(args.ssh_control) + [args.remote, remote_cmd])
+    return r.returncode
+
+# DESIGN: Script-over-SSH — the entire script is piped to 'python3 -' on the
+#         remote host via stdin on every preview call. The remote only needs
+#         python3 in its PATH; no installation or file copying is required.
+#         SCRIPT_BYTES is cached at startup (see top of file) so repeated
+#         preview calls read from memory rather than disk.
+# LIMITATION: The full script (~60 KB) is sent over the SSH connection on
+#             every cursor movement. On high-latency links this dominates
+#             preview latency; SSH multiplexing (reusing the transport TCP
+#             connection) mitigates most of the overhead.
+
+def _upload_remote_script(ssh_prefix: list[str]) -> bool:
+    """Upload SCRIPT_BYTES to the remote script cache in one SSH call.
+
+    Creates ~/.cache/fzfr/ if needed, then writes the full script to
+    ~/.cache/fzfr/<SCRIPT_HASH>.py and marks it executable.
+
+    Called exactly once per remote host per script version — when the
+    bootstrap script exits with _BOOTSTRAP_CACHE_MISS (99), indicating the
+    cached copy is absent (first launch or after a script upgrade).
+
+    Returns True on success, False if the upload failed (in which case the
+    caller falls back to piping the full script inline as before).
+    """
+    if not SCRIPT_BYTES or not SCRIPT_HASH:
+        return False
+    remote_cache_dir_relative = ".cache/fzfr"
+    script_file_name = f"{SCRIPT_HASH}.py"
+    script_file_tmp_name = f"{SCRIPT_HASH}.py.tmp"
+
+    install_cmd = (
+        f"REMOTE_HOME=$(echo ~); "
+        f'REMOTE_CACHE_DIR="$REMOTE_HOME/{remote_cache_dir_relative}"; '
+        f'REMOTE_SCRIPT_TMP="$REMOTE_CACHE_DIR/{script_file_tmp_name}"; '
+        f'REMOTE_SCRIPT="$REMOTE_CACHE_DIR/{script_file_name}"; '
+        f'mkdir -p "$REMOTE_CACHE_DIR" && '
+        f'cat > "$REMOTE_SCRIPT_TMP" && '
+        f'mv "$REMOTE_SCRIPT_TMP" "$REMOTE_SCRIPT" && '
+        f'chmod 700 "$REMOTE_SCRIPT"'
+    )
+    r = subprocess.run(
+        ssh_prefix + [install_cmd],
+        input=SCRIPT_BYTES,
+    )
+    return r.returncode == 0
+
+def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
+    """Capturing variant of cmd_remote_preview — returns (rc, stdout_bytes).
+
+    Uses the bootstrap/hash caching strategy (same as cmd_remote_preview) so
+    the caller gets the benefit of the ~200 byte bootstrap transfer on all
+    subsequent calls after the first visit. capture_output=True lets the
+    caller inspect and cache the rendered output before writing it to stdout.
+    """
+    if len(argv) < 4:
+        return 1, b""
+
+    remote, base_path, ssh_control, filename = argv[0], argv[1], argv[2], argv[3]
+    query = argv[4] if len(argv) > 4 else ""
+
+    full_path = (
+        filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
+    )
+    ssh_prefix = ["ssh"] + _ssh_opts(ssh_control) + [remote]
+    if query:
+        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path, query])
+    else:
+        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path])
+
+    # Try bootstrap first (fast path: ~200 bytes sent).
+    if SCRIPT_BOOTSTRAP:
+        r = subprocess.run(
+            ssh_prefix + [remote_cmd],
+            input=SCRIPT_BOOTSTRAP,
+            capture_output=True,
+        )
+        if r.returncode != _BOOTSTRAP_CACHE_MISS:
+            return r.returncode, r.stdout
+        # Cache miss: upload once, then retry.
+        if _upload_remote_script(ssh_prefix):
+            r = subprocess.run(
+                ssh_prefix + [remote_cmd],
+                input=SCRIPT_BOOTSTRAP,
+                capture_output=True,
+            )
+            return r.returncode, r.stdout
+
+    # Fallback: send full script inline (upload failed or SCRIPT_BOOTSTRAP empty).
+    r = subprocess.run(
+        ssh_prefix + [remote_cmd],
+        input=SCRIPT_BYTES,
+        capture_output=True,
+    )
+    return r.returncode, r.stdout
+
+def cmd_remote_preview(argv: list[str]) -> int:
+    """Entry point for the fzfr-remote-preview sub-command.
+
+    Generates a preview of a file on a remote host. Uses hash-based remote
+    script caching to avoid piping the full ~60 KB script on every call:
+
+      Steady state  — sends SCRIPT_BOOTSTRAP (~200 bytes). The remote finds
+                      the cached script at ~/.cache/fzfr/<hash>.py and
+                      executes it directly.
+      First call    — bootstrap exits 99 (cache miss). The local side uploads
+                      the full script once via _upload_remote_script(), then
+                      retries with the bootstrap.
+      Upload failed — falls back to piping SCRIPT_BYTES inline as before.
+
+    DESIGN: The remote command string is built with shlex.join() so every
+            token (path, query) is individually shell-quoted — no injection
+            risk from unusual filenames or query strings.
+    """
+    if len(argv) < 4:
+        print(
+            "Usage: fzfr-remote-preview <remote> <base_path> <ssh_control> <filename> [query]",
+            file=sys.stderr,
+        )
+        return 1
+
+    remote, base_path, ssh_control, filename = argv[0], argv[1], argv[2], argv[3]
+    query = argv[4] if len(argv) > 4 else ""
+
+    full_path = (
+        filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
+    )
+    ssh_prefix = ["ssh"] + _ssh_opts(ssh_control) + [remote]
+    if query:
+        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path, query])
+    else:
+        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path])
+
+    # Fast path: send only the bootstrap (~200 bytes). The bootstrap checks
+    # for the cached script and execs it if present.
+    if SCRIPT_BOOTSTRAP:
+        r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
+        if r.returncode != _BOOTSTRAP_CACHE_MISS:
+            return r.returncode
+        # Cache miss: upload the full script once, then retry with bootstrap.
+        if _upload_remote_script(ssh_prefix):
+            r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
+            return r.returncode
+
+    # Fallback: send full script inline (bootstrap empty or upload failed).
+    r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BYTES)
+    return r.returncode
+# =============================================================================
+# search.py
+# =============================================================================
+
 def _self_cmd(path: Path | str | None) -> str:
     """Return a shell-safe invocation string for the given script path.
 
@@ -2923,11 +2874,9 @@ def _self_cmd(path: Path | str | None) -> str:
         return "python3"
     return f"python3 {shlex.quote(str(path))}"
 
-
 # Minimum fzf version required for the action chains used in build_fzf_invocation:
 # transform-prompt, transform-header, execute-silent, disable-search (0.38+).
 _FZF_MIN_VERSION = (0, 38)
-
 
 def _parse_fzf_version(version_str: str) -> tuple[int, ...]:
     """Parse the first two numeric components from 'fzf --version' output.
@@ -2938,7 +2887,6 @@ def _parse_fzf_version(version_str: str) -> tuple[int, ...]:
     """
     m = re.match(r"(\d+)\.(\d+)", version_str.strip())
     return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
-
 
 def check_dependencies() -> None:
     """Verify that mandatory tools (fzf, fd) are installed and version-compatible.
@@ -2990,7 +2938,6 @@ def check_dependencies() -> None:
             file=sys.stderr,
         )
 
-
 def _dispatch_cmd(
     ctx: SearchContext, state_path: Path, subcommand: str, *extra: str
 ) -> str:
@@ -3010,7 +2957,6 @@ def _dispatch_cmd(
     safe_state = shlex.quote(str(state_path))
     parts = [self_cmd, subcommand, safe_state] + list(extra)
     return " ".join(parts)
-
 
 def build_fzf_invocation(
     ctx: SearchContext,
@@ -3152,7 +3098,6 @@ def build_fzf_invocation(
         ),
     ]
 
-
 def _cleanup(session_dir: Path, ssh_control: str) -> None:
     """Remove temporary files and optionally close the managed SSH master.
 
@@ -3175,25 +3120,23 @@ def _cleanup(session_dir: Path, ssh_control: str) -> None:
                 stderr=subprocess.DEVNULL,
             )
 
-    # rmtree removes the frozen script, state file, remote-bin dir, and SSH
-    # socket in one shot.
+    # rmtree removes the frozen script, state file, remote-bin dir, SSH
+    # socket, and any fzfr-open-* temp files created during this session.
     if session_dir.exists():
         shutil.rmtree(str(session_dir), ignore_errors=True)
 
-    # Sweep orphaned session dirs left behind by previous crashes or SIGKILL. The
-    # 5-minute mtime threshold avoids racing with a concurrently running session.
+    # Sweep orphaned session directories left behind by previous crashes or SIGKILL.
+    # The 5-minute mtime threshold avoids racing with a concurrently running session.
+    # fzfr-open-* temp files are swept by the background monitor thread instead.
     if WORK_BASE.is_dir():
         now = time.time()
         for entry in os.scandir(str(WORK_BASE)):
-            # DESIGN: Limit sweep to session-* prefix so unrelated files the
-            #         user may have placed in WORK_BASE are never deleted.
             if (
                 entry.is_dir()
                 and entry.name.startswith("fzfr-session-")
                 and now - entry.stat().st_mtime > 300
             ):
                 shutil.rmtree(entry.path, ignore_errors=True)
-
 
 def _find_git_root() -> str | None:
     """Search upwards from the current directory for a .git folder.
@@ -3211,7 +3154,6 @@ def _find_git_root() -> str | None:
         if (parent / ".git").is_dir():
             return str(parent)
     return None
-
 
 def cmd_search(argv: list[str]) -> int:
     """Entry point for the main fzfr UI.
@@ -3325,6 +3267,32 @@ def cmd_search(argv: list[str]) -> int:
             lambda *_: (_cleanup(session_dir, ssh_control), sys.exit(0)),
         )
 
+    # Background thread: delete fzfr-open-* temp files from this session's
+    # directory once they are older than 30 seconds. Each file is a remote
+    # binary streamed for xdg-open — 30 s is enough for any application to
+    # finish reading from tmpfs. Scoped to session_dir only, so concurrent
+    # sessions never interfere with each other. Daemon thread so it never
+    # blocks process exit; _cleanup() removes anything left on exit anyway.
+    def _open_file_sweeper() -> None:
+        while True:
+            time.sleep(10)
+            now = time.time()
+            try:
+                for entry in os.scandir(str(session_dir)):
+                    if (
+                        entry.is_file()
+                        and entry.name.startswith("fzfr-open-")
+                        and now - entry.stat().st_mtime > 30
+                    ):
+                        try:
+                            os.unlink(entry.path)
+                        except OSError:
+                            pass
+            except OSError:
+                pass  # session_dir removed by _cleanup — thread will exit next iteration
+
+    threading.Thread(target=_open_file_sweeper, daemon=True, name="fzfr-open-sweeper").start()
+
     try:
         # Build the backend — it resolves the base path and owns all local/remote
         # divergence for the rest of the session.
@@ -3411,24 +3379,15 @@ def cmd_search(argv: list[str]) -> int:
         _cleanup(session_dir, ssh_control)
 
     return 0
-
-
 # =============================================================================
-# Entry point & busybox-style dispatch
+# entry point
 # =============================================================================
-#
-# This script acts as a dispatcher like busybox: a single binary that behaves
-# differently depending on the name it is called as. Two invocation modes:
-#
-#   Symlink mode:    the script is symlinked as e.g. "fzfr-preview" and called
-#                    directly. argv[0] == "fzfr-preview" tells us the intent.
-#
-#   Sub-command mode: the script is called as "fzfr fzfr-preview …".
-#                    argv[1] == "fzfr-preview" tells us the intent.
-#
-# The "fzfr" name is excluded from the symlink-mode check to prevent
-# the script from trying to dispatch to cmd_search when invoked as itself and
-# given a sub-command as its first argument (the elif branch handles that case).
+
+# Re-exported from ._script — used by remote.py, search.py, and the built flat file.
+__all__ = [
+    "VERSION", "SELF", "SCRIPT_BYTES", "SCRIPT_HASH", "SCRIPT_BOOTSTRAP",
+    "_BOOTSTRAP_CACHE_MISS",
+]
 
 COMMAND_MAP = {
     "fzfr-preview": cmd_preview,
@@ -3449,7 +3408,6 @@ COMMAND_MAP = {
     "_internal-dispatch": cmd_dispatch,  # preview + reload
 }
 
-
 def main():
     """Resolve which sub-command to run and execute it."""
     invoked_as = Path(sys.argv[0]).name
@@ -3462,7 +3420,6 @@ def main():
         fn, args = cmd_search, sys.argv[1:]
 
     sys.exit(fn(args))
-
 
 if __name__ == "__main__":
     main()
