@@ -518,6 +518,14 @@ _CONFIG_DEFAULTS: dict = {
     # "absolute" — full paths (e.g. /home/user/project/src/foo.py)
     # "relative" — paths relative to the search root (e.g. src/foo.py)
     "path_format": "relative",
+    # File listing source.
+    # "auto" — use git ls-files when inside a git repo, fd everywhere else
+    # "fd"   — always use fd (original behaviour)
+    # "git"  — always use git ls-files (errors outside a repo)
+    # For remote hosts, "auto" behaves like "fd" unless explicitly set to
+    # "git" — detecting a remote git repo requires an extra SSH round-trip
+    # that is too expensive to run on every keystroke.
+    "file_source": "auto",
 }
 
 def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) -> None:
@@ -557,6 +565,16 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
                 )
             else:
                 cfg[key][action] = kbd
+
+    elif key == "file_source":
+        if user_value not in ("auto", "fd", "git"):
+            print(
+                "Warning: config key 'file_source' must be 'auto', 'fd', or 'git', "
+                "using default.",
+                file=sys.stderr,
+            )
+            return
+        cfg[key] = user_value
 
     else:
         # SECURITY: isinstance() handles subclasses correctly (e.g. bool is a
@@ -601,17 +619,10 @@ CONFIG = load_config()
 # PERF: shutil.which() probes PATH on every call. Running it once at import
 #       time and storing results in a frozenset lets every subsequent lookup
 #       be an O(1) set membership test with no subprocess or filesystem I/O.
-#
-#       This matters because LocalBackend.reload() runs on every keystroke and
-#       previously called subprocess.run(["rga", ...]) only to catch
-#       FileNotFoundError when rga is absent — a wasted fork per keystroke.
-#       _try_run() can now skip tools that are absent without forking at all.
-#
-#       The set is intentionally frozen: tool availability must not change
-#       within a session, and a frozenset makes that contract explicit.
 _ALL_TOOLS = [
     "fzf",
     "fd",
+    "git",
     "bat",
     "rga",
     "pdftotext",
@@ -1161,6 +1172,60 @@ def _list_archive(filepath: str, hint: str) -> None:
 # backends.py
 # =============================================================================
 
+def _is_git_repo(path: str) -> bool:
+    """Return True if path is inside a git repository.
+
+    Checks for a .git directory at the given path or any parent. Uses the
+    same upward-walk approach as _find_git_root() but is self-contained so
+    backends.py does not need to import from search.py.
+
+    PERF: Pure filesystem check — no subprocess. Called once per reload on
+    the local backend when file_source is "auto".
+    """
+    p = Path(path).resolve()
+    for parent in [p] + list(p.parents):
+        if (parent / ".git").is_dir():
+            return True
+    return False
+
+def _git_ls_files_cmd(
+    hidden: bool,
+    exclude_patterns: list[str],
+    ext: str,
+) -> list[str]:
+    """Return the argv list for a git ls-files invocation.
+
+    Tracked files only by default (-c). With hidden=True, also includes
+    untracked files that are not gitignored (--others --exclude-standard),
+    mirroring what fd --hidden adds: files the user chose not to ignore.
+
+    Extension filtering uses git pathspecs (-- '*.py' '*.rs') appended after
+    a -- separator, equivalent to fd's -e flag.
+
+    exclude_patterns are passed as --exclude globs. git ls-files accepts them
+    natively so no post-filter is needed.
+
+    DESIGN: path_format (absolute vs relative) is NOT handled here — git
+    ls-files always outputs paths relative to cwd when run from inside the
+    repo. The caller is responsible for prepending base_path for absolute
+    output (see _reload_git and _build_git_remote_cmd).
+    """
+    args = ["git", "ls-files", "-c"]
+    if hidden:
+        args += ["--others", "--exclude-standard"]
+    for p in exclude_patterns:
+        if not _validate_exclude_pattern(p):
+            print(f"Warning: ignoring unsafe exclude pattern {p!r}", file=sys.stderr)
+            continue
+        args += ["--exclude", p]
+    # Extension pathspecs: must come after -- to be treated as patterns not flags
+    exts = _parse_extensions(ext)
+    if exts:
+        args.append("--")
+        for e in exts:
+            args.append(f"*.{e}")
+    return args
+
 @dataclass
 class SearchContext:
     """Consolidates path and connection state for a fzfr session."""
@@ -1175,69 +1240,23 @@ class SearchContext:
     ssh_control: str = field(default="")
     ftype: str = "f"  # "f" for files, "d" for directories
     ext: str = ""  # file extension filter, e.g. "py"
-    exclude_patterns: list[str] = field(default_factory=list)  # exclude patterns
+    exclude_patterns: list[str] = field(default_factory=list)
     self_path: Path | None = None  # path to the script (original or frozen)
-
-# =============================================================================
-# Backend abstraction  (LocalBackend / RemoteBackend)
-# =============================================================================
-#
-# Almost every action in fzfr has a local variant and a remote variant.
-# Previously this split lived as inline `if ctx.remote:` branches scattered
-# across cmd_dispatch and _open.
-#
-# The Backend Protocol centralises the divergence into two concrete classes.
-# Call sites ask the backend what to do; they never inspect ctx.remote directly.
-#
-# The backend instance is constructed once in cmd_search (from SearchContext)
-# and re-constructed from the state dict in cmd_dispatch — exactly the places
-# where we already know whether the session is local or remote.
 
 @runtime_checkable
 class Backend(Protocol):
     """Operations that differ between local-filesystem and SSH-remote sessions."""
 
-    base_path: str  # absolute search root for this session
-    ssh_control: str  # ControlPath socket, or "" to defer to ~/.ssh/config
+    base_path: str
+    ssh_control: str
 
-    def resolve_base(self, raw: str) -> str:
-        """Expand a raw path argument to an absolute path for this backend.
-
-        For local backends, resolves relative paths and ~ via pathlib.
-        For remote backends, asks the remote shell to expand ~ and pwd.
-        """
-        ...
-
-    def is_safe_subpath(self, path: str) -> bool:
-        """Return True if path resolves to a location inside base_path.
-
-        Uses realpath / os.path.realpath to follow symlinks before checking,
-        so symlinks pointing outside the search root are correctly blocked.
-        """
-        ...
-
-    def is_dir(self, path: str) -> bool:
-        """Return True if path is a directory (following symlinks)."""
-        ...
-
-    def get_mime(self, path: str) -> str:
-        """Return the MIME type string for path, e.g. 'text/plain'.
-
-        Returns "" if file(1) is unavailable or fails.
-        """
-        ...
-
-    def preview(self, filename: str, query: str, mode: str) -> int:
-        """Render a preview of filename to stdout. Returns exit code."""
-        ...
-
-    def reload(self, query: str, ftype: str, ext: str, mode: str) -> int:
-        """Emit the file/match list to stdout for fzf to display. Returns exit code."""
-        ...
-
-    def initial_list_cmd(self, frozen_self: Path) -> list[str]:
-        """Return the argv list for the initial file list (name-mode only)."""
-        ...
+    def resolve_base(self, raw: str) -> str: ...
+    def is_safe_subpath(self, path: str) -> bool: ...
+    def is_dir(self, path: str) -> bool: ...
+    def get_mime(self, path: str) -> str: ...
+    def preview(self, filename: str, query: str, mode: str) -> int: ...
+    def reload(self, query: str, ftype: str, ext: str, mode: str) -> int: ...
+    def initial_list_cmd(self, frozen_self: Path) -> list[str]: ...
 
 class LocalBackend:
     """Backend implementation for local filesystem searches."""
@@ -1251,9 +1270,9 @@ class LocalBackend:
         exclude_patterns: list[str] | None = None,
     ) -> None:
         self.base_path = base_path
-        self.ssh_control = ssh_control  # unused locally; kept for Protocol compat
+        self.ssh_control = ssh_control
         self._cache = cache
-        self._frozen_self = frozen_self  # frozen script path for cache-miss subprocess
+        self._frozen_self = frozen_self
         self.exclude_patterns = exclude_patterns if exclude_patterns is not None else []
 
     def resolve_base(self, raw: str) -> str:
@@ -1276,9 +1295,6 @@ class LocalBackend:
         return _get_mime(path)
 
     def preview(self, filename: str, query: str, mode: str) -> int:
-        # PERF: Check the preview cache before spawning any subprocess.
-        #       Cache key: path + nanosecond mtime (detects file changes) + query
-        #       (different queries produce different highlighted output).
         cache = self._cache
         mtime: int | None = None
         cache_key: str = ""
@@ -1292,18 +1308,11 @@ class LocalBackend:
                     sys.stdout.buffer.flush()
                     return 0
 
-        # Cache miss: build the argv for cmd_preview.
         preview_args = [filename]
         if mode == "content":
             preview_args.append(query)
 
         if cache is not None and mtime is not None and self._frozen_self is not None:
-            # DESIGN: _passthrough() uses subprocess.run with inherited stdout,
-            #         so Python-level stdout redirection cannot capture its output.
-            #         We re-invoke this script as a subprocess with capture_output=True
-            #         to collect the rendered bytes, then replay them and cache.
-            #         The extra fork cost (~5 ms) is paid only on a cache miss;
-            #         all subsequent visits to the same file cost ~0.1 ms.
             r = subprocess.run(
                 [sys.executable, str(self._frozen_self), "fzfr-preview"] + preview_args,
                 capture_output=True,
@@ -1318,6 +1327,21 @@ class LocalBackend:
         cmd_preview = globals()["cmd_preview"]
         return cmd_preview(preview_args)
 
+    def _use_git(self, ftype: str, file_source: str) -> bool:
+        """Return True if git ls-files should be used for this listing.
+
+        Only used for file listings (ftype=="f"). Directory listings always
+        use fd since git ls-files does not list directories.
+        For "auto": check for a .git directory at or above base_path.
+        """
+        if ftype != "f":
+            return False
+        if file_source == "git":
+            return True
+        if file_source == "auto" and "git" in AVAILABLE_TOOLS:
+            return _is_git_repo(self.base_path)
+        return False
+
     def reload(
         self,
         query: str,
@@ -1327,9 +1351,16 @@ class LocalBackend:
         hidden: bool = False,
         exclude_patterns: list[str] | None = None,
         path_format: str = "absolute",
+        file_source: str = "auto",
     ) -> int:
         if exclude_patterns is None:
             exclude_patterns = []
+
+        # Git ls-files path (name mode only — content search still uses rga/grep)
+        if mode == "name" and self._use_git(ftype, file_source):
+            return self._reload_git(hidden, exclude_patterns, path_format, query, ext)
+
+        # fd path (original behaviour)
         fd_args = ["fd", "-L", "--type", ftype]
         if hidden:
             fd_args.append("--hidden")
@@ -1341,9 +1372,6 @@ class LocalBackend:
                 continue
             fd_args += ["-E", p]
 
-        # DESIGN: For relative paths, run fd from base_path (cwd) with root "."
-        #         so output is relative to the search root. For absolute paths,
-        #         pass base_path as the search root so fd emits full paths.
         if path_format == "relative":
             fd_root, fd_cwd = ["."], self.base_path
         else:
@@ -1359,14 +1387,56 @@ class LocalBackend:
 
         return subprocess.run(fd_args + fd_root, cwd=fd_cwd).returncode
 
+    def _reload_git(
+        self,
+        hidden: bool,
+        exclude_patterns: list[str],
+        path_format: str,
+        query: str,
+        ext: str,
+    ) -> int:
+        """Run git ls-files and emit results to stdout for fzf.
+
+        DESIGN: git ls-files always runs from base_path (cwd) and emits
+        paths relative to that directory — the same as fd in relative mode.
+        For absolute path_format we prepend base_path to each line via awk,
+        keeping the output consistent with what fzf expects.
+        """
+        args = _git_ls_files_cmd(hidden, exclude_patterns, ext)
+
+        if path_format == "relative":
+            return subprocess.run(args, cwd=self.base_path).returncode
+
+        # Absolute: pipe through awk to prepend base_path/
+        # Using awk avoids a Python per-line loop and keeps output streaming.
+        safe_base = self.base_path.rstrip("/")
+        p1 = subprocess.Popen(args, cwd=self.base_path, stdout=subprocess.PIPE)
+        assert p1.stdout is not None
+        p2 = subprocess.run(
+            ["awk", f'{{print "{safe_base}/" $0}}'],
+            stdin=p1.stdout,
+        )
+        p1.stdout.close()
+        p1.wait()
+        return p2.returncode
+
     def initial_list_cmd(
-        self, _frozen_self: Path, hidden: bool = False, exclude_patterns: list[str] | None = None,
+        self,
+        _frozen_self: Path,
+        hidden: bool = False,
+        exclude_patterns: list[str] | None = None,
         path_format: str = "absolute",
+        file_source: str = "auto",
     ) -> list[str]:
-        # _frozen_self unused here — LocalBackend lists files directly via fd.
-        # RemoteBackend uses it to locate the script for SSH upload.
         if exclude_patterns is None:
             exclude_patterns = []
+
+        if self._use_git("f", file_source):
+            # git ls-files is always run with cwd=base_path (handled by the
+            # caller in cmd_search via list_cwd). No ext filter at initial list
+            # time — the user hasn't typed a filter yet, so pass empty string.
+            return _git_ls_files_cmd(hidden, exclude_patterns, "")
+
         args = ["fd", "-L", "--type", "f"]
         if hidden:
             args.append("--hidden")
@@ -1397,7 +1467,6 @@ class RemoteBackend:
         self.exclude_patterns = exclude_patterns if exclude_patterns is not None else []
 
     def _ssh(self) -> list[str]:
-        """Return the base SSH argv prefix: ["ssh", <opts...>, <remote>]."""
         return ["ssh"] + _ssh_opts(self.ssh_control) + [self.remote]
 
     def resolve_base(self, raw: str) -> str:
@@ -1435,9 +1504,6 @@ class RemoteBackend:
         return out.strip() if rc == 0 else ""
 
     def preview(self, filename: str, query: str, mode: str) -> int:
-        # PERF: Debounce remote previews to avoid thrashing SSH connections
-        #       during fast scrolling. 50 ms is negligible for SSH latency but
-        #       saves many redundant round-trips during fast cursor movement.
         time.sleep(0.05)
 
         full_path = (
@@ -1446,10 +1512,6 @@ class RemoteBackend:
             else str(Path(self.base_path) / filename)
         )
 
-        # PERF: Check cache before paying the SSH round-trip + ~60 KB script
-        #       transfer cost. Remote mtime requires one extra SSH call, but on
-        #       a multiplexed connection that is ~5 ms vs ~200 ms for the full
-        #       preview — a net saving of ~195 ms on every cache hit.
         cache = self._cache
         mtime: str | None = None
         cache_key: str = ""
@@ -1468,7 +1530,6 @@ class RemoteBackend:
             args.append(query)
 
         if cache is not None and mtime is not None:
-            # Capture the SSH preview output so we can cache it before replay.
             _cmd_remote_preview_capture = globals()["_cmd_remote_preview_capture"]
             rc, data = _cmd_remote_preview_capture(args)
             sys.stdout.buffer.write(data)
@@ -1489,15 +1550,11 @@ class RemoteBackend:
         hidden: bool = False,
         exclude_patterns: list[str] | None = None,
         path_format: str = "absolute",
+        file_source: str = "auto",
     ) -> int:
         if exclude_patterns is None:
             exclude_patterns = []
         args = [self.remote, self.base_path, self.ssh_control, ftype, ext]
-        # DESIGN: query is only a content search term in content mode.
-        #         In name mode it is fzf's fuzzy filter string — it must NOT
-        #         be forwarded to cmd_remote_reload, which would interpret any
-        #         non-empty string as a grep/rga content query and return
-        #         content matches instead of a file listing for fzf to filter.
         if mode == "content" and query:
             args.append(query)
         if hidden:
@@ -1507,12 +1564,21 @@ class RemoteBackend:
             args.append(p)
         if path_format == "relative":
             args.append("--relative")
+        # For remote "auto" defaults to "fd" — detecting a remote git repo
+        # requires an extra SSH round-trip, too expensive per keystroke.
+        # Users who want git ls-files on remote should set file_source="git".
+        if file_source == "git":
+            args.append("--file-source=git")
         cmd_remote_reload = globals()["cmd_remote_reload"]
         return cmd_remote_reload(args)
 
     def initial_list_cmd(
-        self, frozen_self: Path, hidden: bool = False, exclude_patterns: list[str] | None = None,
+        self,
+        frozen_self: Path,
+        hidden: bool = False,
+        exclude_patterns: list[str] | None = None,
         path_format: str = "absolute",
+        file_source: str = "auto",
     ) -> list[str]:
         if exclude_patterns is None:
             exclude_patterns = []
@@ -1533,15 +1599,12 @@ class RemoteBackend:
             args.append(p)
         if path_format == "relative":
             args.append("--relative")
+        if file_source == "git":
+            args.append("--file-source=git")
         return args
 
 def backend_from_state(state: dict) -> LocalBackend | RemoteBackend:
-    """Reconstruct the appropriate backend from a persisted state dict.
-
-    Called at the start of every cmd_dispatch invocation. The state dict
-    carries all the fields needed to build either backend type, including
-    the session dir (derived from self_path) needed to locate the cache.
-    """
+    """Reconstruct the appropriate backend from a persisted state dict."""
     remote = state.get("remote", "")
     base_path = state.get("base_path", "")
     ssh_control = state.get("ssh_control", "")
@@ -1581,15 +1644,8 @@ def _local_content_search(
     base_path: str,
     path_format: str,
 ) -> int:
-    """Run a local content search using rga or fd+grep fallback.
-
-    Returns the exit code of the search command. rga is preferred when
-    available; fd | xargs grep is used as a fallback.
-    """
+    """Run a local content search using rga or fd+grep fallback."""
     if "rga" in AVAILABLE_TOOLS:
-        # PERF: Check AVAILABLE_TOOLS before forking. Previously this called
-        #       subprocess.run(["rga", ...]) and caught FileNotFoundError —
-        #       a wasted fork()+exec() on every keystroke when rga is absent.
         rga_cmd = ["rga"]
         if hidden:
             rga_cmd.append("--hidden")
@@ -1604,13 +1660,8 @@ def _local_content_search(
         r = subprocess.run(rga_cmd, cwd=fd_cwd, stderr=subprocess.DEVNULL)
         if r.returncode == 0:
             return 0
-        # rga found but returned non-zero — no matches, don't fallback
-        # to grep (different tool, different scope). Return as-is.
         return r.returncode
 
-    # grep fallback (rga absent): fd -0 | xargs -P4 grep
-    # PERF: -P4 parallelises grep across up to 4 worker processes,
-    #       significantly speeding up content searches on large repos.
     p1 = subprocess.Popen(
         fd_args + ["-0"] + fd_root,
         cwd=fd_cwd,
@@ -1721,6 +1772,52 @@ def _preview_text(filepath: str, query: str) -> None:
             ],
             "Preview failed",
         )
+    _preview_git_context(filepath)
+
+def _preview_git_context(filepath: str) -> None:
+    """Append a git context block to the preview pane for the given file.
+
+    Shows the last 5 commits that touched the file and the current
+    uncommitted diff. Both sections are omitted silently when git is
+    unavailable, the file is not tracked, or the working directory is
+    not inside a git repository.
+
+    DESIGN: Runs git with stderr suppressed so no error messages leak into
+    the preview pane. Uses subprocess.run with capture_output rather than
+    _passthrough so we can check for empty output before printing the
+    separator — avoiding a trailing divider when the file is outside a repo.
+    """
+    if "git" not in AVAILABLE_TOOLS:
+        return
+
+    log_result = subprocess.run(
+        ["git", "log", "--oneline", "--color=always", "-5", "--", filepath],
+        capture_output=True,
+        text=True,
+    )
+    log_out = log_result.stdout.strip()
+
+    diff_result = subprocess.run(
+        ["git", "diff", "HEAD", "--color=always", "--", filepath],
+        capture_output=True,
+        text=True,
+    )
+    diff_out = diff_result.stdout.strip()
+
+    if not log_out and not diff_out:
+        return  # not in a repo, or file is untracked with no changes
+
+    print("\n\033[2m" + "─" * 40 + "\033[0m")  # dim separator
+
+    if log_out:
+        print("\033[2mgit log\033[0m")
+        print(log_out)
+
+    if diff_out:
+        if log_out:
+            print()
+        print("\033[2mgit diff HEAD\033[0m")
+        print(diff_out)
 
 def _preview_archive(filepath: str, hint: str, query: str) -> None:
     """Render an archive file in the preview pane.
@@ -2166,15 +2263,11 @@ def cmd_dispatch(argv: list[str]) -> int:
     hidden = state.get("show_hidden", False)
     exclude_patterns = state.get("exclude_patterns", [])
     path_format = state.get("path_format", "absolute")
+    file_source = state.get("file_source", "auto")
 
     if command == "preview":
         filename = command_args[0] if command_args else ""
         query = command_args[1] if len(command_args) > 1 else ""
-        # DESIGN: In relative path_format mode, fzf passes a path like
-        #         "./src/foo.py" which is relative to base_path, not to the
-        #         cwd of the preview sub-shell. Resolve it to an absolute path
-        #         here so all preview tools (bat, file, pdftotext, etc.) find
-        #         the file regardless of what directory fzf spawned from.
         if filename and not Path(filename).is_absolute():
             base_path = state.get("base_path", "")
             if base_path:
@@ -2188,10 +2281,10 @@ def cmd_dispatch(argv: list[str]) -> int:
             hidden=hidden,
             exclude_patterns=exclude_patterns,
             path_format=path_format,
+            file_source=file_source,
         )
 
     return 1  # Unknown command
-
 
 # =============================================================================
 # open.py
@@ -2633,9 +2726,6 @@ def _build_remote_cmd(
             f"|| {{ echo 'Error: cannot access directory' >&2; exit 1; }}"
         )
 
-    # Content search: rga preferred, fd | grep fallback.
-    # PERF: -P4 parallelises grep across up to 4 workers on the remote host,
-    #       matching the local grep fallback behaviour.
     if relative:
         rga_cmd = shlex.join(
             ["rga"] + rga_glob_args
@@ -2656,6 +2746,49 @@ def _build_remote_cmd(
             f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
         )
 
+def _build_git_remote_cmd(
+    hidden: bool,
+    exclude_patterns: list[str],
+    base_path: str,
+    relative: bool,
+    ext: str = "",
+) -> str:
+    """Build a git ls-files shell command for the remote host.
+
+    Always runs from base_path (cd first). Output is relative to base_path
+    natively; for absolute paths we pipe through awk to prepend the base.
+    Extension filtering uses git pathspecs (-- '*.py') appended after --.
+
+    DESIGN: git ls-files does not support a content search query — this
+    function is only called for name-mode listing, never content search.
+    """
+    safe_base = shlex.quote(base_path)
+    git_args = ["git", "ls-files", "-c"]
+    if hidden:
+        git_args += ["--others", "--exclude-standard"]
+    for p in exclude_patterns:
+        if not _validate_exclude_pattern(p):
+            continue
+        git_args += ["--exclude", shlex.quote(p)]
+    exts = _parse_extensions(ext)
+    if exts:
+        git_args.append("--")
+        for e in exts:
+            git_args.append(f"*.{e}")
+    git_cmd = shlex.join(git_args)
+
+    if relative:
+        return (
+            f"cd {safe_base} 2>/dev/null && {git_cmd} "
+            f"|| {{ echo 'Error: cannot access git repository' >&2; exit 1; }}"
+        )
+    # Absolute: prepend base_path to each line
+    awk_cmd = shlex.join(["awk", f'{{print "{base_path.rstrip("/")}/" $0}}'])
+    return (
+        f"cd {safe_base} 2>/dev/null && {git_cmd} | {awk_cmd} "
+        f"|| {{ echo 'Error: cannot access git repository' >&2; exit 1; }}"
+    )
+
 @dataclass
 class _RemoteReloadArgs:
     """Parsed arguments for cmd_remote_reload."""
@@ -2668,13 +2801,14 @@ class _RemoteReloadArgs:
     hidden: bool = False
     relative: bool = False
     exclude_patterns: list[str] = field(default_factory=list)
+    file_source: str = "fd"  # "fd" or "git" — "auto" resolved locally before SSH
 
 def _parse_remote_reload_args(argv: list[str]) -> "_RemoteReloadArgs | None":
     """Parse argv for cmd_remote_reload. Returns None on error."""
     if len(argv) < 5:
         print(
             "Usage: fzfr-remote-reload <remote> <base_path> <ssh_control> <type> <ext> "
-            "[query] [--hidden] [--relative] [--exclude <pattern> ...]",
+            "[query] [--hidden] [--relative] [--exclude <pattern> ...] [--file-source=git]",
             file=sys.stderr,
         )
         return None
@@ -2694,6 +2828,8 @@ def _parse_remote_reload_args(argv: list[str]) -> "_RemoteReloadArgs | None":
             else:
                 print("Error: --exclude requires an argument.", file=sys.stderr)
                 return None
+        elif token == "--file-source=git":
+            args.file_source = "git"
         elif not args.query:
             args.query = token
         i += 1
@@ -2705,11 +2841,7 @@ def _build_fd_rga_args(
     hidden: bool,
     exclude_patterns: list[str],
 ) -> tuple[list[str], list[str]]:
-    """Build fd and rga argument lists from shared search parameters.
-
-    Returns (fd_args, rga_glob_args). Both lists are ready to be extended
-    with search root and query arguments before use.
-    """
+    """Build fd and rga argument lists from shared search parameters."""
     fd_args = ["fd", "-L", "--type", ftype]
     rga_glob_args: list[str] = []
     if hidden:
@@ -2727,11 +2859,30 @@ def _build_fd_rga_args(
     return fd_args, rga_glob_args
 
 def cmd_remote_reload(argv: list[str]) -> int:
-    """Entry point for the fzfr-remote-reload sub-command."""
+    """Entry point for the fzfr-remote-reload sub-command.
+
+    Unified remote reload handler. With file_source="git" uses git ls-files
+    for name-mode listing. Otherwise uses fd with rga/grep fallback for
+    content search. The single entry point covers both list and search.
+
+    Usage: fzfr fzfr-remote-reload <remote> <base_path> <ssh_control>
+                                    <type> <ext> [query] [--hidden]
+                                    [--relative] [--exclude <pattern> ...]
+                                    [--file-source=git]
+    """
     args = _parse_remote_reload_args(argv)
     if args is None:
         return 1
 
+    # git ls-files path — name mode only, no content search
+    if args.file_source == "git" and args.ftype == "f" and not args.query:
+        remote_cmd = _build_git_remote_cmd(
+            args.hidden, args.exclude_patterns, args.base_path, args.relative
+        )
+        r = subprocess.run(["ssh"] + _ssh_opts(args.ssh_control) + [args.remote, remote_cmd])
+        return r.returncode
+
+    # fd / rga path (original behaviour)
     fd_args, rga_glob_args = _build_fd_rga_args(
         args.ftype, args.ext, args.hidden, args.exclude_patterns
     )
@@ -2749,10 +2900,6 @@ def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     absent or not writable (e.g. macOS, some containers). Exactly one location
     is written — never both.
 
-    The bootstrap checks /dev/shm first then ~/.cache, matching this priority.
-    Because /dev/shm is cleared on reboot, the 60KB upload is paid once per
-    session on Linux and once ever on macOS (where ~/.cache persists).
-
     Uses atomic tmp-then-rename to avoid partial reads by a concurrent
     bootstrap call. Returns True on success, False if both locations failed
     (caller falls back to piping SCRIPT_BYTES inline).
@@ -2768,10 +2915,8 @@ def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     script_tmp  = f"{SCRIPT_HASH}.py.tmp"  # nosemgrep: fzfr-upload-cmd-unquoted-var
 
     install_cmd = (
-        # Try /dev/shm first (RAM-backed tmpfs, no disk writes)
         f'if [ -d /dev/shm ] && [ -w /dev/shm ]; then '
         f'D=/dev/shm/fzfr; '
-        # Fall back to ~/.cache (persistent disk, survives reboot)
         f'else '
         f'D=~/.cache/fzfr; '
         f'fi && '
@@ -2822,7 +2967,6 @@ def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
         if r.returncode == 0:
             return 0, r.stdout
         if r.returncode == _BOOTSTRAP_CACHE_MISS:
-            # Clean cache miss: upload once, then retry.
             if _upload_remote_script(ssh_prefix):
                 r = subprocess.run(
                     ssh_prefix + [remote_cmd],
@@ -2831,10 +2975,9 @@ def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
                 )
                 if r.returncode == 0:
                     return 0, r.stdout
-        # Any other rc (broken bootstrap, upload failed): fall through.
+        # Any other rc: fall through.
 
-    # Phase 2: inline fallback — pipe full SCRIPT_BYTES directly to python3 -.
-    # Always produces rc=0 on success, unblocking cache.put() in the caller.
+    # Phase 2: inline fallback.
     r = subprocess.run(
         ssh_prefix + [remote_cmd],
         input=SCRIPT_BYTES,
@@ -2846,19 +2989,8 @@ def cmd_remote_preview(argv: list[str]) -> int:
     """Entry point for the fzfr-remote-preview sub-command.
 
     Generates a preview of a file on a remote host. Uses hash-based remote
-    script caching to avoid piping the full ~60 KB script on every call:
-
-      Steady state  — sends SCRIPT_BOOTSTRAP (~250 bytes). The remote finds
-                      the cached script at /dev/shm/fzfr/<hash>.py or
-                      ~/.cache/fzfr/<hash>.py and executes it directly.
-      First call    — bootstrap exits 99 (cache miss). The local side uploads
-                      the full script once via _upload_remote_script(), then
-                      retries with the bootstrap.
-      Upload failed — falls back to piping SCRIPT_BYTES inline as before.
-
-    DESIGN: The remote command string is built with shlex.join() so every
-            token (path, query) is individually shell-quoted — no injection
-            risk from unusual filenames or query strings.
+    script caching to avoid piping the full ~60 KB script on every call.
+    See _cmd_remote_preview_capture for the full bootstrap/fallback strategy.
     """
     if len(argv) < 4:
         print(
@@ -3362,6 +3494,7 @@ def cmd_search(argv: list[str]) -> int:
             "self_path": str(frozen_self),
             "fzf_remote_dir": str(fzf_remote_dir),
             "path_format": CONFIG.get("path_format", "absolute"),
+            "file_source": CONFIG.get("file_source", "auto"),
         }
         _save_state(state_path, state)
 
@@ -3393,14 +3526,23 @@ def cmd_search(argv: list[str]) -> int:
             fzf_proc.wait()
         else:
             path_format = state["path_format"]
+            path_format = state["path_format"]
+            file_source = state.get("file_source", "auto")
             list_cmd = be.initial_list_cmd(
                 frozen_self,
                 hidden=state["show_hidden"],
                 path_format=path_format,
+                file_source=file_source,
             )
-            # DESIGN: For relative local paths, run fd with cwd=base_path so
-            #         output is relative to the search root, not absolute.
-            list_cwd = base_path if (not remote and path_format == "relative") else None
+            # DESIGN: For relative local paths, or when using git ls-files,
+            #         run the list command with cwd=base_path so output paths
+            #         are relative to the search root. git ls-files always
+            #         needs cwd=base_path to find the repo root correctly.
+            list_cwd = (
+                base_path
+                if (not remote and (path_format == "relative" or file_source in ("auto", "git")))
+                else None
+            )
             list_proc = subprocess.Popen(
                 list_cmd,
                 stdout=subprocess.PIPE,

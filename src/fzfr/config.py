@@ -70,6 +70,14 @@ _CONFIG_DEFAULTS: dict = {
     # "absolute" — full paths (e.g. /home/user/project/src/foo.py)
     # "relative" — paths relative to the search root (e.g. src/foo.py)
     "path_format": "relative",
+    # File listing source.
+    # "auto" — use git ls-files when inside a git repo, fd everywhere else
+    # "fd"   — always use fd (original behaviour)
+    # "git"  — always use git ls-files (errors outside a repo)
+    # For remote hosts, "auto" behaves like "fd" unless explicitly set to
+    # "git" — detecting a remote git repo requires an extra SSH round-trip
+    # that is too expensive to run on every keystroke.
+    "file_source": "auto",
 }
 
 
@@ -110,6 +118,16 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
                 )
             else:
                 cfg[key][action] = kbd
+
+    elif key == "file_source":
+        if user_value not in ("auto", "fd", "git"):
+            print(
+                "Warning: config key 'file_source' must be 'auto', 'fd', or 'git', "
+                "using default.",
+                file=sys.stderr,
+            )
+            return
+        cfg[key] = user_value
 
     else:
         # SECURITY: isinstance() handles subclasses correctly (e.g. bool is a
@@ -156,17 +174,10 @@ CONFIG = load_config()
 # PERF: shutil.which() probes PATH on every call. Running it once at import
 #       time and storing results in a frozenset lets every subsequent lookup
 #       be an O(1) set membership test with no subprocess or filesystem I/O.
-#
-#       This matters because LocalBackend.reload() runs on every keystroke and
-#       previously called subprocess.run(["rga", ...]) only to catch
-#       FileNotFoundError when rga is absent — a wasted fork per keystroke.
-#       _try_run() can now skip tools that are absent without forking at all.
-#
-#       The set is intentionally frozen: tool availability must not change
-#       within a session, and a frozenset makes that contract explicit.
 _ALL_TOOLS = [
     "fzf",
     "fd",
+    "git",
     "bat",
     "rga",
     "pdftotext",

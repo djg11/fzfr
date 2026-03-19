@@ -510,6 +510,7 @@ def cmd_search(argv: list[str]) -> int:
             "self_path": str(frozen_self),
             "fzf_remote_dir": str(fzf_remote_dir),
             "path_format": CONFIG.get("path_format", "absolute"),
+            "file_source": CONFIG.get("file_source", "auto"),
         }
         _save_state(state_path, state)
 
@@ -541,14 +542,23 @@ def cmd_search(argv: list[str]) -> int:
             fzf_proc.wait()
         else:
             path_format = state["path_format"]
+            path_format = state["path_format"]
+            file_source = state.get("file_source", "auto")
             list_cmd = be.initial_list_cmd(
                 frozen_self,
                 hidden=state["show_hidden"],
                 path_format=path_format,
+                file_source=file_source,
             )
-            # DESIGN: For relative local paths, run fd with cwd=base_path so
-            #         output is relative to the search root, not absolute.
-            list_cwd = base_path if (not remote and path_format == "relative") else None
+            # DESIGN: For relative local paths, or when using git ls-files,
+            #         run the list command with cwd=base_path so output paths
+            #         are relative to the search root. git ls-files always
+            #         needs cwd=base_path to find the repo root correctly.
+            list_cwd = (
+                base_path
+                if (not remote and (path_format == "relative" or file_source in ("auto", "git")))
+                else None
+            )
             list_proc = subprocess.Popen(
                 list_cmd,
                 stdout=subprocess.PIPE,

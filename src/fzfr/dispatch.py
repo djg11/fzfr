@@ -3,6 +3,7 @@ from pathlib import Path
 from .state import _load_state
 from .backends import backend_from_state
 
+
 def cmd_dispatch(argv: list[str]) -> int:
     """Internal: dispatch preview and reload actions using the session backend.
 
@@ -29,15 +30,11 @@ def cmd_dispatch(argv: list[str]) -> int:
     hidden = state.get("show_hidden", False)
     exclude_patterns = state.get("exclude_patterns", [])
     path_format = state.get("path_format", "absolute")
+    file_source = state.get("file_source", "auto")
 
     if command == "preview":
         filename = command_args[0] if command_args else ""
         query = command_args[1] if len(command_args) > 1 else ""
-        # DESIGN: In relative path_format mode, fzf passes a path like
-        #         "./src/foo.py" which is relative to base_path, not to the
-        #         cwd of the preview sub-shell. Resolve it to an absolute path
-        #         here so all preview tools (bat, file, pdftotext, etc.) find
-        #         the file regardless of what directory fzf spawned from.
         if filename and not Path(filename).is_absolute():
             base_path = state.get("base_path", "")
             if base_path:
@@ -51,7 +48,7 @@ def cmd_dispatch(argv: list[str]) -> int:
             hidden=hidden,
             exclude_patterns=exclude_patterns,
             path_format=path_format,
+            file_source=file_source,
         )
 
     return 1  # Unknown command
-

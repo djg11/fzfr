@@ -17,11 +17,13 @@ The preview cache (_PreviewCache) stores rendered output keyed on
 ~0.1 ms instead of spawning a new subprocess each time.
 """
 import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 from .utils import _capture, _passthrough, _try_run, _get_mime, _is_text_mime, _CAPTURE_PDF_MAX
+from .config import AVAILABLE_TOOLS
 from .archive import FileKind, classify, _list_archive
 from .workbase import WORK_BASE
 
@@ -120,7 +122,53 @@ def _preview_text(filepath: str, query: str) -> None:
             ],
             "Preview failed",
         )
+    _preview_git_context(filepath)
 
+
+def _preview_git_context(filepath: str) -> None:
+    """Append a git context block to the preview pane for the given file.
+
+    Shows the last 5 commits that touched the file and the current
+    uncommitted diff. Both sections are omitted silently when git is
+    unavailable, the file is not tracked, or the working directory is
+    not inside a git repository.
+
+    DESIGN: Runs git with stderr suppressed so no error messages leak into
+    the preview pane. Uses subprocess.run with capture_output rather than
+    _passthrough so we can check for empty output before printing the
+    separator — avoiding a trailing divider when the file is outside a repo.
+    """
+    if "git" not in AVAILABLE_TOOLS:
+        return
+
+    log_result = subprocess.run(
+        ["git", "log", "--oneline", "--color=always", "-5", "--", filepath],
+        capture_output=True,
+        text=True,
+    )
+    log_out = log_result.stdout.strip()
+
+    diff_result = subprocess.run(
+        ["git", "diff", "HEAD", "--color=always", "--", filepath],
+        capture_output=True,
+        text=True,
+    )
+    diff_out = diff_result.stdout.strip()
+
+    if not log_out and not diff_out:
+        return  # not in a repo, or file is untracked with no changes
+
+    print("\n\033[2m" + "─" * 40 + "\033[0m")  # dim separator
+
+    if log_out:
+        print("\033[2mgit log\033[0m")
+        print(log_out)
+
+    if diff_out:
+        if log_out:
+            print()
+        print("\033[2mgit diff HEAD\033[0m")
+        print(diff_out)
 
 def _preview_archive(filepath: str, hint: str, query: str) -> None:
     """Render an archive file in the preview pane.

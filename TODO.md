@@ -66,18 +66,185 @@ Search and preview files inside running Docker containers without manual `docker
 
 ## Git Integration
 
-Make fzfr Git-aware for more relevant results and richer contextual previews.
+Make fzfr Git-aware for more relevant results, richer contextual previews, and
+git-specific browsing modes. Inspired by
+[forgit](https://github.com/wfxr/forgit) and
+[fzf-git.sh](https://github.com/junegunn/fzf-git.sh), but scoped to fzfr's
+identity as a file search and preview tool. All modes must work over SSH (same
+script-over-stdin architecture as file search).
 
-**Implementation notes (incremental):**
-
-1. **`git ls-files` mode** — use `git ls-files` as the file source instead of `fd`; faster and respects `.gitignore` exactly. Lowest effort, highest immediate value.
-2. **Enhanced preview** — show `git log --oneline -5` and `git status` for the selected file alongside the content preview.
-3. **Commit history search** — new mode `fzfr git-log` to search commit messages; preview shows the full diff for the highlighted commit.
-4. **Open on remote** — keybinding to open the selected file on GitHub/GitLab in the browser.
-
-**Complexity:** Medium (implement incrementally, start with `git ls-files`)
+Implemented in three phases. Phase 1 is safe to merge immediately — no new
+modes, no actions, no keybinding changes. Phases 2 and 3 each build on the
+previous.
 
 ---
+
+### Phase 1 — File source and preview enrichment
+
+Zero-risk changes. No new modes, no actions, no new keybindings. Falls back
+gracefully when `git` is unavailable or the directory is not a repo.
+
+#### `git ls-files` as file source
+
+Use `git ls-files` as the file listing backend when inside a git repository
+instead of `fd`. Respects `.gitignore` exactly and is faster than `fd` for
+large repos with many ignored files.
+
+**Implementation notes:**
+- Detect repo root via `_find_git_root()` (already exists in `search.py`).
+- Replace `fd` in `LocalBackend.initial_list_cmd()` and `LocalBackend.reload()`
+  when a git root is found and `file_source` is `"auto"` or `"git"`.
+- Remote hosts: run `git ls-files` on the remote via the existing SSH reload
+  mechanism, same as `fd`.
+- Add a config key `"file_source": "auto" | "fd" | "git"`. `"auto"` (default)
+  uses `git ls-files` inside a repo, `fd` everywhere else.
+- Content search still uses `rga`/`grep` — `git ls-files` only affects the
+  file listing, not the search itself.
+- Hidden-file toggle (`CTRL-H`): in git mode, adds untracked files via
+  `git ls-files --others --exclude-standard`.
+- Add `git` to `_ALL_TOOLS` in `config.py` and to the optional tools table
+  in `README.md`.
+
+**Complexity:** Low
+
+#### Enhanced file preview (git context)
+
+When previewing a file inside a git repo, append a git context block below the
+file content in the preview pane: recent commits touching the file and the
+current uncommitted diff.
+
+**Implementation notes:**
+- In `_preview_text()`: after the bat/cat output, append:
+  - A separator line
+  - `git log --oneline --color -5 -- <file>` — last 5 commits for this file
+  - `git diff HEAD --color=always -- <file>` — current uncommitted changes
+- Only appended when `git` is in `AVAILABLE_TOOLS` and the file is tracked.
+- Falls back silently (no output, no error) outside a repo.
+
+**Complexity:** Low
+
+---
+
+### Phase 2 — Read-only git modes
+
+New invocation modes. Still no destructive actions. Enter opens content in
+`$EDITOR` via a new tmux window, leaving fzfr running — same pattern as file
+open today.
+
+#### `fzfr git-log` — commit browser
+
+```sh
+fzfr git-log [base_path]
+fzfr user@server git-log /var/log   # works over SSH
+```
+
+Lists commits via `git log --oneline --graph --color`. Preview pane shows the
+full diff via `git show <hash> --stat --patch --color`.
+
+**Implementation notes:**
+- New target type in `cmd_search()` alongside `local` and `<ssh-host>`.
+- Hash extracted from the selected line (first hex token).
+- `CTRL-T` toggles `--all` (all branches) vs current branch only.
+- Enter: opens diff in `$EDITOR` in a new tmux window
+  (`git show <hash> | $EDITOR -`), or prints the hash if tmux is absent.
+- `CTRL-Y`: copy commit hash to clipboard (reuses existing `fzfr-copy`
+  infrastructure).
+- Inspired by forgit's `glo` and fzf-git.sh's `CTRL-G CTRL-H`.
+
+**Complexity:** Medium
+
+#### `fzfr git-refs` — branch and tag picker
+
+Lists local branches, remote branches, and tags via `git for-each-ref
+--sort=-committerdate --color` (requires git ≥ 2.42). Preview shows recent
+commits on the highlighted ref via `git log --oneline --color -10 <ref>`.
+
+**Implementation notes:**
+- `CTRL-T` cycles: local branches → all branches + remotes → tags only.
+- Enter: `git switch <branch>` / `git checkout <tag>` — single safe action,
+  no conflict risk.
+- Requires git ≥ 2.42 for `--color` in `for-each-ref`; degrade gracefully on
+  older versions.
+- Most useful as an entry point from the Major Mode Switcher (Phase 3).
+
+**Complexity:** Low–Medium
+
+---
+
+### Phase 3 — Git actions and mode-aware keybindings
+
+Depends on Phase 2 being merged. Also depends on the **Mode-Aware Keybinding
+System** (see Core Features / UI) being designed first — adding actions across
+multiple git modes without that infrastructure leads to keybinding conflicts and
+an unmaintainable `build_fzf_invocation()`.
+
+**Do not start Phase 3 until:**
+1. Phase 2 is merged and stable.
+2. The mode-aware keybinding system is designed (can be specced on a separate
+   branch before implementation).
+
+#### `fzfr git-status` — changed files with staging
+
+Lists files from `git status --short` with status prefix. Preview shows the
+diff for the highlighted file (`git diff --color` for unstaged,
+`git diff --cached --color` for staged).
+
+**Actions (require mode-aware keybindings):**
+- `CTRL-A`: stage selected file(s) (`git add`).
+- `CTRL-U`: unstage (`git restore --staged`).
+- `CTRL-D`: discard unstaged changes (`git restore`) — requires `[y/N]`
+  confirmation via `_tty_prompt`, same guard as Interactive File Ops `rm`.
+- After any action, reload the list automatically.
+- Inspired by forgit's `ga` (staging) + `gd` (diff viewer) combined.
+
+**Complexity:** Medium
+
+#### Stash viewer
+
+Lists stashes via `git stash list`. Preview shows `git stash show -p <ref>
+--color`.
+
+**Actions:**
+- `CTRL-A`: apply stash (`git stash apply`).
+- `CTRL-P`: pop stash (`git stash pop`).
+- `CTRL-D`: drop stash (`git stash drop`) — `[y/N]` confirmation.
+
+**Complexity:** Low
+
+#### Multi-step git actions via tmux (git-log and git-refs)
+
+Actions that require interactive editors or conflict resolution are handed off
+to a new tmux window, leaving fzfr running. Without tmux, prints the equivalent
+git command with a hint to run it manually.
+
+**Actions on `fzfr git-log`:**
+- `CTRL-R`: interactive rebase from selected commit
+  (`git rebase -i <hash>~1` in new tmux window).
+- `CTRL-P`: cherry-pick selected commit
+  (`git cherry-pick <hash>` in new tmux window).
+- `CTRL-F`: fixup — `git commit --fixup <hash> && git rebase -i
+  --autosquash <hash>~1` in new tmux window.
+- `CTRL-V`: revert — `git revert <hash>` (non-destructive, no tmux needed).
+
+**Actions on `fzfr git-refs`:**
+- `CTRL-D`: delete branch (`git branch -D <branch>`) — `[y/N]` confirmation.
+
+**Complexity:** Medium–High
+
+#### Open on GitHub / GitLab / Gitea
+
+A keybinding (default `CTRL-O`) that opens the selected file or commit on the
+remote git host in the browser. Available in all git modes.
+
+**Implementation notes:**
+- Construct URL from `git remote get-url origin` + branch/hash + file path.
+- Support GitHub, GitLab, Gitea URL schemes. Config override for self-hosted.
+- Uses `xdg-open` / `open`.
+- Works in remote SSH mode: git config queried on the remote host.
+- Inspired by fzf-git.sh's `CTRL-O`.
+
+**Complexity:** Low
+
 
 ## Interactive File Operations
 
@@ -121,7 +288,6 @@ nothing persists on disk after reboot) and falls back to `~/.cache/fzfr/`
 on systems where `/dev/shm` is absent or not writable (macOS, some containers).
 Exactly one location is written — never both. The bootstrap checks `/dev/shm`
 first, then `~/.cache`, matching the upload priority.
-
 ---
 
 ## Remote Agent: Transience Improvements — Phase 2

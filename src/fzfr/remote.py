@@ -2,7 +2,7 @@
 
 Two public entry points:
 
-    cmd_remote_reload   — runs fd (and optionally rga) on the remote host and
+    cmd_remote_reload   — runs fd (or git ls-files) on the remote host and
                           streams results back to local fzf as its item list.
                           Called once at startup and on every reload keystroke.
 
@@ -19,6 +19,7 @@ Two public entry points:
 
 The remote host only needs python3 and fd in its PATH. No installation or
 file copying is required beyond the automatic bootstrap on first use.
+git is optional — only required when file_source="git" is configured.
 """
 import re
 import shlex
@@ -64,9 +65,6 @@ def _build_remote_cmd(
             f"|| {{ echo 'Error: cannot access directory' >&2; exit 1; }}"
         )
 
-    # Content search: rga preferred, fd | grep fallback.
-    # PERF: -P4 parallelises grep across up to 4 workers on the remote host,
-    #       matching the local grep fallback behaviour.
     if relative:
         rga_cmd = shlex.join(
             ["rga"] + rga_glob_args
@@ -88,6 +86,50 @@ def _build_remote_cmd(
         )
 
 
+def _build_git_remote_cmd(
+    hidden: bool,
+    exclude_patterns: list[str],
+    base_path: str,
+    relative: bool,
+    ext: str = "",
+) -> str:
+    """Build a git ls-files shell command for the remote host.
+
+    Always runs from base_path (cd first). Output is relative to base_path
+    natively; for absolute paths we pipe through awk to prepend the base.
+    Extension filtering uses git pathspecs (-- '*.py') appended after --.
+
+    DESIGN: git ls-files does not support a content search query — this
+    function is only called for name-mode listing, never content search.
+    """
+    safe_base = shlex.quote(base_path)
+    git_args = ["git", "ls-files", "-c"]
+    if hidden:
+        git_args += ["--others", "--exclude-standard"]
+    for p in exclude_patterns:
+        if not _validate_exclude_pattern(p):
+            continue
+        git_args += ["--exclude", shlex.quote(p)]
+    exts = _parse_extensions(ext)
+    if exts:
+        git_args.append("--")
+        for e in exts:
+            git_args.append(f"*.{e}")
+    git_cmd = shlex.join(git_args)
+
+    if relative:
+        return (
+            f"cd {safe_base} 2>/dev/null && {git_cmd} "
+            f"|| {{ echo 'Error: cannot access git repository' >&2; exit 1; }}"
+        )
+    # Absolute: prepend base_path to each line
+    awk_cmd = shlex.join(["awk", f'{{print "{base_path.rstrip("/")}/" $0}}'])
+    return (
+        f"cd {safe_base} 2>/dev/null && {git_cmd} | {awk_cmd} "
+        f"|| {{ echo 'Error: cannot access git repository' >&2; exit 1; }}"
+    )
+
+
 @dataclass
 class _RemoteReloadArgs:
     """Parsed arguments for cmd_remote_reload."""
@@ -100,6 +142,7 @@ class _RemoteReloadArgs:
     hidden: bool = False
     relative: bool = False
     exclude_patterns: list[str] = field(default_factory=list)
+    file_source: str = "fd"  # "fd" or "git" — "auto" resolved locally before SSH
 
 
 def _parse_remote_reload_args(argv: list[str]) -> "_RemoteReloadArgs | None":
@@ -107,7 +150,7 @@ def _parse_remote_reload_args(argv: list[str]) -> "_RemoteReloadArgs | None":
     if len(argv) < 5:
         print(
             "Usage: fzfr-remote-reload <remote> <base_path> <ssh_control> <type> <ext> "
-            "[query] [--hidden] [--relative] [--exclude <pattern> ...]",
+            "[query] [--hidden] [--relative] [--exclude <pattern> ...] [--file-source=git]",
             file=sys.stderr,
         )
         return None
@@ -127,6 +170,8 @@ def _parse_remote_reload_args(argv: list[str]) -> "_RemoteReloadArgs | None":
             else:
                 print("Error: --exclude requires an argument.", file=sys.stderr)
                 return None
+        elif token == "--file-source=git":
+            args.file_source = "git"
         elif not args.query:
             args.query = token
         i += 1
@@ -139,11 +184,7 @@ def _build_fd_rga_args(
     hidden: bool,
     exclude_patterns: list[str],
 ) -> tuple[list[str], list[str]]:
-    """Build fd and rga argument lists from shared search parameters.
-
-    Returns (fd_args, rga_glob_args). Both lists are ready to be extended
-    with search root and query arguments before use.
-    """
+    """Build fd and rga argument lists from shared search parameters."""
     fd_args = ["fd", "-L", "--type", ftype]
     rga_glob_args: list[str] = []
     if hidden:
@@ -162,11 +203,30 @@ def _build_fd_rga_args(
 
 
 def cmd_remote_reload(argv: list[str]) -> int:
-    """Entry point for the fzfr-remote-reload sub-command."""
+    """Entry point for the fzfr-remote-reload sub-command.
+
+    Unified remote reload handler. With file_source="git" uses git ls-files
+    for name-mode listing. Otherwise uses fd with rga/grep fallback for
+    content search. The single entry point covers both list and search.
+
+    Usage: fzfr fzfr-remote-reload <remote> <base_path> <ssh_control>
+                                    <type> <ext> [query] [--hidden]
+                                    [--relative] [--exclude <pattern> ...]
+                                    [--file-source=git]
+    """
     args = _parse_remote_reload_args(argv)
     if args is None:
         return 1
 
+    # git ls-files path — name mode only, no content search
+    if args.file_source == "git" and args.ftype == "f" and not args.query:
+        remote_cmd = _build_git_remote_cmd(
+            args.hidden, args.exclude_patterns, args.base_path, args.relative
+        )
+        r = subprocess.run(["ssh"] + _ssh_opts(args.ssh_control) + [args.remote, remote_cmd])
+        return r.returncode
+
+    # fd / rga path (original behaviour)
     fd_args, rga_glob_args = _build_fd_rga_args(
         args.ftype, args.ext, args.hidden, args.exclude_patterns
     )
@@ -185,10 +245,6 @@ def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     absent or not writable (e.g. macOS, some containers). Exactly one location
     is written — never both.
 
-    The bootstrap checks /dev/shm first then ~/.cache, matching this priority.
-    Because /dev/shm is cleared on reboot, the 60KB upload is paid once per
-    session on Linux and once ever on macOS (where ~/.cache persists).
-
     Uses atomic tmp-then-rename to avoid partial reads by a concurrent
     bootstrap call. Returns True on success, False if both locations failed
     (caller falls back to piping SCRIPT_BYTES inline).
@@ -204,10 +260,8 @@ def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     script_tmp  = f"{SCRIPT_HASH}.py.tmp"  # nosemgrep: fzfr-upload-cmd-unquoted-var
 
     install_cmd = (
-        # Try /dev/shm first (RAM-backed tmpfs, no disk writes)
         f'if [ -d /dev/shm ] && [ -w /dev/shm ]; then '
         f'D=/dev/shm/fzfr; '
-        # Fall back to ~/.cache (persistent disk, survives reboot)
         f'else '
         f'D=~/.cache/fzfr; '
         f'fi && '
@@ -259,7 +313,6 @@ def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
         if r.returncode == 0:
             return 0, r.stdout
         if r.returncode == _BOOTSTRAP_CACHE_MISS:
-            # Clean cache miss: upload once, then retry.
             if _upload_remote_script(ssh_prefix):
                 r = subprocess.run(
                     ssh_prefix + [remote_cmd],
@@ -268,10 +321,9 @@ def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
                 )
                 if r.returncode == 0:
                     return 0, r.stdout
-        # Any other rc (broken bootstrap, upload failed): fall through.
+        # Any other rc: fall through.
 
-    # Phase 2: inline fallback — pipe full SCRIPT_BYTES directly to python3 -.
-    # Always produces rc=0 on success, unblocking cache.put() in the caller.
+    # Phase 2: inline fallback.
     r = subprocess.run(
         ssh_prefix + [remote_cmd],
         input=SCRIPT_BYTES,
@@ -284,19 +336,8 @@ def cmd_remote_preview(argv: list[str]) -> int:
     """Entry point for the fzfr-remote-preview sub-command.
 
     Generates a preview of a file on a remote host. Uses hash-based remote
-    script caching to avoid piping the full ~60 KB script on every call:
-
-      Steady state  — sends SCRIPT_BOOTSTRAP (~250 bytes). The remote finds
-                      the cached script at /dev/shm/fzfr/<hash>.py or
-                      ~/.cache/fzfr/<hash>.py and executes it directly.
-      First call    — bootstrap exits 99 (cache miss). The local side uploads
-                      the full script once via _upload_remote_script(), then
-                      retries with the bootstrap.
-      Upload failed — falls back to piping SCRIPT_BYTES inline as before.
-
-    DESIGN: The remote command string is built with shlex.join() so every
-            token (path, query) is individually shell-quoted — no injection
-            risk from unusual filenames or query strings.
+    script caching to avoid piping the full ~60 KB script on every call.
+    See _cmd_remote_preview_capture for the full bootstrap/fallback strategy.
     """
     if len(argv) < 4:
         print(
