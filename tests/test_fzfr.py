@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
 # ---------------------------------------------------------------------------
 # Module import
@@ -32,7 +33,7 @@ src_path = here.parent / "src"
 if src_path.exists():
     sys.path.insert(0, str(src_path))
     import fzfr
-    from fzfr.utils import _parse_extensions
+    from fzfr.utils import _parse_extensions, _validate_exclude_pattern
     from fzfr.config import _CONFIG_DEFAULTS, _merge_config_key, load_config
     from fzfr.backends import LocalBackend, RemoteBackend, backend_from_state
     from fzfr.open import _dquote
@@ -76,6 +77,7 @@ else:
     classify = fzfr.classify
     FileKind = fzfr.FileKind
     _resolve_remote_path = fzfr._resolve_remote_path
+    _validate_exclude_pattern = fzfr._validate_exclude_pattern
 
 
 # ---------------------------------------------------------------------------
@@ -717,6 +719,65 @@ class TestLoadConfig(unittest.TestCase):
         cfg = load_config()
         self.assertIsInstance(cfg["max_stream_mb"], int)
         self.assertGreaterEqual(cfg["max_stream_mb"], 0)
+
+
+# ---------------------------------------------------------------------------
+# Security
+# ---------------------------------------------------------------------------
+
+class TestSecurity(unittest.TestCase):
+
+    def test_validate_exclude_pattern_safe(self):
+        safe_patterns = ["*.py", "dist/", "node_modules", "foo?bar", "baz[0-9]"]
+        for p in safe_patterns:
+            with self.subTest(pattern=p):
+                self.assertTrue(_validate_exclude_pattern(p))
+
+    def test_validate_exclude_pattern_unsafe(self):
+        unsafe_patterns = [
+            "*.py;id", "foo|bar", "a&&b", "a||b", "$(id)", "`id`",
+            ">out", "<in", "foo\nbar", "(subshell)", "bg&", r"escape\\"
+        ]
+        for p in unsafe_patterns:
+            with self.subTest(pattern=p):
+                self.assertFalse(_validate_exclude_pattern(p))
+
+    @patch("subprocess.run")
+    def test_resolve_remote_path_tilde_expansion_safe(self, mock_run):
+        # Mock successful expansion
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = b"/home/user/foo\n"
+        mock_run.return_value = mock_result
+
+        remote = "user@host"
+        raw = "~/foo"
+        ssh_control = ""
+
+        result = _resolve_remote_path(remote, raw, ssh_control)
+
+        self.assertEqual(result, "/home/user/foo")
+
+        # Verify that subprocess.run was called with python3 and stdin
+        args, kwargs = mock_run.call_args
+        cmd = args[0]
+        self.assertIn("python3", " ".join(cmd))
+        self.assertIn("os.path.expanduser", " ".join(cmd))
+        self.assertEqual(kwargs["input"], b"~/foo")
+
+    @patch("subprocess.run")
+    def test_resolve_remote_path_dot_safe(self, mock_run):
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "/current/dir\n"
+        mock_run.return_value = mock_result
+
+        result = _resolve_remote_path("host", ".", "")
+        self.assertEqual(result, "/current/dir")
+
+        # Verify it used pwd, not python expansion
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("pwd", cmd)
 
 
 # ---------------------------------------------------------------------------

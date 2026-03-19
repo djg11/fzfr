@@ -1,9 +1,17 @@
+"""fzfr.cache — Preview output cache keyed on (path, mtime, query).
+
+_PreviewCache stores the rendered bytes that would be written to stdout by
+the preview renderer (bat, cat, rga, or the remote SSH preview). On a hit the
+bytes are replayed directly, saving a subprocess spawn (local) or an SSH
+round-trip plus script transfer (remote).
+"""
 import hashlib
 import os
 import shlex
 from pathlib import Path
 
 from .utils import _capture
+
 
 class _PreviewCache:
     """File-backed preview output cache keyed on (path, mtime_ns, query).
@@ -45,11 +53,20 @@ class _PreviewCache:
     def _remote_mtime(ssh_prefix: list[str], path: str) -> str | None:
         """Return mtime string for a remote path via stat, or None on failure.
 
-        Uses 'stat -c %Y' (seconds since epoch) — available on Linux remotes.
-        The extra SSH call is cheap on a multiplexed connection and negligible
-        compared to the SSH preview round-trip it replaces on a cache hit.
+        Tries Linux stat first (stat -c %Y), then macOS/BSD stat (stat -f %m).
+        Both return seconds since epoch, sufficient for cache key uniqueness.
+
+        Previously only the Linux form was tried. On macOS remotes stat -c %Y
+        fails silently, this function returns None, and the entire local output
+        cache is bypassed — every cursor move triggers a full remote round-trip.
+        The macOS fallback fixes this.
         """
+        # Linux: stat -c %Y (seconds since epoch)
         out, rc = _capture(ssh_prefix + [shlex.join(["stat", "-c", "%Y", path])])
+        if rc == 0 and out.strip():
+            return out.strip()
+        # macOS / BSD: stat -f %m (seconds since epoch, same meaning)
+        out, rc = _capture(ssh_prefix + [shlex.join(["stat", "-f", "%m", path])])
         return out.strip() if rc == 0 and out.strip() else None
 
     def _entry_path(self, cache_key: str) -> Path:
@@ -97,5 +114,3 @@ class _PreviewCache:
             return cls(Path(self_path_str).parent)
         except OSError:
             return None
-
-

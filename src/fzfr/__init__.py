@@ -173,8 +173,23 @@ COMMAND_MAP = {
 }
 
 
+def _set_process_name(name: str) -> None:
+    """Set the process name visible in ps/top via prctl(PR_SET_NAME).
+
+    Linux only — silently ignored on other platforms. Makes the remote
+    agent appear as 'python3 fzfr' rather than 'python3 -' or
+    'python3 /path/to/script.py', reducing visual noise for sysadmins.
+    """
+    try:
+        import ctypes
+        ctypes.CDLL(None).prctl(15, name.encode()[:15] + b"\x00", 0, 0, 0)
+    except Exception:
+        pass  # non-Linux or ctypes unavailable — harmless
+
+
 def main():
     """Resolve which sub-command to run and execute it."""
+    _set_process_name("python3 fzfr")
     invoked_as = Path(sys.argv[0]).name
 
     if invoked_as in COMMAND_MAP and invoked_as != "fzfr":

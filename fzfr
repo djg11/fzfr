@@ -145,6 +145,7 @@ from pathlib import Path
 from typing import Callable
 from typing import Protocol, runtime_checkable
 import atexit
+import ctypes
 import hashlib
 import json
 import os
@@ -163,7 +164,7 @@ import time
 # _script.py
 # =============================================================================
 
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 
 _SHEBANG = b"#!/usr/bin/env python3"
 
@@ -217,15 +218,28 @@ SCRIPT_BYTES = Path(SELF).read_bytes() if SELF else b""
 
 SCRIPT_HASH: str = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES else ""
 
-# PERF: Tiny bootstrap script sent to the remote instead of the full ~60 KB
-#       script on every preview call. Cache hit → exec cached copy; miss → 99.
-SCRIPT_BOOTSTRAP: bytes = f"""import sys,os,subprocess
-p=os.path.expanduser("~/.cache/fzfr/{SCRIPT_HASH}.py")
-if os.path.exists(p):
-    r=subprocess.run([sys.executable,p]+sys.argv[1:])
-    sys.exit(r.returncode)
-sys.exit(99)
-""".encode() if SCRIPT_HASH else b""
+# Bootstrap script sent to the remote on every preview call (~250 bytes).
+#
+# Checks /dev/shm/fzfr/<hash>.py first (tmpfs, RAM-backed, preferred) then
+# ~/.cache/fzfr/<hash>.py (persistent disk fallback on macOS and systems
+# without /dev/shm). On hit: runs the cached file directly as a path argument
+# — one python3 process. On miss: exits 99 so _upload_remote_script() uploads
+# to exactly one of those locations and retries.
+#
+# PERF: Uses os.path.exists() only — no file read, no hash computation on
+# the hot path. The hash embedded in the filename is the integrity check:
+# _upload_remote_script writes atomically (tmp → rename) so the file at
+# that path is always either absent or complete. Reading and hashing 60KB on
+# every preview call adds measurable latency on low-latency (LAN) links where
+# the SSH RTT is only ~1ms, so the exists() check is deliberately kept cheap.
+SCRIPT_BOOTSTRAP: bytes = (
+    f'import sys,os,subprocess\n'
+    f'for p in[f"/dev/shm/fzfr/{SCRIPT_HASH}.py",'
+    f'os.path.expanduser("~/.cache/fzfr/{SCRIPT_HASH}.py")]:\n'
+    f'    if os.path.exists(p):\n'
+    f'        sys.exit(subprocess.run([sys.executable,p]+sys.argv[1:]).returncode)\n'
+    f'sys.exit(99)\n'
+).encode() if SCRIPT_HASH else b""
 
 # Sentinel exit code: remote cache miss. Must not clash with fzfr-preview's
 # own exit codes (0, 1, 127).
@@ -403,7 +417,7 @@ def _validate_exclude_pattern(pattern: str) -> bool:
     Allows glob metacharacters (* ? [ ] {}) but rejects shell operators
     that could inject commands into remote shell fragments.
     """
-    SHELL_OPERATORS = (';', '|', '&&', '||', '$', '`', '>', '<', '\n')
+    SHELL_OPERATORS = (';', '|', '&&', '||', '$', '`', '>', '<', '\n', '(', ')', '&', '\\')
     return not any(op in pattern for op in SHELL_OPERATORS)
 # =============================================================================
 # workbase.py
@@ -808,11 +822,20 @@ class _PreviewCache:
     def _remote_mtime(ssh_prefix: list[str], path: str) -> str | None:
         """Return mtime string for a remote path via stat, or None on failure.
 
-        Uses 'stat -c %Y' (seconds since epoch) — available on Linux remotes.
-        The extra SSH call is cheap on a multiplexed connection and negligible
-        compared to the SSH preview round-trip it replaces on a cache hit.
+        Tries Linux stat first (stat -c %Y), then macOS/BSD stat (stat -f %m).
+        Both return seconds since epoch, sufficient for cache key uniqueness.
+
+        Previously only the Linux form was tried. On macOS remotes stat -c %Y
+        fails silently, this function returns None, and the entire local output
+        cache is bypassed — every cursor move triggers a full remote round-trip.
+        The macOS fallback fixes this.
         """
+        # Linux: stat -c %Y (seconds since epoch)
         out, rc = _capture(ssh_prefix + [shlex.join(["stat", "-c", "%Y", path])])
+        if rc == 0 and out.strip():
+            return out.strip()
+        # macOS / BSD: stat -f %m (seconds since epoch, same meaning)
+        out, rc = _capture(ssh_prefix + [shlex.join(["stat", "-f", "%m", path])])
         return out.strip() if rc == 0 and out.strip() else None
 
     def _entry_path(self, cache_key: str) -> Path:
@@ -860,8 +883,6 @@ class _PreviewCache:
             return cls(Path(self_path_str).parent)
         except OSError:
             return None
-
-
 # =============================================================================
 # archive.py
 # =============================================================================
@@ -2531,7 +2552,7 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
 
     Handles three cases that cannot be resolved locally:
       - Empty or ".": ask the remote shell for its current directory via pwd.
-      - "~" or "~/…": ask the remote shell to expand the tilde via echo.
+      - "~" or "~/…": ask the remote python for expanded path via stdin.
       - Anything else: return as-is (already absolute or a known relative path).
 
     We cannot rely on resolving locally here because that would expand the path
@@ -2554,15 +2575,16 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
             )
             sys.exit(1)
         return r.stdout.strip()
-    if raw == "~" or raw.startswith("~/"):
-        # DESIGN: We cannot resolve a remote tilde locally. Ask the remote shell
-        #         to expand it by passing 'echo' and the raw path as separate argv
-        #         elements — no local shell quoting layer required. The remote shell
-        #         performs the tilde expansion and prints the result.
+
+    if raw == "~" or raw.startswith("~"):
+        # DESIGN: We cannot resolve a remote tilde locally. To avoid shell
+        #         injection when expanding tildes on the remote, we use
+        #         python3 -c to call os.path.expanduser and pass the path via
+        #         stdin. fzfr already requires python3 on the remote.
         r = subprocess.run(
-            ["ssh"] + _ssh_opts(ssh_control) + [remote, "echo", raw],
+            ["ssh"] + _ssh_opts(ssh_control) + [remote, "python3 -c 'import os,sys; print(os.path.expanduser(sys.stdin.read().strip()))'"],
+            input=raw.encode("utf-8"),
             capture_output=True,
-            text=True,
         )
         if r.returncode != 0:
             print(
@@ -2570,7 +2592,8 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
                 file=sys.stderr,
             )
             sys.exit(1)
-        return r.stdout.strip()
+        return r.stdout.decode("utf-8", errors="replace").strip()
+
     return raw
 
 
@@ -2686,9 +2709,6 @@ def _build_fd_rga_args(
 
     Returns (fd_args, rga_glob_args). Both lists are ready to be extended
     with search root and query arguments before use.
-
-    DESIGN: shlex.join() quotes every element so the resulting shell fragment
-            is safe to embed in the remote shell command string sent over SSH.
     """
     fd_args = ["fd", "-L", "--type", ftype]
     rga_glob_args: list[str] = []
@@ -2707,15 +2727,7 @@ def _build_fd_rga_args(
     return fd_args, rga_glob_args
 
 def cmd_remote_reload(argv: list[str]) -> int:
-    """Entry point for the fzfr-remote-reload sub-command.
-
-    Unified remote reload handler. With no query it lists files via fd;
-    with a query it searches file contents via rga (falling back to
-    fd | xargs grep). The single entry point covers both list and search.
-
-    Usage: fzfr fzfr-remote-reload <remote> <base_path> <ssh_control>
-                                         <type> <ext> [query] [--hidden] [--relative] [--exclude <pattern> ...]
-    """
+    """Entry point for the fzfr-remote-reload sub-command."""
     args = _parse_remote_reload_args(argv)
     if args is None:
         return 1
@@ -2729,61 +2741,61 @@ def cmd_remote_reload(argv: list[str]) -> int:
     r = subprocess.run(["ssh"] + _ssh_opts(args.ssh_control) + [args.remote, remote_cmd])
     return r.returncode
 
-# DESIGN: Script-over-SSH — the entire script is piped to 'python3 -' on the
-#         remote host via stdin on every preview call. The remote only needs
-#         python3 in its PATH; no installation or file copying is required.
-#         SCRIPT_BYTES is cached at startup (see top of file) so repeated
-#         preview calls read from memory rather than disk.
-# LIMITATION: The full script (~60 KB) is sent over the SSH connection on
-#             every cursor movement. On high-latency links this dominates
-#             preview latency; SSH multiplexing (reusing the transport TCP
-#             connection) mitigates most of the overhead.
-
 def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     """Upload SCRIPT_BYTES to the remote script cache in one SSH call.
-    Creates ~/.cache/fzfr/ if needed, then writes the full script to
-    ~/.cache/fzfr/<SCRIPT_HASH>.py and marks it executable.
-    Called exactly once per remote host per script version — when the
-    bootstrap script exits with _BOOTSTRAP_CACHE_MISS (99), indicating the
-    cached copy is absent (first launch or after a script upgrade).
-    Returns True on success, False if the upload failed (in which case the
-    caller falls back to piping the full script inline as before).
+
+    Prefers /dev/shm/fzfr/ (tmpfs, RAM-backed, nothing persists on disk after
+    reboot) and falls back to ~/.cache/fzfr/ on systems where /dev/shm is
+    absent or not writable (e.g. macOS, some containers). Exactly one location
+    is written — never both.
+
+    The bootstrap checks /dev/shm first then ~/.cache, matching this priority.
+    Because /dev/shm is cleared on reboot, the 60KB upload is paid once per
+    session on Linux and once ever on macOS (where ~/.cache persists).
+
+    Uses atomic tmp-then-rename to avoid partial reads by a concurrent
+    bootstrap call. Returns True on success, False if both locations failed
+    (caller falls back to piping SCRIPT_BYTES inline).
+
+    SECURITY: SCRIPT_HASH is asserted hex-only before interpolation.
     """
     if not SCRIPT_BYTES or not SCRIPT_HASH:
         return False
-    # SECURITY: Assert SCRIPT_HASH is hex-only before interpolating into the
-    #           remote shell command string. SHA256 hex is structurally safe
-    #           (no shell metacharacters possible), but we assert the invariant
-    #           explicitly so any future change to hash derivation fails loudly
-    #           rather than silently producing an exploitable path.
-    assert re.fullmatch(r"[0-9a-f]{16}", SCRIPT_HASH), f"Unexpected SCRIPT_HASH format: {SCRIPT_HASH!r}"
-    remote_cache_dir_relative = ".cache/fzfr"
-    script_file_name = f"{SCRIPT_HASH}.py"              # nosemgrep: fzfr-upload-cmd-unquoted-var
-    script_file_tmp_name = f"{SCRIPT_HASH}.py.tmp"      # nosemgrep: fzfr-upload-cmd-unquoted-var
+    assert re.fullmatch(r"[0-9a-f]{16}", SCRIPT_HASH), \
+        f"Unexpected SCRIPT_HASH format: {SCRIPT_HASH!r}"
+
+    script_name = f"{SCRIPT_HASH}.py"      # nosemgrep: fzfr-upload-cmd-unquoted-var
+    script_tmp  = f"{SCRIPT_HASH}.py.tmp"  # nosemgrep: fzfr-upload-cmd-unquoted-var
 
     install_cmd = (
-        f"REMOTE_HOME=$(echo ~); "
-        f'REMOTE_CACHE_DIR="$REMOTE_HOME/{remote_cache_dir_relative}"; '    # nosemgrep: fzfr-upload-cmd-unquoted-var
-        f'REMOTE_SCRIPT_TMP="$REMOTE_CACHE_DIR/{script_file_tmp_name}"; '   # nosemgrep: fzfr-upload-cmd-unquoted-var
-        f'REMOTE_SCRIPT="$REMOTE_CACHE_DIR/{script_file_name}"; '           # nosemgrep: fzfr-upload-cmd-unquoted-var
-        f'mkdir -p "$REMOTE_CACHE_DIR" && '
-        f'cat > "$REMOTE_SCRIPT_TMP" && '
-        f'mv "$REMOTE_SCRIPT_TMP" "$REMOTE_SCRIPT" && '
-        f'chmod 700 "$REMOTE_SCRIPT"'
+        # Try /dev/shm first (RAM-backed tmpfs, no disk writes)
+        f'if [ -d /dev/shm ] && [ -w /dev/shm ]; then '
+        f'D=/dev/shm/fzfr; '
+        # Fall back to ~/.cache (persistent disk, survives reboot)
+        f'else '
+        f'D=~/.cache/fzfr; '
+        f'fi && '
+        f'mkdir -p "$D" && '
+        f'cat > "$D/{script_tmp}" && '                  # nosemgrep: fzfr-upload-cmd-unquoted-var
+        f'mv "$D/{script_tmp}" "$D/{script_name}" && '  # nosemgrep: fzfr-upload-cmd-unquoted-var
+        f'chmod 700 "$D/{script_name}"'                 # nosemgrep: fzfr-upload-cmd-unquoted-var
     )
-    r = subprocess.run(
-        ssh_prefix + [install_cmd],
-        input=SCRIPT_BYTES,
-    )
+    r = subprocess.run(ssh_prefix + [install_cmd], input=SCRIPT_BYTES)
     return r.returncode == 0
 
 def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
     """Capturing variant of cmd_remote_preview — returns (rc, stdout_bytes).
 
-    Uses the bootstrap/hash caching strategy (same as cmd_remote_preview) so
-    the caller gets the benefit of the ~200 byte bootstrap transfer on all
-    subsequent calls after the first visit. capture_output=True lets the
-    caller inspect and cache the rendered output before writing it to stdout.
+    Uses the bootstrap/hash caching strategy so the caller gets the benefit
+    of the ~250 byte bootstrap transfer on all subsequent calls after the
+    first visit. capture_output=True lets the caller inspect and cache the
+    rendered output before writing it to stdout.
+
+    HARDENING: Any non-zero rc from the bootstrap that is not
+    _BOOTSTRAP_CACHE_MISS falls through to the full inline SCRIPT_BYTES path
+    rather than being returned directly. This prevents a broken bootstrap from
+    silently returning rc≠0 and causing cache.put() to be skipped forever
+    (symptom: every cursor move re-fetches from remote even for visited files).
     """
     if len(argv) < 4:
         return 1, b""
@@ -2800,25 +2812,29 @@ def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
     else:
         remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path])
 
-    # Try bootstrap first (fast path: ~200 bytes sent).
+    # Phase 1: bootstrap fast path (~250 bytes sent).
     if SCRIPT_BOOTSTRAP:
         r = subprocess.run(
             ssh_prefix + [remote_cmd],
             input=SCRIPT_BOOTSTRAP,
             capture_output=True,
         )
-        if r.returncode != _BOOTSTRAP_CACHE_MISS:
-            return r.returncode, r.stdout
-        # Cache miss: upload once, then retry.
-        if _upload_remote_script(ssh_prefix):
-            r = subprocess.run(
-                ssh_prefix + [remote_cmd],
-                input=SCRIPT_BOOTSTRAP,
-                capture_output=True,
-            )
-            return r.returncode, r.stdout
+        if r.returncode == 0:
+            return 0, r.stdout
+        if r.returncode == _BOOTSTRAP_CACHE_MISS:
+            # Clean cache miss: upload once, then retry.
+            if _upload_remote_script(ssh_prefix):
+                r = subprocess.run(
+                    ssh_prefix + [remote_cmd],
+                    input=SCRIPT_BOOTSTRAP,
+                    capture_output=True,
+                )
+                if r.returncode == 0:
+                    return 0, r.stdout
+        # Any other rc (broken bootstrap, upload failed): fall through.
 
-    # Fallback: send full script inline (upload failed or SCRIPT_BOOTSTRAP empty).
+    # Phase 2: inline fallback — pipe full SCRIPT_BYTES directly to python3 -.
+    # Always produces rc=0 on success, unblocking cache.put() in the caller.
     r = subprocess.run(
         ssh_prefix + [remote_cmd],
         input=SCRIPT_BYTES,
@@ -2832,9 +2848,9 @@ def cmd_remote_preview(argv: list[str]) -> int:
     Generates a preview of a file on a remote host. Uses hash-based remote
     script caching to avoid piping the full ~60 KB script on every call:
 
-      Steady state  — sends SCRIPT_BOOTSTRAP (~200 bytes). The remote finds
-                      the cached script at ~/.cache/fzfr/<hash>.py and
-                      executes it directly.
+      Steady state  — sends SCRIPT_BOOTSTRAP (~250 bytes). The remote finds
+                      the cached script at /dev/shm/fzfr/<hash>.py or
+                      ~/.cache/fzfr/<hash>.py and executes it directly.
       First call    — bootstrap exits 99 (cache miss). The local side uploads
                       the full script once via _upload_remote_script(), then
                       retries with the bootstrap.
@@ -2863,18 +2879,19 @@ def cmd_remote_preview(argv: list[str]) -> int:
     else:
         remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path])
 
-    # Fast path: send only the bootstrap (~200 bytes). The bootstrap checks
-    # for the cached script and execs it if present.
+    # Phase 1: bootstrap fast path.
     if SCRIPT_BOOTSTRAP:
         r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
-        if r.returncode != _BOOTSTRAP_CACHE_MISS:
-            return r.returncode
-        # Cache miss: upload the full script once, then retry with bootstrap.
-        if _upload_remote_script(ssh_prefix):
-            r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
-            return r.returncode
+        if r.returncode == 0:
+            return 0
+        if r.returncode == _BOOTSTRAP_CACHE_MISS:
+            if _upload_remote_script(ssh_prefix):
+                r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
+                if r.returncode == 0:
+                    return 0
+        # Broken bootstrap or upload failed: fall through.
 
-    # Fallback: send full script inline (bootstrap empty or upload failed).
+    # Phase 2: inline fallback.
     r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BYTES)
     return r.returncode
 # =============================================================================
@@ -3428,8 +3445,22 @@ COMMAND_MAP = {
     "_internal-dispatch": cmd_dispatch,  # preview + reload
 }
 
+def _set_process_name(name: str) -> None:
+    """Set the process name visible in ps/top via prctl(PR_SET_NAME).
+
+    Linux only — silently ignored on other platforms. Makes the remote
+    agent appear as 'python3 fzfr' rather than 'python3 -' or
+    'python3 /path/to/script.py', reducing visual noise for sysadmins.
+    """
+    try:
+        import ctypes
+        ctypes.CDLL(None).prctl(15, name.encode()[:15] + b"\x00", 0, 0, 0)
+    except Exception:
+        pass  # non-Linux or ctypes unavailable — harmless
+
 def main():
     """Resolve which sub-command to run and execute it."""
+    _set_process_name("python3 fzfr")
     invoked_as = Path(sys.argv[0]).name
 
     if invoked_as in COMMAND_MAP and invoked_as != "fzfr":

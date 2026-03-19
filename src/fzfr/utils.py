@@ -190,5 +190,5 @@ def _validate_exclude_pattern(pattern: str) -> bool:
     Allows glob metacharacters (* ? [ ] {}) but rejects shell operators
     that could inject commands into remote shell fragments.
     """
-    SHELL_OPERATORS = (';', '|', '&&', '||', '$', '`', '>', '<', '\n')
+    SHELL_OPERATORS = (';', '|', '&&', '||', '$', '`', '>', '<', '\n', '(', ')', '&', '\\')
     return not any(op in pattern for op in SHELL_OPERATORS)

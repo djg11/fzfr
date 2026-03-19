@@ -11,7 +11,8 @@ Entry point is cmd_search(). It:
   5. Runs fd | fzf (local) or launches fzf and streams remote fd output to it
   6. Cleans up the session directory and SSH socket on exit via _cleanup().
      A background daemon thread also sweeps fzfr-open-* temp files from the
-     session directory after 30 seconds during long sessions.
+     session directory after 30 seconds during long sessions. Remote agents
+     leverage /dev/shm for transience where available.
 
 The session directory lives under WORK_BASE (usually /dev/shm/fzfr/) for
 low-latency I/O. Each session gets a uuid-named subdirectory that is removed

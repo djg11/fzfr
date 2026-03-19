@@ -172,7 +172,7 @@ All keys are configurable — see [Configuration](#configuration).
 
 ## SSH Remote Search
 
-fzfr requires no installation on the remote host — only `python3` and `fd` need to be in the remote `PATH`. The script is transferred automatically on first use and cached at `~/.cache/fzfr/` on the remote.
+fzfr requires no installation on the remote host — only `python3` and `fd` need to be in the remote `PATH`. On first use the script is transferred automatically and cached at `/dev/shm/fzfr/` (RAM-backed tmpfs, preferred) or `~/.cache/fzfr/` (persistent fallback on systems without `/dev/shm`). Subsequent preview calls send only a ~250 byte bootstrap.
 
 ```sh
 fzfr user@server /var/log

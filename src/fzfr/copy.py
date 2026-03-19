@@ -73,7 +73,7 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
 
     Handles three cases that cannot be resolved locally:
       - Empty or ".": ask the remote shell for its current directory via pwd.
-      - "~" or "~/…": ask the remote shell to expand the tilde via echo.
+      - "~" or "~/…": ask the remote python for expanded path via stdin.
       - Anything else: return as-is (already absolute or a known relative path).
 
     We cannot rely on resolving locally here because that would expand the path
@@ -96,15 +96,16 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
             )
             sys.exit(1)
         return r.stdout.strip()
-    if raw == "~" or raw.startswith("~/"):
-        # DESIGN: We cannot resolve a remote tilde locally. Ask the remote shell
-        #         to expand it by passing 'echo' and the raw path as separate argv
-        #         elements — no local shell quoting layer required. The remote shell
-        #         performs the tilde expansion and prints the result.
+
+    if raw == "~" or raw.startswith("~"):
+        # DESIGN: We cannot resolve a remote tilde locally. To avoid shell
+        #         injection when expanding tildes on the remote, we use
+        #         python3 -c to call os.path.expanduser and pass the path via
+        #         stdin. fzfr already requires python3 on the remote.
         r = subprocess.run(
-            ["ssh"] + _ssh_opts(ssh_control) + [remote, "echo", raw],
+            ["ssh"] + _ssh_opts(ssh_control) + [remote, "python3 -c 'import os,sys; print(os.path.expanduser(sys.stdin.read().strip()))'"],
+            input=raw.encode("utf-8"),
             capture_output=True,
-            text=True,
         )
         if r.returncode != 0:
             print(
@@ -112,7 +113,8 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
                 file=sys.stderr,
             )
             sys.exit(1)
-        return r.stdout.strip()
+        return r.stdout.decode("utf-8", errors="replace").strip()
+
     return raw
 
 

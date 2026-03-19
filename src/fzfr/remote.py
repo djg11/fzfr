@@ -9,14 +9,13 @@ Two public entry points:
     cmd_remote_preview  — previews a single remote file. Uses a two-phase
                           bootstrap to avoid sending the full ~60 KB script on
                           every cursor movement:
-                            1. Send SCRIPT_BOOTSTRAP (~200 bytes) which checks
-                               whether the full script is already cached on the
-                               remote at ~/.cache/fzfr/<hash>.py
+                            1. Send SCRIPT_BOOTSTRAP (~250 bytes) which checks
+                               /dev/shm/fzfr/<hash>.py (RAM, preferred) then
+                               ~/.cache/fzfr/<hash>.py (persistent fallback).
                             2. On cache miss (exit 99), upload the full script
-                               once via _upload_remote_script(), then retry
+                               once via _upload_remote_script(), then retry.
                           After the first preview call, all subsequent calls
-                          hit the remote cache and transfer ~200 bytes instead
-                          of ~60 KB.
+                          hit the remote cache and transfer ~250 bytes.
 
 The remote host only needs python3 and fd in its PATH. No installation or
 file copying is required beyond the automatic bootstrap on first use.
@@ -31,6 +30,7 @@ from pathlib import Path
 from .ssh import _ssh_opts
 from .utils import _parse_extensions, _validate_exclude_pattern
 from ._script import SCRIPT_BYTES, SCRIPT_HASH, SCRIPT_BOOTSTRAP, _BOOTSTRAP_CACHE_MISS
+
 
 def _build_remote_cmd(
     fd_args: list[str],
@@ -143,9 +143,6 @@ def _build_fd_rga_args(
 
     Returns (fd_args, rga_glob_args). Both lists are ready to be extended
     with search root and query arguments before use.
-
-    DESIGN: shlex.join() quotes every element so the resulting shell fragment
-            is safe to embed in the remote shell command string sent over SSH.
     """
     fd_args = ["fd", "-L", "--type", ftype]
     rga_glob_args: list[str] = []
@@ -165,15 +162,7 @@ def _build_fd_rga_args(
 
 
 def cmd_remote_reload(argv: list[str]) -> int:
-    """Entry point for the fzfr-remote-reload sub-command.
-
-    Unified remote reload handler. With no query it lists files via fd;
-    with a query it searches file contents via rga (falling back to
-    fd | xargs grep). The single entry point covers both list and search.
-
-    Usage: fzfr fzfr-remote-reload <remote> <base_path> <ssh_control>
-                                         <type> <ext> [query] [--hidden] [--relative] [--exclude <pattern> ...]
-    """
+    """Entry point for the fzfr-remote-reload sub-command."""
     args = _parse_remote_reload_args(argv)
     if args is None:
         return 1
@@ -188,63 +177,62 @@ def cmd_remote_reload(argv: list[str]) -> int:
     return r.returncode
 
 
-# DESIGN: Script-over-SSH — the entire script is piped to 'python3 -' on the
-#         remote host via stdin on every preview call. The remote only needs
-#         python3 in its PATH; no installation or file copying is required.
-#         SCRIPT_BYTES is cached at startup (see top of file) so repeated
-#         preview calls read from memory rather than disk.
-# LIMITATION: The full script (~60 KB) is sent over the SSH connection on
-#             every cursor movement. On high-latency links this dominates
-#             preview latency; SSH multiplexing (reusing the transport TCP
-#             connection) mitigates most of the overhead.
-
-
 def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     """Upload SCRIPT_BYTES to the remote script cache in one SSH call.
-    Creates ~/.cache/fzfr/ if needed, then writes the full script to
-    ~/.cache/fzfr/<SCRIPT_HASH>.py and marks it executable.
-    Called exactly once per remote host per script version — when the
-    bootstrap script exits with _BOOTSTRAP_CACHE_MISS (99), indicating the
-    cached copy is absent (first launch or after a script upgrade).
-    Returns True on success, False if the upload failed (in which case the
-    caller falls back to piping the full script inline as before).
+
+    Prefers /dev/shm/fzfr/ (tmpfs, RAM-backed, nothing persists on disk after
+    reboot) and falls back to ~/.cache/fzfr/ on systems where /dev/shm is
+    absent or not writable (e.g. macOS, some containers). Exactly one location
+    is written — never both.
+
+    The bootstrap checks /dev/shm first then ~/.cache, matching this priority.
+    Because /dev/shm is cleared on reboot, the 60KB upload is paid once per
+    session on Linux and once ever on macOS (where ~/.cache persists).
+
+    Uses atomic tmp-then-rename to avoid partial reads by a concurrent
+    bootstrap call. Returns True on success, False if both locations failed
+    (caller falls back to piping SCRIPT_BYTES inline).
+
+    SECURITY: SCRIPT_HASH is asserted hex-only before interpolation.
     """
     if not SCRIPT_BYTES or not SCRIPT_HASH:
         return False
-    # SECURITY: Assert SCRIPT_HASH is hex-only before interpolating into the
-    #           remote shell command string. SHA256 hex is structurally safe
-    #           (no shell metacharacters possible), but we assert the invariant
-    #           explicitly so any future change to hash derivation fails loudly
-    #           rather than silently producing an exploitable path.
-    assert re.fullmatch(r"[0-9a-f]{16}", SCRIPT_HASH), f"Unexpected SCRIPT_HASH format: {SCRIPT_HASH!r}"
-    remote_cache_dir_relative = ".cache/fzfr"
-    script_file_name = f"{SCRIPT_HASH}.py"              # nosemgrep: fzfr-upload-cmd-unquoted-var
-    script_file_tmp_name = f"{SCRIPT_HASH}.py.tmp"      # nosemgrep: fzfr-upload-cmd-unquoted-var
+    assert re.fullmatch(r"[0-9a-f]{16}", SCRIPT_HASH), \
+        f"Unexpected SCRIPT_HASH format: {SCRIPT_HASH!r}"
+
+    script_name = f"{SCRIPT_HASH}.py"      # nosemgrep: fzfr-upload-cmd-unquoted-var
+    script_tmp  = f"{SCRIPT_HASH}.py.tmp"  # nosemgrep: fzfr-upload-cmd-unquoted-var
 
     install_cmd = (
-        f"REMOTE_HOME=$(echo ~); "
-        f'REMOTE_CACHE_DIR="$REMOTE_HOME/{remote_cache_dir_relative}"; '    # nosemgrep: fzfr-upload-cmd-unquoted-var
-        f'REMOTE_SCRIPT_TMP="$REMOTE_CACHE_DIR/{script_file_tmp_name}"; '   # nosemgrep: fzfr-upload-cmd-unquoted-var
-        f'REMOTE_SCRIPT="$REMOTE_CACHE_DIR/{script_file_name}"; '           # nosemgrep: fzfr-upload-cmd-unquoted-var
-        f'mkdir -p "$REMOTE_CACHE_DIR" && '
-        f'cat > "$REMOTE_SCRIPT_TMP" && '
-        f'mv "$REMOTE_SCRIPT_TMP" "$REMOTE_SCRIPT" && '
-        f'chmod 700 "$REMOTE_SCRIPT"'
+        # Try /dev/shm first (RAM-backed tmpfs, no disk writes)
+        f'if [ -d /dev/shm ] && [ -w /dev/shm ]; then '
+        f'D=/dev/shm/fzfr; '
+        # Fall back to ~/.cache (persistent disk, survives reboot)
+        f'else '
+        f'D=~/.cache/fzfr; '
+        f'fi && '
+        f'mkdir -p "$D" && '
+        f'cat > "$D/{script_tmp}" && '                  # nosemgrep: fzfr-upload-cmd-unquoted-var
+        f'mv "$D/{script_tmp}" "$D/{script_name}" && '  # nosemgrep: fzfr-upload-cmd-unquoted-var
+        f'chmod 700 "$D/{script_name}"'                 # nosemgrep: fzfr-upload-cmd-unquoted-var
     )
-    r = subprocess.run(
-        ssh_prefix + [install_cmd],
-        input=SCRIPT_BYTES,
-    )
+    r = subprocess.run(ssh_prefix + [install_cmd], input=SCRIPT_BYTES)
     return r.returncode == 0
 
 
 def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
     """Capturing variant of cmd_remote_preview — returns (rc, stdout_bytes).
 
-    Uses the bootstrap/hash caching strategy (same as cmd_remote_preview) so
-    the caller gets the benefit of the ~200 byte bootstrap transfer on all
-    subsequent calls after the first visit. capture_output=True lets the
-    caller inspect and cache the rendered output before writing it to stdout.
+    Uses the bootstrap/hash caching strategy so the caller gets the benefit
+    of the ~250 byte bootstrap transfer on all subsequent calls after the
+    first visit. capture_output=True lets the caller inspect and cache the
+    rendered output before writing it to stdout.
+
+    HARDENING: Any non-zero rc from the bootstrap that is not
+    _BOOTSTRAP_CACHE_MISS falls through to the full inline SCRIPT_BYTES path
+    rather than being returned directly. This prevents a broken bootstrap from
+    silently returning rc≠0 and causing cache.put() to be skipped forever
+    (symptom: every cursor move re-fetches from remote even for visited files).
     """
     if len(argv) < 4:
         return 1, b""
@@ -261,25 +249,29 @@ def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
     else:
         remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path])
 
-    # Try bootstrap first (fast path: ~200 bytes sent).
+    # Phase 1: bootstrap fast path (~250 bytes sent).
     if SCRIPT_BOOTSTRAP:
         r = subprocess.run(
             ssh_prefix + [remote_cmd],
             input=SCRIPT_BOOTSTRAP,
             capture_output=True,
         )
-        if r.returncode != _BOOTSTRAP_CACHE_MISS:
-            return r.returncode, r.stdout
-        # Cache miss: upload once, then retry.
-        if _upload_remote_script(ssh_prefix):
-            r = subprocess.run(
-                ssh_prefix + [remote_cmd],
-                input=SCRIPT_BOOTSTRAP,
-                capture_output=True,
-            )
-            return r.returncode, r.stdout
+        if r.returncode == 0:
+            return 0, r.stdout
+        if r.returncode == _BOOTSTRAP_CACHE_MISS:
+            # Clean cache miss: upload once, then retry.
+            if _upload_remote_script(ssh_prefix):
+                r = subprocess.run(
+                    ssh_prefix + [remote_cmd],
+                    input=SCRIPT_BOOTSTRAP,
+                    capture_output=True,
+                )
+                if r.returncode == 0:
+                    return 0, r.stdout
+        # Any other rc (broken bootstrap, upload failed): fall through.
 
-    # Fallback: send full script inline (upload failed or SCRIPT_BOOTSTRAP empty).
+    # Phase 2: inline fallback — pipe full SCRIPT_BYTES directly to python3 -.
+    # Always produces rc=0 on success, unblocking cache.put() in the caller.
     r = subprocess.run(
         ssh_prefix + [remote_cmd],
         input=SCRIPT_BYTES,
@@ -294,9 +286,9 @@ def cmd_remote_preview(argv: list[str]) -> int:
     Generates a preview of a file on a remote host. Uses hash-based remote
     script caching to avoid piping the full ~60 KB script on every call:
 
-      Steady state  — sends SCRIPT_BOOTSTRAP (~200 bytes). The remote finds
-                      the cached script at ~/.cache/fzfr/<hash>.py and
-                      executes it directly.
+      Steady state  — sends SCRIPT_BOOTSTRAP (~250 bytes). The remote finds
+                      the cached script at /dev/shm/fzfr/<hash>.py or
+                      ~/.cache/fzfr/<hash>.py and executes it directly.
       First call    — bootstrap exits 99 (cache miss). The local side uploads
                       the full script once via _upload_remote_script(), then
                       retries with the bootstrap.
@@ -325,17 +317,18 @@ def cmd_remote_preview(argv: list[str]) -> int:
     else:
         remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path])
 
-    # Fast path: send only the bootstrap (~200 bytes). The bootstrap checks
-    # for the cached script and execs it if present.
+    # Phase 1: bootstrap fast path.
     if SCRIPT_BOOTSTRAP:
         r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
-        if r.returncode != _BOOTSTRAP_CACHE_MISS:
-            return r.returncode
-        # Cache miss: upload the full script once, then retry with bootstrap.
-        if _upload_remote_script(ssh_prefix):
-            r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
-            return r.returncode
+        if r.returncode == 0:
+            return 0
+        if r.returncode == _BOOTSTRAP_CACHE_MISS:
+            if _upload_remote_script(ssh_prefix):
+                r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
+                if r.returncode == 0:
+                    return 0
+        # Broken bootstrap or upload failed: fall through.
 
-    # Fallback: send full script inline (bootstrap empty or upload failed).
+    # Phase 2: inline fallback.
     r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BYTES)
     return r.returncode

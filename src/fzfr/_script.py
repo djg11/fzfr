@@ -2,13 +2,22 @@
 
 This module has NO imports from other fzfr submodules so it can be
 safely imported by any module without creating circular dependencies.
+
+Constants exported for use by remote.py and search.py:
+
+    VERSION          — human-readable version string
+    SELF             — absolute path to the built single-file fzfr script
+    SCRIPT_BYTES     — full contents of the built script (read once at startup)
+    SCRIPT_HASH      — 16-char hex SHA-256 prefix of SCRIPT_BYTES
+    SCRIPT_BOOTSTRAP — tiny bootstrap sent to the remote on every preview call
+    _BOOTSTRAP_CACHE_MISS — sentinel exit code meaning the remote cache is cold
 """
 
 import hashlib
 from pathlib import Path
 
 
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 
 
 _SHEBANG = b"#!/usr/bin/env python3"
@@ -66,15 +75,28 @@ SCRIPT_BYTES = Path(SELF).read_bytes() if SELF else b""
 
 SCRIPT_HASH: str = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES else ""
 
-# PERF: Tiny bootstrap script sent to the remote instead of the full ~60 KB
-#       script on every preview call. Cache hit → exec cached copy; miss → 99.
-SCRIPT_BOOTSTRAP: bytes = f"""import sys,os,subprocess
-p=os.path.expanduser("~/.cache/fzfr/{SCRIPT_HASH}.py")
-if os.path.exists(p):
-    r=subprocess.run([sys.executable,p]+sys.argv[1:])
-    sys.exit(r.returncode)
-sys.exit(99)
-""".encode() if SCRIPT_HASH else b""
+# Bootstrap script sent to the remote on every preview call (~250 bytes).
+#
+# Checks /dev/shm/fzfr/<hash>.py first (tmpfs, RAM-backed, preferred) then
+# ~/.cache/fzfr/<hash>.py (persistent disk fallback on macOS and systems
+# without /dev/shm). On hit: runs the cached file directly as a path argument
+# — one python3 process. On miss: exits 99 so _upload_remote_script() uploads
+# to exactly one of those locations and retries.
+#
+# PERF: Uses os.path.exists() only — no file read, no hash computation on
+# the hot path. The hash embedded in the filename is the integrity check:
+# _upload_remote_script writes atomically (tmp → rename) so the file at
+# that path is always either absent or complete. Reading and hashing 60KB on
+# every preview call adds measurable latency on low-latency (LAN) links where
+# the SSH RTT is only ~1ms, so the exists() check is deliberately kept cheap.
+SCRIPT_BOOTSTRAP: bytes = (
+    f'import sys,os,subprocess\n'
+    f'for p in[f"/dev/shm/fzfr/{SCRIPT_HASH}.py",'
+    f'os.path.expanduser("~/.cache/fzfr/{SCRIPT_HASH}.py")]:\n'
+    f'    if os.path.exists(p):\n'
+    f'        sys.exit(subprocess.run([sys.executable,p]+sys.argv[1:]).returncode)\n'
+    f'sys.exit(99)\n'
+).encode() if SCRIPT_HASH else b""
 
 # Sentinel exit code: remote cache miss. Must not clash with fzfr-preview's
 # own exit codes (0, 1, 127).
