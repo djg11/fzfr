@@ -28,7 +28,7 @@ from typing import Protocol, runtime_checkable
 from .cache import _PreviewCache
 from .config import AVAILABLE_TOOLS
 from .ssh import _ssh_opts
-from .utils import _capture, _get_mime, _parse_extensions
+from .utils import _capture, _get_mime, _parse_extensions, _validate_exclude_pattern
 
 @dataclass
 class SearchContext:
@@ -214,6 +214,9 @@ class LocalBackend:
         for e in _parse_extensions(ext):
             fd_args += ["-e", e]
         for p in exclude_patterns:
+            if not _validate_exclude_pattern(p):
+                print(f"Warning: ignoring unsafe exclude pattern {p!r}", file=sys.stderr)
+                continue
             fd_args += ["-E", p]
 
         # DESIGN: For relative paths, run fd from base_path (cwd) with root "."
@@ -246,6 +249,9 @@ class LocalBackend:
         if hidden:
             args.append("--hidden")
         for p in exclude_patterns:
+            if not _validate_exclude_pattern(p):
+                print(f"Warning: ignoring unsafe exclude pattern {p!r}", file=sys.stderr)
+                continue
             args += ["-E", p]
         if path_format == "relative":
             return args + ["."]

@@ -174,7 +174,7 @@ def build():
         sys.exit(1)
 
     OUT.write_text(output)
-    OUT.chmod(0o755)
+    OUT.chmod(0o755)    # nosemgrep: fzfr-world-readable-chmod -- executable script, world-read intentional
 
     lines = output.count("\n")
     size_kb = OUT.stat().st_size / 1024

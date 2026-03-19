@@ -21,6 +21,7 @@ Two public entry points:
 The remote host only needs python3 and fd in its PATH. No installation or
 file copying is required beyond the automatic bootstrap on first use.
 """
+import re
 import shlex
 import subprocess
 import sys
@@ -28,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .ssh import _ssh_opts
-from .utils import _parse_extensions
+from .utils import _parse_extensions, _validate_exclude_pattern
 from ._script import SCRIPT_BYTES, SCRIPT_HASH, SCRIPT_BOOTSTRAP, _BOOTSTRAP_CACHE_MISS
 
 def _build_remote_cmd(
@@ -155,6 +156,9 @@ def _build_fd_rga_args(
         fd_args += ["-e", e]
         rga_glob_args += ["-g", f"*.{e}"]
     for p in exclude_patterns:
+        if not _validate_exclude_pattern(p):
+            print(f"Warning: ignoring unsafe exclude pattern {p!r}", file=sys.stderr)
+            continue
         fd_args += ["-E", p]
         rga_glob_args += ["--exclude", p]
     return fd_args, rga_glob_args
@@ -197,28 +201,31 @@ def cmd_remote_reload(argv: list[str]) -> int:
 
 def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     """Upload SCRIPT_BYTES to the remote script cache in one SSH call.
-
     Creates ~/.cache/fzfr/ if needed, then writes the full script to
     ~/.cache/fzfr/<SCRIPT_HASH>.py and marks it executable.
-
     Called exactly once per remote host per script version — when the
     bootstrap script exits with _BOOTSTRAP_CACHE_MISS (99), indicating the
     cached copy is absent (first launch or after a script upgrade).
-
     Returns True on success, False if the upload failed (in which case the
     caller falls back to piping the full script inline as before).
     """
     if not SCRIPT_BYTES or not SCRIPT_HASH:
         return False
+    # SECURITY: Assert SCRIPT_HASH is hex-only before interpolating into the
+    #           remote shell command string. SHA256 hex is structurally safe
+    #           (no shell metacharacters possible), but we assert the invariant
+    #           explicitly so any future change to hash derivation fails loudly
+    #           rather than silently producing an exploitable path.
+    assert re.fullmatch(r"[0-9a-f]{16}", SCRIPT_HASH), f"Unexpected SCRIPT_HASH format: {SCRIPT_HASH!r}"
     remote_cache_dir_relative = ".cache/fzfr"
-    script_file_name = f"{SCRIPT_HASH}.py"
-    script_file_tmp_name = f"{SCRIPT_HASH}.py.tmp"
+    script_file_name = f"{SCRIPT_HASH}.py"              # nosemgrep: fzfr-upload-cmd-unquoted-var
+    script_file_tmp_name = f"{SCRIPT_HASH}.py.tmp"      # nosemgrep: fzfr-upload-cmd-unquoted-var
 
     install_cmd = (
         f"REMOTE_HOME=$(echo ~); "
-        f'REMOTE_CACHE_DIR="$REMOTE_HOME/{remote_cache_dir_relative}"; '
-        f'REMOTE_SCRIPT_TMP="$REMOTE_CACHE_DIR/{script_file_tmp_name}"; '
-        f'REMOTE_SCRIPT="$REMOTE_CACHE_DIR/{script_file_name}"; '
+        f'REMOTE_CACHE_DIR="$REMOTE_HOME/{remote_cache_dir_relative}"; '    # nosemgrep: fzfr-upload-cmd-unquoted-var
+        f'REMOTE_SCRIPT_TMP="$REMOTE_CACHE_DIR/{script_file_tmp_name}"; '   # nosemgrep: fzfr-upload-cmd-unquoted-var
+        f'REMOTE_SCRIPT="$REMOTE_CACHE_DIR/{script_file_name}"; '           # nosemgrep: fzfr-upload-cmd-unquoted-var
         f'mkdir -p "$REMOTE_CACHE_DIR" && '
         f'cat > "$REMOTE_SCRIPT_TMP" && '
         f'mv "$REMOTE_SCRIPT_TMP" "$REMOTE_SCRIPT" && '

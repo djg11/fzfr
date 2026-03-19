@@ -183,3 +183,12 @@ def _parse_extensions(ext_str: str) -> list[str]:
         result.append(e)
     return result
 
+
+def _validate_exclude_pattern(pattern: str) -> bool:
+    """Return True if the pattern is safe to pass to fd -E / rga --exclude.
+
+    Allows glob metacharacters (* ? [ ] {}) but rejects shell operators
+    that could inject commands into remote shell fragments.
+    """
+    SHELL_OPERATORS = (';', '|', '&&', '||', '$', '`', '>', '<', '\n')
+    return not any(op in pattern for op in SHELL_OPERATORS)
