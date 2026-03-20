@@ -87,6 +87,17 @@ Architect rather than iterating indefinitely.
 
 Never commit with a failing build, failing tests, or semgrep findings.
 
+**Pre-commit workflow** -- ruff modifies files on first run, which pre-commit
+counts as a hook failure even with 0 violations. This is by design. The
+correct sequence is:
+
+```sh
+make pre-commit   # ruff fixes + formats files; hooks report failure (files changed)
+git add -u        # stage the ruff-fixed files
+make pre-commit   # second run: 0 changes, all hooks pass
+make build        # build with stable, clean files
+```
+
 ---
 
 ## 3. Build System Internals
@@ -158,6 +169,9 @@ the per-module linter and type-checker.
 - No trailing whitespace.
 - Use `ruff format` for formatting. Run `ruff check --fix` for auto-fixable
   lint issues. See `pyproject.toml` for the full rule set.
+- Pre-commit hooks run ruff automatically on every `git commit`. Install once
+  with `make install-hooks`. After that formatting is enforced automatically
+  -- you do not need to run `make format` manually before committing.
 
 ### 4.2. Imports
 
@@ -312,6 +326,15 @@ as a subprocess. That subprocess immediately sends SIGSTOP to the fzf process
 (PID stored in state), takes exclusive ownership of /dev/tty, draws the
 which-key box, reads keypresses, then SIGCONTs fzf on exit.
 
+DESIGN: SIGSTOP/SIGCONT was chosen after exhausting every other approach
+(alternate screen buffer, curses, nested fzf instance). All alternatives
+either cleared the screen or produced visible flash. SIGSTOP is POSIX,
+works on Linux and macOS, and has been tested across terminal emulators.
+The race window between execute-silent firing and SIGSTOP landing is
+closed by making SIGSTOP the absolute first operation -- before argv
+checks, config loading, or TTY access. Do not replace this mechanism
+without revisiting that full session history.
+
 Output modes:
 - `"silent"` -- run silently, surface stderr on non-zero exit
 - `"tmux"` -- new tmux window, SSH-wrapped for remote sessions
@@ -342,6 +365,7 @@ shell, so they MUST be `shlex.quote()`'d there.
 make build                                        # build + test
 make test                                         # test only, verbose
 make lint                                         # ruff check + ruff format check
+make install-hooks                                # install pre-commit (once per clone)
 semgrep scan --config .semgrep/semgrep.yml --error .  # security rules
 ```
 
@@ -420,8 +444,11 @@ string in `cmd_internal_exec`. Add `# nosemgrep: fzfr-subprocess-shell-true`
 with a comment explaining why it is safe. Do not add `shell=True` elsewhere.
 
 **Pyright reports "X is not accessed" for an exported function.**
-False positive. Functions like `_list_archive`, `_ssh_opts_str`, `_mutate_state`
-are used by other modules. Pyright analyses files in isolation. No fix needed.
+False positive -- suppressed by `reportUnusedVariable: none` in
+`pyrightconfig.json`. These functions are used by other modules; Pyright
+analyses files in isolation and cannot see cross-module references.
+Do not add `# pyright: ignore` comments to individual lines -- that
+trades linter noise for code noise. The config file is the right fix.
 
 **fzf redraws/clears the screen after a custom action.**
 Use `execute-silent` not `execute` for the leader bind. `execute` triggers a
