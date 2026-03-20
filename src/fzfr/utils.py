@@ -1,18 +1,20 @@
 """fzfr.utils — Low-level subprocess and MIME helpers.
 
-    _capture()         run a command and return (stdout, returncode), bounded
-                       by max_bytes to prevent memory exhaustion on large output
-    _passthrough()     run a command with inherited stdout (streaming, no capture)
-    _try_run()         attempt each command in a list until one succeeds
-    _get_mime()        detect MIME type via the `file` command
-    _is_text_mime()    return True for text/* and inode/x-empty (empty files)
-    _parse_extensions() parse and sanitise a whitespace-separated extension string
+_capture()         run a command and return (stdout, returncode), bounded
+                   by max_bytes to prevent memory exhaustion on large output
+_passthrough()     run a command with inherited stdout (streaming, no capture)
+_try_run()         attempt each command in a list until one succeeds
+_get_mime()        detect MIME type via the `file` command
+_is_text_mime()    return True for text/* and inode/x-empty (empty files)
+_parse_extensions() parse and sanitise a whitespace-separated extension string
 """
+
 import re
 import subprocess
 import sys
 
 from .config import AVAILABLE_TOOLS
+
 
 _CAPTURE_DEFAULT_MAX = 4096  # 4 KB
 
@@ -190,5 +192,19 @@ def _validate_exclude_pattern(pattern: str) -> bool:
     Allows glob metacharacters (* ? [ ] {}) but rejects shell operators
     that could inject commands into remote shell fragments.
     """
-    SHELL_OPERATORS = (';', '|', '&&', '||', '$', '`', '>', '<', '\n', '(', ')', '&', '\\')
+    SHELL_OPERATORS = (
+        ";",
+        "|",
+        "&&",
+        "||",
+        "$",
+        "`",
+        ">",
+        "<",
+        "\n",
+        "(",
+        ")",
+        "&",
+        "\\",
+    )
     return not any(op in pattern for op in SHELL_OPERATORS)

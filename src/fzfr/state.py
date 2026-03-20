@@ -1,10 +1,11 @@
 """fzfr.state — Session state file load/save/mutate."""
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from .workbase import WORK_BASE
+
 
 def _save_state(path: Path, state: dict) -> None:
     """Atomically save the session state to a JSON file."""
@@ -48,5 +49,3 @@ def _mutate_state(path: Path, fn: "Callable[[dict], None]") -> int:
         return 1
     _save_state(path, state)
     return 0
-
-

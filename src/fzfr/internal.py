@@ -13,10 +13,11 @@ import tty as _tty
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
-from .config import CONFIG, _CONFIG_DEFAULTS, AVAILABLE_TOOLS
+from .config import _CONFIG_DEFAULTS, AVAILABLE_TOOLS, CONFIG
 from .state import _load_state, _mutate_state
 from .tty import _tty_prompt
 from .utils import _parse_extensions
+
 
 # -- Internal sub-commands --
 #
@@ -80,12 +81,12 @@ def cmd_internal_exclude(argv: list[str]) -> int:
 
 def _prompt_str(state: dict) -> str:
     """Return the fzf prompt string for the given state."""
-    mode          = state.get("mode", "content")
-    ftype         = state.get("ftype", "f")
-    ext           = state.get("ext", "")
-    remote        = state.get("remote", "")
-    base_path     = state.get("base_path", "")
-    hidden        = state.get("show_hidden", False)
+    mode = state.get("mode", "content")
+    ftype = state.get("ftype", "f")
+    ext = state.get("ext", "")
+    remote = state.get("remote", "")
+    base_path = state.get("base_path", "")
+    hidden = state.get("show_hidden", False)
     exclude_patterns = state.get("exclude_patterns", [])
 
     if ftype == "d":
@@ -112,28 +113,34 @@ def _prompt_str(state: dict) -> str:
 
 def _header_str(state: dict) -> str:
     """Return the fzf header string for the given state."""
-    mode    = state.get("mode", "content")
-    ftype   = state.get("ftype", "f")
-    hidden  = state.get("show_hidden", False)
+    mode = state.get("mode", "content")
+    ftype = state.get("ftype", "f")
+    hidden = state.get("show_hidden", False)
     keybindings = CONFIG.get("keybindings", {})
 
     def _kb(name: str) -> str:
         return keybindings.get(name, _CONFIG_DEFAULTS["keybindings"][name]).upper()
 
-    toggle_key  = _kb("toggle_mode")
-    ftype_key   = _kb("toggle_ftype")
-    hidden_key  = _kb("toggle_hidden")
-    filter_key  = _kb("filter_ext")
+    toggle_key = _kb("toggle_mode")
+    ftype_key = _kb("toggle_ftype")
+    hidden_key = _kb("toggle_hidden")
+    filter_key = _kb("filter_ext")
     exclude_key = _kb("add_exclude")
     refresh_key = _kb("refresh_list")
-    sort_key    = _kb("sort_list")
-    copy_key    = _kb("copy_path")
-    exit_key    = _kb("exit")
+    sort_key = _kb("sort_list")
+    copy_key = _kb("copy_path")
+    exit_key = _kb("exit")
 
-    toggle_label      = "Dir Name (name only)" if ftype == "d" else ("Content" if mode == "name" else "File Name")
+    toggle_label = (
+        "Dir Name (name only)"
+        if ftype == "d"
+        else ("Content" if mode == "name" else "File Name")
+    )
     toggle_type_label = "Dirs" if ftype == "f" else "Files"
-    hidden_label      = "Hide" if hidden else "Show"
-    filter_hint       = "" if ftype == "d" else f" | {filter_key}: Filter | {exclude_key}: Exclude"
+    hidden_label = "Hide" if hidden else "Show"
+    filter_hint = (
+        "" if ftype == "d" else f" | {filter_key}: Filter | {exclude_key}: Exclude"
+    )
 
     return (
         f"{toggle_key}: {toggle_label} | {ftype_key}: {toggle_type_label}"
@@ -186,7 +193,9 @@ def cmd_internal_get_search_action(argv: list[str]) -> int:
     if not state:
         return 1
     print(
-        "disable-search" if state.get("mode", "content") == "content" else "enable-search",
+        "disable-search"
+        if state.get("mode", "content") == "content"
+        else "enable-search",
         end="",
     )
     return 0
@@ -222,13 +231,13 @@ def cmd_internal_toggle_ftype(argv: list[str]) -> int:
     def _toggle(s: dict) -> None:
         if s.get("ftype") == "f":
             s["mode_before_dir"] = s.get("mode", "content")
-            s["ext_before_dir"]  = s.get("ext", "")
+            s["ext_before_dir"] = s.get("ext", "")
             s["ftype"] = "d"
-            s["mode"]  = "name"
-            s["ext"]   = ""
+            s["mode"] = "name"
+            s["ext"] = ""
         else:
-            s["mode"]  = s.pop("mode_before_dir", "content")
-            s["ext"]   = s.pop("ext_before_dir", "")
+            s["mode"] = s.pop("mode_before_dir", "content")
+            s["ext"] = s.pop("ext_before_dir", "")
             s["ftype"] = "f"
 
     return _mutate_state(Path(argv[0]), _toggle)
@@ -247,7 +256,9 @@ def cmd_internal_toggle_hidden(argv: list[str]) -> int:
     )
 
 
-def _substitute_placeholders(cmd: str, path: str, paths: list[str], base: str, q: str) -> str:
+def _substitute_placeholders(
+    cmd: str, path: str, paths: list[str], base: str, q: str
+) -> str:
     """Substitute fzfr placeholders in a custom action cmd string.
 
     All path values are shell-quoted with shlex.quote() before substitution
@@ -266,18 +277,18 @@ def _substitute_placeholders(cmd: str, path: str, paths: list[str], base: str, q
     Note: {paths} is substituted before {path} so a cmd containing both
     placeholders gets the correct value for each.
     """
-    safe_path  = shlex.quote(path) if path else "''"
+    safe_path = shlex.quote(path) if path else "''"
     safe_paths = " ".join(shlex.quote(p) for p in paths) if paths else safe_path
-    safe_dir   = shlex.quote(os.path.dirname(path)) if path else "''"
-    safe_base  = shlex.quote(base) if base else "''"
-    safe_q     = shlex.quote(q) if q else "''"
+    safe_dir = shlex.quote(os.path.dirname(path)) if path else "''"
+    safe_base = shlex.quote(base) if base else "''"
+    safe_q = shlex.quote(q) if q else "''"
 
     result = cmd
-    result = result.replace("{paths}", safe_paths)   # before {path}
-    result = result.replace("{path}",  safe_path)
-    result = result.replace("{dir}",   safe_dir)
-    result = result.replace("{base}",  safe_base)
-    result = result.replace("{q}",     safe_q)
+    result = result.replace("{paths}", safe_paths)  # before {path}
+    result = result.replace("{path}", safe_path)
+    result = result.replace("{dir}", safe_dir)
+    result = result.replace("{base}", safe_base)
+    result = result.replace("{q}", safe_q)
     return result
 
 
@@ -292,9 +303,19 @@ def _abs_path(p: str, remote: str, base_path: str) -> str:
         return p
     if remote:
         pp = PurePosixPath(p)
-        return p if pp.is_absolute() else str(PurePosixPath(base_path) / pp) if base_path else p
+        return (
+            p
+            if pp.is_absolute()
+            else str(PurePosixPath(base_path) / pp)
+            if base_path
+            else p
+        )
     pp = Path(p)
-    return p if pp.is_absolute() else str((Path(base_path) if base_path else Path.cwd()) / pp)
+    return (
+        p
+        if pp.is_absolute()
+        else str((Path(base_path) if base_path else Path.cwd()) / pp)
+    )
 
 
 def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int:
@@ -321,7 +342,10 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
       the remote base_path using PurePosixPath (no local filesystem access).
     """
     if len(argv) < 3:
-        print("Usage: fzfr _internal-exec <state_path> <action_id> [path ...]", file=sys.stderr)
+        print(
+            "Usage: fzfr _internal-exec <state_path> <action_id> [path ...]",
+            file=sys.stderr,
+        )
         return 1
 
     state_path_str, action_id = argv[0], argv[1]
@@ -329,39 +353,51 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
 
     parts = action_id.split(".", 1)
     if len(parts) != 2:
-        print(f"[fzfr] invalid action_id {action_id!r} -- expected 'group.action'", file=sys.stderr)
+        print(
+            f"[fzfr] invalid action_id {action_id!r} -- expected 'group.action'",
+            file=sys.stderr,
+        )
         return 1
     group_key, action_key = parts
 
-    state       = _load_state(Path(state_path_str))
-    base_path   = state.get("base_path", "")
-    q           = state.get("last_query", "")
-    remote      = state.get("remote", "")        # "user@host" or ""
-    ssh_control = state.get("ssh_control", "")   # ControlMaster socket path
+    state = _load_state(Path(state_path_str))
+    base_path = state.get("base_path", "")
+    q = state.get("last_query", "")
+    remote = state.get("remote", "")  # "user@host" or ""
+    ssh_control = state.get("ssh_control", "")  # ControlMaster socket path
 
     custom_actions = CONFIG.get("custom_actions", {})
     groups = custom_actions.get("groups", {})
-    group  = groups.get(group_key)
+    group = groups.get(group_key)
     if not group:
         print(f"[fzfr] no action group {group_key!r}", file=sys.stderr)
         return 1
     action = group.get("actions", {}).get(action_key)
     if not action:
-        print(f"[fzfr] no action {action_key!r} in group {group_key!r}", file=sys.stderr)
+        print(
+            f"[fzfr] no action {action_key!r} in group {group_key!r}", file=sys.stderr
+        )
         return 1
 
-    primary   = _abs_path(selected_paths[0], remote, base_path) if selected_paths else ""
+    primary = _abs_path(selected_paths[0], remote, base_path) if selected_paths else ""
     abs_paths = [_abs_path(p, remote, base_path) for p in selected_paths]
 
     cmd = _substitute_placeholders(
-        action["cmd"], path=primary, paths=abs_paths, base=base_path, q=q,
+        action["cmd"],
+        path=primary,
+        paths=abs_paths,
+        base=base_path,
+        q=q,
     )
 
     output = action.get("output", "silent")
 
     # Wrap command for remote execution over the existing ControlMaster socket.
     if remote:
-        ssh_base = ["ssh", "-S", ssh_control, remote] if ssh_control else ["ssh", remote]
+        ssh_base = (
+            ["ssh", "-S", ssh_control, remote] if ssh_control else ["ssh", remote]
+        )
+
         def _run(extra: dict):
             return subprocess.run(ssh_base + [cmd], **extra)
     else:
@@ -369,12 +405,16 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
         # may contain pipes, redirects, or shell operators. All placeholder
         # values are shlex.quote()'d by _substitute_placeholders before here.
         def _run(extra: dict):
-            return subprocess.run(cmd, shell=True, **extra)  # nosemgrep: fzfr-subprocess-shell-true
+            return subprocess.run(
+                cmd, shell=True, **extra
+            )  # nosemgrep: fzfr-subprocess-shell-true
 
     if output == "tmux":
         if "tmux" in AVAILABLE_TOOLS:
             if remote:
-                tmux_cmd = " ".join(shlex.quote(a) for a in ssh_base) + " " + shlex.quote(cmd)
+                tmux_cmd = (
+                    " ".join(shlex.quote(a) for a in ssh_base) + " " + shlex.quote(cmd)
+                )
             else:
                 tmux_cmd = cmd
             return subprocess.run(["tmux", "new-window", tmux_cmd]).returncode
@@ -387,11 +427,11 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
         # box while fzf is still SIGSTOPed. If called directly (no
         # overlay_out), fall back to printing to stdout.
         r = _run({"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT})
-        raw   = r.stdout.decode("utf-8", errors="replace").rstrip()
+        raw = r.stdout.decode("utf-8", errors="replace").rstrip()
         lines = raw.splitlines() if raw else ["(no output)"]
         if overlay_out is not None:
-            overlay_out["lines"]    = lines
-            overlay_out["title"]    = action.get("label") or action_key
+            overlay_out["lines"] = lines
+            overlay_out["title"] = action.get("label") or action_key
             overlay_out["position"] = action.get(
                 "output_position",
                 custom_actions.get("output_position", "bottom-left"),
@@ -426,12 +466,13 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
 # _draw_box() returns a _BoxGeometry namedtuple that _erase_box() uses to
 # clear the exact region -- no mutable global state.
 
+
 class _BoxGeometry(NamedTuple):
-    tty_fd:    int
+    tty_fd: int
     start_row: int
     start_col: int
-    box_h:     int
-    box_w:     int
+    box_h: int
+    box_w: int
 
 
 _TL, _TR, _BL, _BR = "╭", "╮", "╰", "╯"
@@ -440,19 +481,28 @@ _H, _V = "─", "│"
 
 def _box_build(lines: list[str], title: str | None, footer: str | None) -> list[str]:
     """Return the list of strings that make up the box, ready to write."""
-    inner = max(22, min(60, max(
-        len(title or ""),
-        len(footer or ""),
-        max((len(ln) for ln in lines), default=0),
-    ) + 2))
+    inner = max(
+        22,
+        min(
+            60,
+            max(
+                len(title or ""),
+                len(footer or ""),
+                max((len(ln) for ln in lines), default=0),
+            )
+            + 2,
+        ),
+    )
 
     def _border(text: str | None, left: str, right: str) -> str:
         if not text:
             return left + _H * (inner + 2) + right
-        gap       = inner - len(text)
-        left_pad  = gap // 2
+        gap = inner - len(text)
+        left_pad = gap // 2
         right_pad = gap - left_pad
-        return left + _H + " " + _H * left_pad + text + _H * right_pad + " " + _H + right
+        return (
+            left + _H + " " + _H * left_pad + text + _H * right_pad + " " + _H + right
+        )
 
     rows = [_border(title, _TL, _TR)]
     for line in lines:
@@ -461,7 +511,9 @@ def _box_build(lines: list[str], title: str | None, footer: str | None) -> list[
     return rows
 
 
-def _box_origin(rows: int, cols: int, box_h: int, box_w: int, position: str) -> tuple[int, int]:
+def _box_origin(
+    rows: int, cols: int, box_h: int, box_w: int, position: str
+) -> tuple[int, int]:
     """Return (start_row, start_col) -- 1-indexed terminal coordinates."""
     if position == "top-left":
         return (1, 1)
@@ -491,7 +543,7 @@ def _draw_box(
     footer: str | None = None,
 ) -> _BoxGeometry:
     """Draw a bordered box at position and return its geometry for _erase_box."""
-    box   = _box_build(lines, title, footer)
+    box = _box_build(lines, title, footer)
     box_h = len(box)
     box_w = max(len(ln) for ln in box)
     term_rows, term_cols = _terminal_size(tty_fd)
@@ -511,7 +563,7 @@ def _erase_box(geom: _BoxGeometry) -> None:
     """Erase a box drawn by _draw_box using its returned geometry."""
     buf = "\033[s"
     for i in range(geom.box_h):
-        buf += f"\033[{geom.start_row + i};1H\033[2K"   # move to row, erase whole line
+        buf += f"\033[{geom.start_row + i};1H\033[2K"  # move to row, erase whole line
     buf += "\033[u"
     os.write(geom.tty_fd, buf.encode("utf-8"))
 
@@ -541,9 +593,9 @@ def _read_single_key(tty_fd: int) -> str:
         fcntl.fcntl(tty_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         try:
             if os.read(tty_fd, 8):
-                return ""   # escape sequence - discard
+                return ""  # escape sequence - discard
         except BlockingIOError:
-            pass            # bare ESC -- nothing followed
+            pass  # bare ESC -- nothing followed
         finally:
             fcntl.fcntl(tty_fd, fcntl.F_SETFL, flags)
         return "esc"
@@ -591,9 +643,9 @@ def _run_which_key_menu(
     """
     while True:
         # Level 1 -- group menu
-        group_items = [
-            f"[{gk}] {gv['label']}" for gk, gv in sorted(groups.items())
-        ] + ["[q] cancel"]
+        group_items = [f"[{gk}] {gv['label']}" for gk, gv in sorted(groups.items())] + [
+            "[q] cancel"
+        ]
         geom = _draw_box(tty_fd, group_items, menu_pos, title="actions")
 
         gk = _read_single_key(tty_fd)
@@ -604,7 +656,7 @@ def _run_which_key_menu(
             _erase_box(geom)
             continue
 
-        group   = groups[gk]
+        group = groups[gk]
         actions = group.get("actions", {})
         if not actions:
             _erase_box(geom)
@@ -615,12 +667,14 @@ def _run_which_key_menu(
             action_items = [
                 f"[{ak}] {av['label']}" for ak, av in sorted(actions.items())
             ] + ["[q] back"]
-            geom = _draw_box(tty_fd, action_items, menu_pos, title=group.get("label", gk))
+            geom = _draw_box(
+                tty_fd, action_items, menu_pos, title=group.get("label", gk)
+            )
 
             ak = _read_single_key(tty_fd)
             if not ak or ak in ("q", "esc"):
                 _erase_box(geom)
-                break   # back to group menu
+                break  # back to group menu
             if ak not in actions:
                 _erase_box(geom)
                 continue
@@ -687,10 +741,10 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
 
     # -- Step 2: take over the terminal --
     try:
-        tty_fd    = os.open("/dev/tty", os.O_RDWR)
+        tty_fd = os.open("/dev/tty", os.O_RDWR)
         old_attrs = termios.tcgetattr(tty_fd)
         _tty.setraw(tty_fd)
-        os.write(tty_fd, b"\033[?25l")   # hide cursor
+        os.write(tty_fd, b"\033[?25l")  # hide cursor
     except OSError:
         if fzf_pid:
             os.kill(fzf_pid, signal.SIGCONT)
@@ -698,14 +752,14 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
 
     def _restore() -> None:
         """Show cursor, restore terminal attrs, unfreeze fzf."""
-        os.write(tty_fd, b"\033[?25h")   # show cursor
+        os.write(tty_fd, b"\033[?25h")  # show cursor
         termios.tcsetattr(tty_fd, termios.TCSADRAIN, old_attrs)
         os.close(tty_fd)
         if fzf_pid:
             os.kill(fzf_pid, signal.SIGCONT)
             os.kill(fzf_pid, signal.SIGWINCH)  # force fzf to redraw cleanly
 
-    menu_pos  = custom_actions.get("menu_position", "bottom-right")
+    menu_pos = custom_actions.get("menu_position", "bottom-right")
     action_id = ""
 
     # -- Step 3: which-key navigation --

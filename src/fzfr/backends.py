@@ -17,6 +17,7 @@ one. The cycle is broken at runtime with try/except ImportError late imports;
 the built single-file script has no packages so the except branch fires and
 pulls the function from globals() instead.
 """
+
 import shlex
 import subprocess
 import sys
@@ -42,10 +43,7 @@ def _is_git_repo(path: str) -> bool:
     the local backend when file_source is "auto".
     """
     p = Path(path).resolve()
-    for parent in [p] + list(p.parents):
-        if (parent / ".git").is_dir():
-            return True
-    return False
+    return any((parent / ".git").is_dir() for parent in [p] + list(p.parents))
 
 
 def _git_ls_files_cmd(
@@ -141,10 +139,12 @@ class LocalBackend:
     def resolve_base(self, raw: str) -> str:
         if raw:
             return str(Path(raw).resolve())
+        # fmt: off
         try:
             from .search import _find_git_root
         except ImportError:
             _find_git_root = globals()["_find_git_root"]  # flat built file
+        # fmt: on
         git_root = _find_git_root()
         return git_root if git_root else str(Path.cwd().resolve())
 
@@ -190,10 +190,12 @@ class LocalBackend:
                 cache.put(cache_key, data)
             return r.returncode
 
+        # fmt: off
         try:
             from .preview import cmd_preview
         except ImportError:
             cmd_preview = globals()["cmd_preview"]  # flat built file
+        # fmt: on
         return cmd_preview(preview_args)
 
     def _use_git(self, ftype: str, file_source: str) -> bool:
@@ -237,7 +239,9 @@ class LocalBackend:
             fd_args += ["-e", e]
         for p in exclude_patterns:
             if not _validate_exclude_pattern(p):
-                print(f"Warning: ignoring unsafe exclude pattern {p!r}", file=sys.stderr)
+                print(
+                    f"Warning: ignoring unsafe exclude pattern {p!r}", file=sys.stderr
+                )
                 continue
             fd_args += ["-E", p]
 
@@ -251,7 +255,14 @@ class LocalBackend:
 
         if query:
             return _local_content_search(
-                fd_args, fd_root, fd_cwd, query, ext, hidden, self.base_path, path_format
+                fd_args,
+                fd_root,
+                fd_cwd,
+                query,
+                ext,
+                hidden,
+                self.base_path,
+                path_format,
             )
 
         return subprocess.run(fd_args + fd_root, cwd=fd_cwd).returncode
@@ -311,7 +322,9 @@ class LocalBackend:
             args.append("--hidden")
         for p in exclude_patterns:
             if not _validate_exclude_pattern(p):
-                print(f"Warning: ignoring unsafe exclude pattern {p!r}", file=sys.stderr)
+                print(
+                    f"Warning: ignoring unsafe exclude pattern {p!r}", file=sys.stderr
+                )
                 continue
             args += ["-E", p]
         if path_format == "relative":
@@ -340,10 +353,12 @@ class RemoteBackend:
         return ["ssh"] + _ssh_opts(self.ssh_control) + [self.remote]
 
     def resolve_base(self, raw: str) -> str:
+        # fmt: off
         try:
             from .copy import _resolve_remote_path
         except ImportError:
             _resolve_remote_path = globals()["_resolve_remote_path"]  # flat built file
+        # fmt: on
         return _resolve_remote_path(self.remote, raw, self.ssh_control)
 
     def is_safe_subpath(self, path: str) -> bool:
@@ -403,10 +418,12 @@ class RemoteBackend:
             args.append(query)
 
         if cache is not None and mtime is not None:
+            # fmt: off
             try:
                 from .remote import _cmd_remote_preview_capture
             except ImportError:
                 _cmd_remote_preview_capture = globals()["_cmd_remote_preview_capture"]  # flat built file
+            # fmt: on
             rc, data = _cmd_remote_preview_capture(args)
             sys.stdout.buffer.write(data)
             sys.stdout.buffer.flush()
@@ -414,10 +431,12 @@ class RemoteBackend:
                 cache.put(cache_key, data)
             return rc
 
+        # fmt: off
         try:
             from .remote import cmd_remote_preview
         except ImportError:
             cmd_remote_preview = globals()["cmd_remote_preview"]  # flat built file
+        # fmt: on
         return cmd_remote_preview(args)
 
     def reload(
@@ -448,10 +467,12 @@ class RemoteBackend:
         # Users who want git ls-files on remote should set file_source="git".
         if file_source == "git":
             args.append("--file-source=git")
+        # fmt: off
         try:
             from .remote import cmd_remote_reload
         except ImportError:
             cmd_remote_reload = globals()["cmd_remote_reload"]  # flat built file
+        # fmt: on
         return cmd_remote_reload(args)
 
     def initial_list_cmd(
@@ -554,8 +575,6 @@ def _local_content_search(
     )
     assert p1.stdout is not None
     p1.stdout.close()
-    p2 = subprocess.run(
-        ["xargs", "-P4", "-0", "grep", "-ilF", query], stdin=p1.stdout
-    )
+    p2 = subprocess.run(["xargs", "-P4", "-0", "grep", "-ilF", query], stdin=p1.stdout)
     p1.wait()
     return p2.returncode

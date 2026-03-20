@@ -12,6 +12,7 @@ _dquote() is used (not shlex.quote) for remote editor paths because the
 command travels through two shell levels: local tmux → ssh → remote shell.
 Double-quoting is safe at both levels; single-quoting breaks at the first.
 """
+
 import os
 import shlex
 import subprocess
@@ -19,12 +20,12 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .config import CONFIG, AVAILABLE_TOOLS, HISTORY_PATH
-from .state import _load_state
 from .backends import LocalBackend, RemoteBackend
-from .ssh import _ssh_opts, _ssh_opts_str
-from .utils import _is_text_mime
+from .config import AVAILABLE_TOOLS, CONFIG, HISTORY_PATH
 from .search import _self_cmd
+from .ssh import _ssh_opts, _ssh_opts_str
+from .state import _load_state
+from .utils import _is_text_mime
 from .workbase import WORK_BASE
 
 
@@ -109,20 +110,22 @@ def _open(
     # DESIGN: removeprefix("./") not lstrip("./"): lstrip treats its argument
     #         as a *set* of characters — lstrip("./") on "..hidden" would
     #         incorrectly strip to "hidden".
-    choice_clean   = choice.removeprefix("./")
-    is_remote      = isinstance(backend, RemoteBackend)
-    full_path_str  = (
+    choice_clean = choice.removeprefix("./")
+    is_remote = isinstance(backend, RemoteBackend)
+    full_path_str = (
         choice_clean
         if Path(choice_clean).is_absolute()
         else str(Path(backend.base_path) / choice_clean)
     )
 
     if not backend.is_safe_subpath(full_path_str):
-        print(f"Error: Blocked path outside search root: {full_path_str}", file=sys.stderr)
+        print(
+            f"Error: Blocked path outside search root: {full_path_str}", file=sys.stderr
+        )
         return
 
     window_name = Path(choice_clean).name
-    mode        = state.get("mode", "content")
+    mode = state.get("mode", "content")
     safe_editor = shlex.quote(editor)
 
     # ── Directory ──────────────────────────────────────────────────────────
@@ -144,13 +147,20 @@ def _open(
         ssh_cmd = f"{safe_editor} {_dquote(full_path_str)}"
         if _in_tmux():
             opts_str = _ssh_opts_str(backend.ssh_control)
-            subprocess.run([
-                "tmux", "new-window", "-n", window_name,
-                f"ssh {opts_str} {shlex.quote(backend.remote)} -t {shlex.quote(ssh_cmd)}",
-            ])
+            subprocess.run(
+                [
+                    "tmux",
+                    "new-window",
+                    "-n",
+                    window_name,
+                    f"ssh {opts_str} {shlex.quote(backend.remote)} -t {shlex.quote(ssh_cmd)}",
+                ]
+            )
         else:
             subprocess.run(
-                ["ssh"] + _ssh_opts(backend.ssh_control) + [backend.remote, "-t", ssh_cmd]
+                ["ssh"]
+                + _ssh_opts(backend.ssh_control)
+                + [backend.remote, "-t", ssh_cmd]
             )
         return
 
@@ -161,10 +171,15 @@ def _open(
 
     # ── Local text in tmux ─────────────────────────────────────────────────
     if _in_tmux() and _is_text_mime(mime):
-        subprocess.run([
-            "tmux", "new-window", "-n", window_name,
-            f"{safe_editor} {shlex.quote(full_path_str)}",
-        ])
+        subprocess.run(
+            [
+                "tmux",
+                "new-window",
+                "-n",
+                window_name,
+                f"{safe_editor} {shlex.quote(full_path_str)}",
+            ]
+        )
         return
 
     # ── Local binary / text without tmux ──────────────────────────────────
@@ -190,9 +205,11 @@ def _open_remote_binary(
     _max_bytes = _max_mb * 1024 * 1024 if _max_mb > 0 else float("inf")
 
     size_result = subprocess.run(
-        ["ssh"] + _ssh_opts(backend.ssh_control)
+        ["ssh"]
+        + _ssh_opts(backend.ssh_control)
         + [backend.remote, shlex.join(["ls", "-l", full_path_str])],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if size_result.returncode == 0:
         try:
@@ -209,12 +226,15 @@ def _open_remote_binary(
             pass  # unparseable — proceed and let cat fail naturally
 
     session_dir = self_path.parent if self_path is not None else WORK_BASE
-    suffix      = Path(full_path_str).suffix or ""
-    fd, temp_local = tempfile.mkstemp(prefix="fzfr-open-", suffix=suffix, dir=session_dir)
+    suffix = Path(full_path_str).suffix or ""
+    fd, temp_local = tempfile.mkstemp(
+        prefix="fzfr-open-", suffix=suffix, dir=session_dir
+    )
     try:
         with os.fdopen(fd, "wb") as fh:
             subprocess.run(
-                ["ssh"] + _ssh_opts(backend.ssh_control)
+                ["ssh"]
+                + _ssh_opts(backend.ssh_control)
                 + [backend.remote, shlex.join(["cat", full_path_str])],
                 stdout=fh,
             )
@@ -248,7 +268,7 @@ def cmd_open(argv: list[str]) -> int:
         return 1
 
     _, base_path, remote, _, ssh_control, state_path, self_path_str = argv[:7]
-    query   = argv[7]
+    query = argv[7]
     choices = argv[8:]
 
     # Strip residual shell quotes that the fzf bind string may produce
@@ -258,7 +278,9 @@ def cmd_open(argv: list[str]) -> int:
         _strip_quotes(state_path),
         _strip_quotes(self_path_str),
     )
-    self_path = Path(self_path_str) if self_path_str and self_path_str != "None" else None
+    self_path = (
+        Path(self_path_str) if self_path_str and self_path_str != "None" else None
+    )
 
     if not choices:
         return 0
@@ -268,15 +290,17 @@ def cmd_open(argv: list[str]) -> int:
     # to an open-and-continue workflow would never be saved without this.
     if query and CONFIG.get("search_history", False):
         try:
-            existing = HISTORY_PATH.read_text().splitlines() if HISTORY_PATH.exists() else []
-            deduped  = [query] + [e for e in existing if e != query]
+            existing = (
+                HISTORY_PATH.read_text().splitlines() if HISTORY_PATH.exists() else []
+            )
+            deduped = [query] + [e for e in existing if e != query]
             HISTORY_PATH.write_text("\n".join(deduped[:1000]) + "\n")
         except OSError:
             pass  # non-fatal
 
-    state  = _load_state(Path(state_path))
+    state = _load_state(Path(state_path))
     editor = _find_editor()
-    be: "LocalBackend | RemoteBackend" = (
+    be: LocalBackend | RemoteBackend = (
         RemoteBackend(remote, base_path, ssh_control)
         if remote
         else LocalBackend(base_path, ssh_control)

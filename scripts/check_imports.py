@@ -7,9 +7,11 @@ in the flat built file. Run this before committing.
 Usage: python3 scripts/check_imports.py
        make check-imports
 """
+
 import ast
 import sys
 from pathlib import Path
+
 
 SRC = Path(__file__).parent.parent / "src" / "fzfr"
 

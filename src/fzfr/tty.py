@@ -3,6 +3,8 @@
 Opens /dev/tty directly so interactive prompts work even when fzf has
 redirected both stdin and stdout for its own UI.
 """
+
+
 def _tty_prompt(prompt_text: str) -> str | None:
     """Display a prompt on the terminal and return the user's input.
 
@@ -24,9 +26,7 @@ def _tty_prompt(prompt_text: str) -> str | None:
             tty_out.write("\033[2J\033[H")
             tty_out.write(prompt_text)
             tty_out.flush()
-        with open("/dev/tty", "r") as tty_in:
+        with open("/dev/tty") as tty_in:
             return tty_in.readline().strip()
     except OSError:
         return None
-
-

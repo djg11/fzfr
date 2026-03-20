@@ -16,15 +16,23 @@ The preview cache (_PreviewCache) stores rendered output keyed on
 (path, mtime_ns, query) so repeated cursor visits to the same file cost
 ~0.1 ms instead of spawning a new subprocess each time.
 """
+
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from .utils import _capture, _passthrough, _try_run, _get_mime, _is_text_mime, _CAPTURE_PDF_MAX
+from .archive import FileKind, _list_archive, classify
 from .config import AVAILABLE_TOOLS
-from .archive import FileKind, classify, _list_archive
+from .utils import (
+    _CAPTURE_PDF_MAX,
+    _capture,
+    _get_mime,
+    _is_text_mime,
+    _passthrough,
+    _try_run,
+)
 from .workbase import WORK_BASE
 
 
@@ -38,10 +46,23 @@ def _preview_pdf(filepath: str, query: str) -> None:
     rga for scanned/image-only PDFs that have no native text layer.
     """
     if query:
-        if _try_run(
-            [["rga", "--pretty", "--color=always", "--context", "5", query, filepath]],
-            "",
-        ) == 0:
+        if (
+            _try_run(
+                [
+                    [
+                        "rga",
+                        "--pretty",
+                        "--color=always",
+                        "--context",
+                        "5",
+                        query,
+                        filepath,
+                    ]
+                ],
+                "",
+            )
+            == 0
+        ):
             return
         out, rc = _capture(["pdftotext", filepath, "-"], max_bytes=_CAPTURE_PDF_MAX)
         if rc == 0:
@@ -69,7 +90,15 @@ def _preview_text(filepath: str, query: str) -> None:
     if query:
         _try_run(
             [
-                ["rga", "--pretty", "--color=always", "--context", "5", query, filepath],
+                [
+                    "rga",
+                    "--pretty",
+                    "--color=always",
+                    "--context",
+                    "5",
+                    query,
+                    filepath,
+                ],
                 ["grep", "--color=always", "-iF", "-C", "5", query, filepath],
             ],
             "No matches found",
@@ -96,14 +125,16 @@ def _preview_git_context(filepath: str) -> None:
 
     log_result = subprocess.run(
         ["git", "log", "--oneline", "--color=always", "-5", "--", filepath],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     diff_result = subprocess.run(
         ["git", "diff", "HEAD", "--color=always", "--", filepath],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
 
-    log_out  = log_result.stdout.strip()
+    log_out = log_result.stdout.strip()
     diff_out = diff_result.stdout.strip()
 
     if not log_out and not diff_out:
@@ -123,9 +154,12 @@ def _preview_git_context(filepath: str) -> None:
 def _preview_archive(filepath: str, hint: str, query: str) -> None:
     """Render an archive file in the preview pane."""
     if query:
-        if _passthrough(
-            ["rga", "--pretty", "--color=always", "--context", "5", query, filepath]
-        ) != 0:
+        if (
+            _passthrough(
+                ["rga", "--pretty", "--color=always", "--context", "5", query, filepath]
+            )
+            != 0
+        ):
             print("[Archive search requires rga with dependencies]")
     else:
         _list_archive(filepath, hint)
@@ -238,8 +272,8 @@ def cmd_preview(argv: list[str]) -> int:
         return 1
 
     file_arg = argv[0]
-    query    = argv[1] if len(argv) > 1 else ""
-    hint     = argv[2] if len(argv) > 2 else file_arg
+    query = argv[1] if len(argv) > 1 else ""
+    hint = argv[2] if len(argv) > 2 else file_arg
 
     if not file_arg:
         return 0

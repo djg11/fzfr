@@ -5,6 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+
 def _get_work_base() -> Path:
     """Find the best place for temporary files (RAM-backed if possible).
 
@@ -18,6 +19,8 @@ def _get_work_base() -> Path:
 
 
 WORK_BASE = _get_work_base()
+
+
 # PERF: /dev/shm is a RAM-backed tmpfs on Linux. Placing the session directory,
 #       state file, and preview temp files here avoids disk I/O for files that
 #       are created and deleted on every cursor movement.
@@ -36,6 +39,7 @@ def _assert_not_symlink(p: Path) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
 
 _assert_not_symlink(WORK_BASE)
 WORK_BASE.mkdir(parents=True, exist_ok=True)

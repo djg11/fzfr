@@ -20,6 +20,7 @@ The remote host only needs python3 and fd in its PATH. No installation or
 file copying is required beyond the automatic bootstrap on first use.
 git is optional — only needed when file_source="git" is configured.
 """
+
 import re
 import shlex
 import subprocess
@@ -27,9 +28,9 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ._script import _BOOTSTRAP_CACHE_MISS, SCRIPT_BOOTSTRAP, SCRIPT_BYTES, SCRIPT_HASH
 from .ssh import _ssh_opts
 from .utils import _parse_extensions, _validate_exclude_pattern
-from ._script import SCRIPT_BYTES, SCRIPT_HASH, SCRIPT_BOOTSTRAP, _BOOTSTRAP_CACHE_MISS
 
 
 def _build_remote_cmd(
@@ -48,9 +49,9 @@ def _build_remote_cmd(
     relative=True  — cd to base_path first; output paths are relative.
     relative=False — pass base_path directly; output paths are absolute.
     """
-    safe_base    = shlex.quote(base_path)
-    fd_cmd       = shlex.join(fd_args)
-    grep_cmd     = shlex.join(["xargs", "-P4", "-0", "grep", "-ilF", query])
+    safe_base = shlex.quote(base_path)
+    fd_cmd = shlex.join(fd_args)
+    grep_cmd = shlex.join(["xargs", "-P4", "-0", "grep", "-ilF", query])
     error_suffix = "|| { echo 'Error: cannot access directory' >&2; exit 1; }"
 
     if not query:
@@ -59,15 +60,23 @@ def _build_remote_cmd(
         return f"{prefix}{fd_cmd} {root} {error_suffix}"
 
     if relative:
-        rga_cmd      = shlex.join(["rga"] + rga_glob_args + ["--files-with-matches", "--fixed-strings", query, "."])
-        fd_grep_cmd  = shlex.join(fd_args + ["-0", "."])
+        rga_cmd = shlex.join(
+            ["rga"]
+            + rga_glob_args
+            + ["--files-with-matches", "--fixed-strings", query, "."]
+        )
+        fd_grep_cmd = shlex.join(fd_args + ["-0", "."])
         return (
             f"cd {safe_base} 2>/dev/null && "
             f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
         )
     else:
-        rga_cmd      = shlex.join(["rga"] + rga_glob_args + ["--files-with-matches", "--fixed-strings", query, base_path])
-        fd_grep_cmd  = shlex.join(fd_args + ["-0", ".", base_path])
+        rga_cmd = shlex.join(
+            ["rga"]
+            + rga_glob_args
+            + ["--files-with-matches", "--fixed-strings", query, base_path]
+        )
+        fd_grep_cmd = shlex.join(fd_args + ["-0", ".", base_path])
         return f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
 
 
@@ -83,8 +92,8 @@ def _build_git_remote_cmd(
     Always runs from base_path (cd first). Output is relative to base_path
     natively; for absolute paths we pipe through awk to prepend the base.
     """
-    safe_base  = shlex.quote(base_path)
-    git_args   = ["git", "ls-files", "-c"]
+    safe_base = shlex.quote(base_path)
+    git_args = ["git", "ls-files", "-c"]
     if hidden:
         git_args += ["--others", "--exclude-standard"]
     for p in exclude_patterns:
@@ -111,16 +120,17 @@ def _build_git_remote_cmd(
 @dataclass
 class _RemoteReloadArgs:
     """Parsed arguments for cmd_remote_reload."""
-    remote:           str
-    base_path:        str
-    ssh_control:      str
-    ftype:            str
-    ext:              str
-    query:            str = ""
-    hidden:           bool = False
-    relative:         bool = False
+
+    remote: str
+    base_path: str
+    ssh_control: str
+    ftype: str
+    ext: str
+    query: str = ""
+    hidden: bool = False
+    relative: bool = False
     exclude_patterns: list[str] = field(default_factory=list)
-    file_source:      str = "fd"  # "fd" or "git" — "auto" resolved locally
+    file_source: str = "fd"  # "fd" or "git" — "auto" resolved locally
 
 
 def _parse_remote_reload_args(argv: list[str]) -> "_RemoteReloadArgs | None":
@@ -163,19 +173,19 @@ def _build_fd_rga_args(
     exclude_patterns: list[str],
 ) -> tuple[list[str], list[str]]:
     """Build fd and rga argument lists from shared search parameters."""
-    fd_args:       list[str] = ["fd", "-L", "--type", ftype]
+    fd_args: list[str] = ["fd", "-L", "--type", ftype]
     rga_glob_args: list[str] = []
     if hidden:
         fd_args.append("--hidden")
         rga_glob_args.append("--hidden")
     for e in _parse_extensions(ext):
-        fd_args       += ["-e", e]
+        fd_args += ["-e", e]
         rga_glob_args += ["-g", f"*.{e}"]
     for p in exclude_patterns:
         if not _validate_exclude_pattern(p):
             print(f"Warning: ignoring unsafe exclude pattern {p!r}", file=sys.stderr)
             continue
-        fd_args       += ["-E", p]
+        fd_args += ["-E", p]
         rga_glob_args += ["--exclude", p]
     return fd_args, rga_glob_args
 
@@ -207,7 +217,9 @@ def cmd_remote_reload(argv: list[str]) -> int:
             fd_args, rga_glob_args, args.query, args.base_path, args.relative
         )
 
-    r = subprocess.run(["ssh"] + _ssh_opts(args.ssh_control) + [args.remote, remote_cmd])
+    r = subprocess.run(
+        ["ssh"] + _ssh_opts(args.ssh_control) + [args.remote, remote_cmd]
+    )
     return r.returncode
 
 
@@ -222,19 +234,20 @@ def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     """
     if not SCRIPT_BYTES or not SCRIPT_HASH:
         return False
-    assert re.fullmatch(r"[0-9a-f]{16}", SCRIPT_HASH), \
+    assert re.fullmatch(r"[0-9a-f]{16}", SCRIPT_HASH), (
         f"Unexpected SCRIPT_HASH format: {SCRIPT_HASH!r}"
+    )
 
-    script_name = f"{SCRIPT_HASH}.py"      # nosemgrep: fzfr-upload-cmd-unquoted-var
-    script_tmp  = f"{SCRIPT_HASH}.py.tmp"  # nosemgrep: fzfr-upload-cmd-unquoted-var
+    script_name = f"{SCRIPT_HASH}.py"  # nosemgrep: fzfr-upload-cmd-unquoted-var
+    script_tmp = f"{SCRIPT_HASH}.py.tmp"  # nosemgrep: fzfr-upload-cmd-unquoted-var
 
     install_cmd = (
-        f'if [ -d /dev/shm ] && [ -w /dev/shm ]; then D=/dev/shm/fzfr; '
-        f'else D=~/.cache/fzfr; fi && '
+        f"if [ -d /dev/shm ] && [ -w /dev/shm ]; then D=/dev/shm/fzfr; "
+        f"else D=~/.cache/fzfr; fi && "
         f'mkdir -p "$D" && '
-        f'cat > "$D/{script_tmp}" && '                  # nosemgrep: fzfr-upload-cmd-unquoted-var
+        f'cat > "$D/{script_tmp}" && '  # nosemgrep: fzfr-upload-cmd-unquoted-var
         f'mv "$D/{script_tmp}" "$D/{script_name}" && '  # nosemgrep: fzfr-upload-cmd-unquoted-var
-        f'chmod 700 "$D/{script_name}"'                 # nosemgrep: fzfr-upload-cmd-unquoted-var
+        f'chmod 700 "$D/{script_name}"'  # nosemgrep: fzfr-upload-cmd-unquoted-var
     )
     r = subprocess.run(ssh_prefix + [install_cmd], input=SCRIPT_BYTES)
     return r.returncode == 0
@@ -261,7 +274,9 @@ def _remote_preview_run(
     run_kwargs: dict = {"capture_output": True} if capture else {}
 
     def _run(input_bytes: bytes) -> "subprocess.CompletedProcess[bytes]":
-        return subprocess.run(ssh_prefix + [remote_cmd], input=input_bytes, **run_kwargs)
+        return subprocess.run(
+            ssh_prefix + [remote_cmd], input=input_bytes, **run_kwargs
+        )
 
     def _emit(r: "subprocess.CompletedProcess[bytes]") -> "tuple[int, bytes] | int":
         if capture:
@@ -292,9 +307,11 @@ def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
     remote, base_path, ssh_control, filename = argv[0], argv[1], argv[2], argv[3]
     query = argv[4] if len(argv) > 4 else ""
 
-    full_path  = filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
+    full_path = (
+        filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
+    )
     ssh_prefix = ["ssh"] + _ssh_opts(ssh_control) + [remote]
-    args       = ["fzfr-preview", full_path] + ([query] if query else [])
+    args = ["fzfr-preview", full_path] + ([query] if query else [])
     remote_cmd = shlex.join(["python3", "-"] + args)
 
     result = _remote_preview_run(ssh_prefix, remote_cmd, capture=True)
@@ -317,9 +334,11 @@ def cmd_remote_preview(argv: list[str]) -> int:
     remote, base_path, ssh_control, filename = argv[0], argv[1], argv[2], argv[3]
     query = argv[4] if len(argv) > 4 else ""
 
-    full_path  = filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
+    full_path = (
+        filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
+    )
     ssh_prefix = ["ssh"] + _ssh_opts(ssh_control) + [remote]
-    args       = ["fzfr-preview", full_path] + ([query] if query else [])
+    args = ["fzfr-preview", full_path] + ([query] if query else [])
     remote_cmd = shlex.join(["python3", "-"] + args)
 
     result = _remote_preview_run(ssh_prefix, remote_cmd, capture=False)

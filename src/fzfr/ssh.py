@@ -4,6 +4,7 @@ Provides _ssh_opts() and _ssh_opts_str() which return the ControlMaster flags
 needed when config["ssh_multiplexing"] is True, or an empty list/string when
 fzfr defers to the user's ~/.ssh/config.
 """
+
 import shlex
 from pathlib import Path
 
@@ -27,9 +28,12 @@ def _ssh_opts(ssh_control: str) -> list[str]:
 
     persist = int(CONFIG.get("ssh_control_persist", 60))
     opts = [
-        "-o", "ControlMaster=auto",
-        "-o", f"ControlPath={ssh_control}",
-        "-o", f"ControlPersist={persist}",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPath={ssh_control}",
+        "-o",
+        f"ControlPersist={persist}",
     ]
 
     if CONFIG.get("ssh_strict_host_key_checking", True):
@@ -39,8 +43,10 @@ def _ssh_opts(ssh_control: str) -> list[str]:
         #           host keys world-readable.
         known_hosts_path.touch(mode=0o600, exist_ok=True)
         opts += [
-            "-o", "StrictHostKeyChecking=yes",
-            "-o", f"UserKnownHostsFile={known_hosts_path}",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_path}",
         ]
 
     return opts

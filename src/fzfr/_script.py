@@ -12,9 +12,9 @@ Constants exported for use by remote.py and search.py:
     SCRIPT_BOOTSTRAP -- tiny bootstrap sent to the remote on every preview call
     _BOOTSTRAP_CACHE_MISS -- sentinel exit code meaning the remote cache is cold
 """
-import sys
 
 import hashlib
+import sys
 from pathlib import Path
 
 
@@ -90,13 +90,17 @@ SCRIPT_HASH: str = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES
 # every preview call adds measurable latency on low-latency (LAN) links where
 # the SSH RTT is only ~1ms, so the exists() check is deliberately kept cheap.
 SCRIPT_BOOTSTRAP: bytes = (
-    f'import sys,os,subprocess\n'
-    f'for p in[f"/dev/shm/fzfr/{SCRIPT_HASH}.py",'
-    f'os.path.expanduser("~/.cache/fzfr/{SCRIPT_HASH}.py")]:\n'
-    f'    if os.path.exists(p):\n'
-    f'        sys.exit(subprocess.run([sys.executable,p]+sys.argv[1:]).returncode)\n'
-    f'sys.exit(99)\n'
-).encode() if SCRIPT_HASH else b""
+    (
+        f"import sys,os,subprocess\n"
+        f'for p in[f"/dev/shm/fzfr/{SCRIPT_HASH}.py",'
+        f'os.path.expanduser("~/.cache/fzfr/{SCRIPT_HASH}.py")]:\n'
+        f"    if os.path.exists(p):\n"
+        f"        sys.exit(subprocess.run([sys.executable,p]+sys.argv[1:]).returncode)\n"
+        f"sys.exit(99)\n"
+    ).encode()
+    if SCRIPT_HASH
+    else b""
+)
 
 # Sentinel exit code: remote cache miss. Must not clash with fzfr-preview's
 # own exit codes (0, 1, 127).

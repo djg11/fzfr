@@ -133,25 +133,40 @@ import sys
 from pathlib import Path
 
 from ._script import (
-    VERSION, SELF, SCRIPT_BYTES, SCRIPT_HASH, SCRIPT_BOOTSTRAP, _BOOTSTRAP_CACHE_MISS,
+    _BOOTSTRAP_CACHE_MISS,
+    SCRIPT_BOOTSTRAP,
+    SCRIPT_BYTES,
+    SCRIPT_HASH,
+    SELF,
+    VERSION,
 )
-from .preview import cmd_preview
-from .open import cmd_open
 from .copy import cmd_copy
-from .remote import cmd_remote_reload, cmd_remote_preview
-from .search import cmd_search
 from .dispatch import cmd_dispatch
 from .internal import (
-      cmd_internal_get_prompt, cmd_internal_get_header,
-      cmd_internal_get_search_action, cmd_internal_toggle_mode,
-      cmd_internal_toggle_ftype, cmd_internal_toggle_hidden,
-      cmd_internal_prompt, cmd_internal_exclude,
-      cmd_internal_exec, cmd_internal_action_menu
+    cmd_internal_action_menu,
+    cmd_internal_exclude,
+    cmd_internal_exec,
+    cmd_internal_get_header,
+    cmd_internal_get_prompt,
+    cmd_internal_get_search_action,
+    cmd_internal_prompt,
+    cmd_internal_toggle_ftype,
+    cmd_internal_toggle_hidden,
+    cmd_internal_toggle_mode,
 )
+from .open import cmd_open
+from .preview import cmd_preview
+from .remote import cmd_remote_preview, cmd_remote_reload
+from .search import cmd_search
+
 
 # Re-exported from ._script — used by remote.py, search.py, and the built flat file.
 __all__ = [
-    "VERSION", "SELF", "SCRIPT_BYTES", "SCRIPT_HASH", "SCRIPT_BOOTSTRAP",
+    "VERSION",
+    "SELF",
+    "SCRIPT_BYTES",
+    "SCRIPT_HASH",
+    "SCRIPT_BOOTSTRAP",
     "_BOOTSTRAP_CACHE_MISS",
 ]
 

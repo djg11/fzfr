@@ -5,81 +5,131 @@ Provides:
   _list_archive()  — list archive contents to stdout via the appropriate tool
   FileKind         — enum of file categories used by preview and open dispatch
 """
+
 import subprocess
 from enum import Enum, auto
 from pathlib import Path
 
-from .utils import _passthrough, _is_text_mime
+from .utils import _is_text_mime, _passthrough
+
 
 ARCHIVE_EXTENSIONS = {
-    ".cbt", ".tbz2", ".tbz", ".tgz", ".txz", ".tar",
-    ".cbz", ".epub", ".zip", ".cbr", ".rar",
-    ".gz", ".lzma", ".bz2", ".xz", ".lz4", ".zst",
-    ".7z", ".apk", ".arj", ".cab", ".cb7", ".chm",
-    ".deb", ".iso", ".lzh", ".msi", ".pkg", ".rpm",
-    ".udf", ".wim", ".xar", ".vhd", ".dmg", ".cpio",
+    ".cbt",
+    ".tbz2",
+    ".tbz",
+    ".tgz",
+    ".txz",
+    ".tar",
+    ".cbz",
+    ".epub",
+    ".zip",
+    ".cbr",
+    ".rar",
+    ".gz",
+    ".lzma",
+    ".bz2",
+    ".xz",
+    ".lz4",
+    ".zst",
+    ".7z",
+    ".apk",
+    ".arj",
+    ".cab",
+    ".cb7",
+    ".chm",
+    ".deb",
+    ".iso",
+    ".lzh",
+    ".msi",
+    ".pkg",
+    ".rpm",
+    ".udf",
+    ".wim",
+    ".xar",
+    ".vhd",
+    ".dmg",
+    ".cpio",
 }
 
 COMPOUND_EXTENSIONS = {
     # DESIGN: Must be checked before ARCHIVE_EXTENSIONS because Path.suffix only
     #         returns the final component — Path("f.tar.gz").suffix == ".gz".
-    ".tar.bz2", ".tar.gz", ".tar.xz", ".tar.lz4", ".tar.zst", ".tar.br",
+    ".tar.bz2",
+    ".tar.gz",
+    ".tar.xz",
+    ".tar.lz4",
+    ".tar.zst",
+    ".tar.br",
 }
 
 # Maps each extension to the command that lists its contents.
 # {filepath} is substituted with the actual path at call time in _list_archive().
 ARCHIVE_LIST_COMMANDS = {
-    ".cbt":      ["tar", "-tjf", "{filepath}"],
-    ".tar.bz2":  ["tar", "-tjf", "{filepath}"],
-    ".tbz2":     ["tar", "-tjf", "{filepath}"],
-    ".tbz":      ["tar", "-tjf", "{filepath}"],
-    ".tar.gz":   ["tar", "-tzf", "{filepath}"],
-    ".tgz":      ["tar", "-tzf", "{filepath}"],
-    ".tar.xz":   ["tar", "-tJf", "{filepath}"],
-    ".txz":      ["tar", "-tJf", "{filepath}"],
-    ".tar.lz4":  ["tar", "--use-compress-program=lz4", "-tf", "{filepath}"],
-    ".tar.zst":  ["tar", "-I", "zstd", "-tf", "{filepath}"],
-    ".tar.br":   ["tar", "--use-compress-program=pbzip2", "-tf", "{filepath}"],
-    ".tar":      ["tar", "-tf", "{filepath}"],
-    ".cbz":      ["unzip", "-l", "{filepath}"],
-    ".epub":     ["unzip", "-l", "{filepath}"],
-    ".zip":      ["unzip", "-l", "{filepath}"],
-    ".cbr":      ["unrar", "l", "{filepath}"],
-    ".rar":      ["unrar", "l", "{filepath}"],
-    ".bz2":      ["bzcat", "{filepath}"],
-    ".xz":       ["xzcat", "{filepath}"],
-    ".lz4":      ["lz4", "-d", "{filepath}", "--stdout"],
-    ".zst":      ["zstd", "-d", "{filepath}", "--stdout"],
+    ".cbt": ["tar", "-tjf", "{filepath}"],
+    ".tar.bz2": ["tar", "-tjf", "{filepath}"],
+    ".tbz2": ["tar", "-tjf", "{filepath}"],
+    ".tbz": ["tar", "-tjf", "{filepath}"],
+    ".tar.gz": ["tar", "-tzf", "{filepath}"],
+    ".tgz": ["tar", "-tzf", "{filepath}"],
+    ".tar.xz": ["tar", "-tJf", "{filepath}"],
+    ".txz": ["tar", "-tJf", "{filepath}"],
+    ".tar.lz4": ["tar", "--use-compress-program=lz4", "-tf", "{filepath}"],
+    ".tar.zst": ["tar", "-I", "zstd", "-tf", "{filepath}"],
+    ".tar.br": ["tar", "--use-compress-program=pbzip2", "-tf", "{filepath}"],
+    ".tar": ["tar", "-tf", "{filepath}"],
+    ".cbz": ["unzip", "-l", "{filepath}"],
+    ".epub": ["unzip", "-l", "{filepath}"],
+    ".zip": ["unzip", "-l", "{filepath}"],
+    ".cbr": ["unrar", "l", "{filepath}"],
+    ".rar": ["unrar", "l", "{filepath}"],
+    ".bz2": ["bzcat", "{filepath}"],
+    ".xz": ["xzcat", "{filepath}"],
+    ".lz4": ["lz4", "-d", "{filepath}", "--stdout"],
+    ".zst": ["zstd", "-d", "{filepath}", "--stdout"],
 }
 
 ARCHIVE_INSTALL_HINTS = {
-    ".cbt":      "bzip2 tar: install tar",
-    ".tar.bz2":  "bzip2 tar: install tar",
-    ".tbz2":     "bzip2 tar: install tar",
-    ".tbz":      "bzip2 tar: install tar",
-    ".tar.gz":   "gzip tar: install tar",
-    ".tgz":      "gzip tar: install tar",
-    ".tar.xz":   "xz tar: install tar",
-    ".txz":      "xz tar: install tar",
-    ".tar.lz4":  "lz4 tar: install tar + lz4",
-    ".tar.zst":  "zst tar: install tar + zstd",
-    ".tar.br":   "brotli tar: install tar + pbzip2",
-    ".tar":      "tar: install tar",
-    ".cbz":      "zip: install unzip",
-    ".epub":     "zip: install unzip",
-    ".zip":      "zip: install unzip",
-    ".cbr":      "rar: install unrar",
-    ".rar":      "rar: install unrar",
-    ".bz2":      "bzip2: install bzip2",
-    ".xz":       "xz: install xz-utils",
-    ".lz4":      "lz4: install lz4",
-    ".zst":      "zst: install zstd",
+    ".cbt": "bzip2 tar: install tar",
+    ".tar.bz2": "bzip2 tar: install tar",
+    ".tbz2": "bzip2 tar: install tar",
+    ".tbz": "bzip2 tar: install tar",
+    ".tar.gz": "gzip tar: install tar",
+    ".tgz": "gzip tar: install tar",
+    ".tar.xz": "xz tar: install tar",
+    ".txz": "xz tar: install tar",
+    ".tar.lz4": "lz4 tar: install tar + lz4",
+    ".tar.zst": "zst tar: install tar + zstd",
+    ".tar.br": "brotli tar: install tar + pbzip2",
+    ".tar": "tar: install tar",
+    ".cbz": "zip: install unzip",
+    ".epub": "zip: install unzip",
+    ".zip": "zip: install unzip",
+    ".cbr": "rar: install unrar",
+    ".rar": "rar: install unrar",
+    ".bz2": "bzip2: install bzip2",
+    ".xz": "xz: install xz-utils",
+    ".lz4": "lz4: install lz4",
+    ".zst": "zst: install zstd",
 }
 
 _7Z_EXTENSIONS = {
-    ".7z", ".apk", ".arj", ".cab", ".cb7", ".chm",
-    ".deb", ".iso", ".lzh", ".msi", ".pkg", ".rpm",
-    ".udf", ".wim", ".xar", ".vhd", ".dmg",
+    ".7z",
+    ".apk",
+    ".arj",
+    ".cab",
+    ".cb7",
+    ".chm",
+    ".deb",
+    ".iso",
+    ".lzh",
+    ".msi",
+    ".pkg",
+    ".rpm",
+    ".udf",
+    ".wim",
+    ".xar",
+    ".vhd",
+    ".dmg",
 }
 
 
@@ -106,11 +156,12 @@ class FileKind(Enum):
     BINARY   — unknown binary; show as hex dump.
     TEXT     — everything else: source code, prose, config.
     """
-    ARCHIVE   = auto()
-    PDF       = auto()
+
+    ARCHIVE = auto()
+    PDF = auto()
     DIRECTORY = auto()
-    BINARY    = auto()
-    TEXT      = auto()
+    BINARY = auto()
+    TEXT = auto()
 
 
 def classify(hint: str, mime: str = "") -> FileKind:
@@ -155,7 +206,9 @@ def _list_archive(filepath: str, hint: str) -> None:
             print(f"[{msg}]")
 
     if suffix in ARCHIVE_LIST_COMMANDS:
-        cmd = [arg.replace("{filepath}", filepath) for arg in ARCHIVE_LIST_COMMANDS[suffix]]
+        cmd = [
+            arg.replace("{filepath}", filepath) for arg in ARCHIVE_LIST_COMMANDS[suffix]
+        ]
         if not try_pass(cmd):
             rga_fallback(ARCHIVE_INSTALL_HINTS.get(suffix, "unknown"))
         return

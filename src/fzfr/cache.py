@@ -5,6 +5,7 @@ the preview renderer (bat, cat, rga, or the remote SSH preview). On a hit the
 bytes are replayed directly, saving a subprocess spawn (local) or an SSH
 round-trip plus script transfer (remote).
 """
+
 import hashlib
 import os
 import shlex

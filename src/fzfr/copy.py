@@ -3,12 +3,13 @@
 Also provides _resolve_remote_path() for expanding tilde and relative paths
 on a remote host without touching the local filesystem.
 """
+
 import subprocess
 import sys
 from pathlib import Path
 
-from .config import AVAILABLE_TOOLS
 from .backends import LocalBackend
+from .config import AVAILABLE_TOOLS
 from .ssh import _ssh_opts
 
 
@@ -27,7 +28,7 @@ def cmd_copy(argv: list[str]) -> int:
         return 1
 
     _, base_path, remote, ssh_control, choice = argv[:5]
-    remote      = remote.strip("'\"")
+    remote = remote.strip("'\"")
     ssh_control = ssh_control.strip("'\"")
 
     choice_clean = choice.removeprefix("./")
@@ -40,7 +41,10 @@ def cmd_copy(argv: list[str]) -> int:
     if not remote:
         backend = LocalBackend(base_path, ssh_control)
         if not backend.is_safe_subpath(path_to_copy):
-            print(f"Error: Blocked path outside search root: {path_to_copy}", file=sys.stderr)
+            print(
+                f"Error: Blocked path outside search root: {path_to_copy}",
+                file=sys.stderr,
+            )
             return 1
 
     if "xclip" in AVAILABLE_TOOLS:
@@ -50,7 +54,10 @@ def cmd_copy(argv: list[str]) -> int:
     elif "wl-copy" in AVAILABLE_TOOLS:
         copy_cmd = ["wl-copy"]
     else:
-        print("Error: No clipboard tool found (xclip, pbcopy, or wl-copy needed).", file=sys.stderr)
+        print(
+            "Error: No clipboard tool found (xclip, pbcopy, or wl-copy needed).",
+            file=sys.stderr,
+        )
         return 1
 
     try:
@@ -83,22 +90,33 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
     if not raw or raw == ".":
         r = subprocess.run(
             ["ssh"] + _ssh_opts(ssh_control) + [remote, "pwd"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         if r.returncode != 0:
-            print(f"Error: SSH failed to resolve path for {remote} (rc={r.returncode})", file=sys.stderr)
+            print(
+                f"Error: SSH failed to resolve path for {remote} (rc={r.returncode})",
+                file=sys.stderr,
+            )
             sys.exit(1)
         return r.stdout.strip()
 
     if raw == "~" or raw.startswith("~"):
         r = subprocess.run(
-            ["ssh"] + _ssh_opts(ssh_control) + [remote,
-             "python3 -c 'import os,sys; print(os.path.expanduser(sys.stdin.read().strip()))'"],
+            ["ssh"]
+            + _ssh_opts(ssh_control)
+            + [
+                remote,
+                "python3 -c 'import os,sys; print(os.path.expanduser(sys.stdin.read().strip()))'",
+            ],
             input=raw.encode("utf-8"),
             capture_output=True,
         )
         if r.returncode != 0:
-            print(f"Error: SSH failed to expand tilde for {remote} (rc={r.returncode})", file=sys.stderr)
+            print(
+                f"Error: SSH failed to expand tilde for {remote} (rc={r.returncode})",
+                file=sys.stderr,
+            )
             sys.exit(1)
         return r.stdout.decode("utf-8", errors="replace").strip()
 

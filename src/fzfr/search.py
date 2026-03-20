@@ -18,6 +18,7 @@ The session directory lives under WORK_BASE (usually /dev/shm/fzfr/) for
 low-latency I/O. Each session gets a uuid-named subdirectory that is removed
 on clean exit or swept by the next session if the previous one crashed.
 """
+
 import atexit
 import os
 import re
@@ -31,23 +32,27 @@ import threading
 import time
 from pathlib import Path
 
-from ._script import VERSION, SCRIPT_BYTES
-from .config import CONFIG, _CONFIG_DEFAULTS, HISTORY_PATH, AVAILABLE_TOOLS
-from .state import _save_state, _load_state
-from .backends import SearchContext, LocalBackend, RemoteBackend
-from .workbase import WORK_BASE
+from ._script import SCRIPT_BYTES, VERSION
+from .backends import LocalBackend, RemoteBackend, SearchContext
+from .config import _CONFIG_DEFAULTS, AVAILABLE_TOOLS, CONFIG, HISTORY_PATH
+from .state import _load_state, _save_state
 from .utils import _capture
+from .workbase import WORK_BASE
+
 
 def _self_cmd(path: Path | str | None) -> str:
     if path is None:
         return "python3"
     return f"python3 {shlex.quote(str(path))}"
 
+
 _FZF_MIN_VERSION = (0, 38)
+
 
 def _parse_fzf_version(version_str: str) -> tuple[int, ...]:
     m = re.match(r"(\d+)\.(\d+)", version_str.strip())
     return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
 
 def check_dependencies() -> None:
     mandatory = ["fzf", "fd"]
@@ -56,7 +61,10 @@ def check_dependencies() -> None:
     missing_optional = [t for t in optional if t not in AVAILABLE_TOOLS]
 
     if missing_mandatory:
-        print(f"Error: Missing mandatory tools: {', '.join(missing_mandatory)}", file=sys.stderr)
+        print(
+            f"Error: Missing mandatory tools: {', '.join(missing_mandatory)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     fzf_ver_str, rc = _capture(["fzf", "--version"])
@@ -77,11 +85,15 @@ def check_dependencies() -> None:
             file=sys.stderr,
         )
 
-def _dispatch_cmd(ctx: SearchContext, state_path: Path, subcommand: str, *extra: str) -> str:
+
+def _dispatch_cmd(
+    ctx: SearchContext, state_path: Path, subcommand: str, *extra: str
+) -> str:
     self_cmd = _self_cmd(ctx.self_path)
     safe_state = shlex.quote(str(state_path))
     parts = [self_cmd, subcommand, safe_state] + list(extra)
     return " ".join(parts)
+
 
 def _build_custom_action_binds(
     self_cmd: str,
@@ -105,6 +117,7 @@ def _build_custom_action_binds(
         f"--bind={leader}:execute-silent({self_cmd} _internal-action-menu {safe_state} {{+}})",
     ]
 
+
 def build_fzf_invocation(
     ctx: SearchContext,
     fzf_remote_dir: Path,
@@ -118,7 +131,9 @@ def build_fzf_invocation(
     keybindings = CONFIG.get("keybindings", {})
 
     reload_cmd = _dispatch_cmd(ctx, state_path, "_internal-dispatch", "reload", "{q}")
-    preview_cmd = _dispatch_cmd(ctx, state_path, "_internal-dispatch", "preview", "{}", "{q}")
+    preview_cmd = _dispatch_cmd(
+        ctx, state_path, "_internal-dispatch", "preview", "{}", "{q}"
+    )
     get_prompt = f"{self_cmd} _internal-get-prompt {safe_state}"
     get_header = f"{self_cmd} _internal-get-header {safe_state}"
     get_search = f"{self_cmd} _internal-get-search-action {safe_state}"
@@ -203,7 +218,9 @@ def build_fzf_invocation(
                     else f"--bind={keybindings.get('copy_path', _CONFIG_DEFAULTS['keybindings']['copy_path'])}:execute-silent({self_cmd} fzfr-copy local {ctx.safe_base} '' '' {{}})"
                 )
             ]
-            if "xclip" in AVAILABLE_TOOLS or "pbcopy" in AVAILABLE_TOOLS or "wl-copy" in AVAILABLE_TOOLS
+            if "xclip" in AVAILABLE_TOOLS
+            or "pbcopy" in AVAILABLE_TOOLS
+            or "wl-copy" in AVAILABLE_TOOLS
             else []
         ),
         *_build_custom_action_binds(
@@ -267,9 +284,11 @@ def _parse_argv(argv: list[str]) -> tuple[str, str, str, list[str]]:
             positional.append(argv[i])
             i += 1
 
-    target   = positional[0] if positional else "local"
+    target = positional[0] if positional else "local"
     raw_base = positional[1] if len(positional) > 1 else ""
-    mode     = positional[2] if len(positional) > 2 else CONFIG.get("default_mode", "content")
+    mode = (
+        positional[2] if len(positional) > 2 else CONFIG.get("default_mode", "content")
+    )
     return target, raw_base, mode, exclude_patterns
 
 
@@ -288,7 +307,10 @@ def cmd_search(argv: list[str]) -> int:
         check_dependencies()
     else:
         if "ssh" not in AVAILABLE_TOOLS:
-            print("Error: 'ssh' is required for remote mode but was not found in PATH.", file=sys.stderr)
+            print(
+                "Error: 'ssh' is required for remote mode but was not found in PATH.",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
     session_dir = Path(tempfile.mkdtemp(prefix="fzfr-session-", dir=str(WORK_BASE)))
@@ -328,7 +350,9 @@ def cmd_search(argv: list[str]) -> int:
             except OSError:
                 pass
 
-    threading.Thread(target=_open_file_sweeper, daemon=True, name="fzfr-open-sweeper").start()
+    threading.Thread(
+        target=_open_file_sweeper, daemon=True, name="fzfr-open-sweeper"
+    ).start()
 
     try:
         if target != "local":
@@ -343,7 +367,7 @@ def cmd_search(argv: list[str]) -> int:
             remote = ""
 
         safe_remote = shlex.quote(remote)
-        safe_base   = shlex.quote(base_path)
+        safe_base = shlex.quote(base_path)
 
         state = {
             "mode": mode,
@@ -363,19 +387,28 @@ def cmd_search(argv: list[str]) -> int:
         _save_state(state_path, state)
 
         ctx = SearchContext(
-            remote, safe_remote, base_path, safe_base,
-            target, ssh_control, "f", "",
-            state["exclude_patterns"], frozen_self,
+            remote,
+            safe_remote,
+            base_path,
+            safe_base,
+            target,
+            ssh_control,
+            "f",
+            "",
+            state["exclude_patterns"],
+            frozen_self,
         )
 
         fzf_args = build_fzf_invocation(ctx, fzf_remote_dir, state_path)
 
-        path_format  = state["path_format"]
-        file_source  = state.get("file_source", "auto")
+        path_format = state["path_format"]
+        file_source = state.get("file_source", "auto")
 
         if mode == "content":
             fzf_proc = subprocess.Popen(["fzf"] + fzf_args)
-            _save_state(state_path, {**_load_state(state_path), "fzf_pid": fzf_proc.pid})
+            _save_state(
+                state_path, {**_load_state(state_path), "fzf_pid": fzf_proc.pid}
+            )
             fzf_proc.wait()
         else:
             list_cmd = be.initial_list_cmd(
@@ -386,14 +419,19 @@ def cmd_search(argv: list[str]) -> int:
             )
             list_cwd = (
                 base_path
-                if (not remote and (path_format == "relative" or file_source in ("auto", "git")))
+                if (
+                    not remote
+                    and (path_format == "relative" or file_source in ("auto", "git"))
+                )
                 else None
             )
             list_proc = subprocess.Popen(list_cmd, stdout=subprocess.PIPE, cwd=list_cwd)
-            fzf_proc  = subprocess.Popen(["fzf"] + fzf_args, stdin=list_proc.stdout)
+            fzf_proc = subprocess.Popen(["fzf"] + fzf_args, stdin=list_proc.stdout)
             assert list_proc.stdout is not None
             list_proc.stdout.close()
-            _save_state(state_path, {**_load_state(state_path), "fzf_pid": fzf_proc.pid})
+            _save_state(
+                state_path, {**_load_state(state_path), "fzf_pid": fzf_proc.pid}
+            )
             fzf_proc.wait()
             list_proc.wait()
 

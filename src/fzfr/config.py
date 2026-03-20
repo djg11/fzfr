@@ -5,14 +5,21 @@ import shutil
 import sys
 from pathlib import Path
 
+
 CONFIG_PATH = Path.home() / ".config" / "fzfr" / "config"
 HISTORY_PATH = Path.home() / ".local" / "share" / "fzfr" / "history"
 
 # All supported overlay box positions — used by menu_position and output_position.
 _VALID_POSITIONS = {
-    "top-left", "top-center", "top-right",
-    "left-center", "center", "right-center",
-    "bottom-left", "bottom-center", "bottom-right",
+    "top-left",
+    "top-center",
+    "top-right",
+    "left-center",
+    "center",
+    "right-center",
+    "bottom-left",
+    "bottom-center",
+    "bottom-right",
 }
 
 _CONFIG_DEFAULTS: dict = {
@@ -52,10 +59,21 @@ _CONFIG_DEFAULTS: dict = {
 }
 
 _RESERVED_KEYS = {
-    "ctrl-t", "ctrl-d", "ctrl-h", "ctrl-f", "ctrl-x",
-    "ctrl-r", "ctrl-s", "ctrl-c", "ctrl-p", "ctrl-n",
+    "ctrl-t",
+    "ctrl-d",
+    "ctrl-h",
+    "ctrl-f",
+    "ctrl-x",
+    "ctrl-r",
+    "ctrl-s",
+    "ctrl-c",
+    "ctrl-p",
+    "ctrl-n",
     "ctrl-g",  # fzf hardcoded exit — cannot be overridden
-    "enter", "esc", "alt-j", "alt-k",
+    "enter",
+    "esc",
+    "alt-j",
+    "alt-k",
 }
 
 _VALID_OUTPUTS = {"tmux", "overlay", "silent"}
@@ -73,7 +91,9 @@ def _validate_position(value: object, key: str, default: str) -> str:
     return value
 
 
-def _validate_action(gk: str, ak: str, av: object, global_output_position: str) -> "dict | None":
+def _validate_action(
+    gk: str, ak: str, av: object, global_output_position: str
+) -> "dict | None":
     """Validate one custom action entry. Returns a clean dict or None to skip."""
     if not isinstance(ak, str) or len(ak) != 1:
         print(
@@ -124,7 +144,12 @@ def _validate_action(gk: str, ak: str, av: object, global_output_position: str) 
         else global_output_position
     )
 
-    return {"cmd": cmd, "label": action_label, "output": output, "output_position": action_out_pos}
+    return {
+        "cmd": cmd,
+        "label": action_label,
+        "output": output,
+        "output_position": action_out_pos,
+    }
 
 
 def _validate_group(gk: str, gv: object, global_output_position: str) -> "dict | None":
@@ -191,7 +216,9 @@ def _validate_custom_actions(value: object) -> "dict | None":
       - action "output_position" (optional): one of the 9 valid positions
     """
     if not isinstance(value, dict):
-        print("Warning: 'custom_actions' must be a dict, using default.", file=sys.stderr)
+        print(
+            "Warning: 'custom_actions' must be a dict, using default.", file=sys.stderr
+        )
         return None
 
     leader = value.get("leader", "ctrl-b")
@@ -209,12 +236,19 @@ def _validate_custom_actions(value: object) -> "dict | None":
         )
         leader = "ctrl-b"
 
-    menu_position   = _validate_position(value.get("menu_position",   "bottom-right"), "menu_position",   "bottom-right")
-    output_position = _validate_position(value.get("output_position", "bottom-left"),  "output_position", "bottom-left")
+    menu_position = _validate_position(
+        value.get("menu_position", "bottom-right"), "menu_position", "bottom-right"
+    )
+    output_position = _validate_position(
+        value.get("output_position", "bottom-left"), "output_position", "bottom-left"
+    )
 
     raw_groups = value.get("groups", {})
     if not isinstance(raw_groups, dict):
-        print("Warning: custom_actions.groups must be a dict, using empty groups.", file=sys.stderr)
+        print(
+            "Warning: custom_actions.groups must be a dict, using empty groups.",
+            file=sys.stderr,
+        )
         raw_groups = {}
 
     clean_groups: dict = {}
@@ -288,8 +322,8 @@ def load_config() -> dict:
     cfg = dict(_CONFIG_DEFAULTS)
     cfg["keybindings"] = dict(_CONFIG_DEFAULTS["keybindings"])
     cfg["custom_actions"] = {
-        "leader":          _CONFIG_DEFAULTS["custom_actions"]["leader"],
-        "menu_position":   _CONFIG_DEFAULTS["custom_actions"]["menu_position"],
+        "leader": _CONFIG_DEFAULTS["custom_actions"]["leader"],
+        "menu_position": _CONFIG_DEFAULTS["custom_actions"]["menu_position"],
         "output_position": _CONFIG_DEFAULTS["custom_actions"]["output_position"],
         "groups": {},
     }
@@ -308,10 +342,38 @@ def load_config() -> dict:
 CONFIG = load_config()
 
 _ALL_TOOLS = [
-    "fzf", "fd", "git", "bat", "rga", "pdftotext", "tmux", "file",
-    "grep", "xargs", "ssh", "7z", "unrar", "unzip", "tar", "bzcat",
-    "xzcat", "lz4", "zstd", "cpio", "gunzip", "zcat", "head", "tree",
-    "eza", "exa", "ls", "xxd", "hexdump", "xclip", "pbcopy", "wl-copy",
+    "fzf",
+    "fd",
+    "git",
+    "bat",
+    "rga",
+    "pdftotext",
+    "tmux",
+    "file",
+    "grep",
+    "xargs",
+    "ssh",
+    "7z",
+    "unrar",
+    "unzip",
+    "tar",
+    "bzcat",
+    "xzcat",
+    "lz4",
+    "zstd",
+    "cpio",
+    "gunzip",
+    "zcat",
+    "head",
+    "tree",
+    "eza",
+    "exa",
+    "ls",
+    "xxd",
+    "hexdump",
+    "xclip",
+    "pbcopy",
+    "wl-copy",
     "xdg-open",
 ]
 AVAILABLE_TOOLS: frozenset[str] = frozenset(
