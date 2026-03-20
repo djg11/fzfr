@@ -11,6 +11,8 @@ Run with:
     make test
 """
 
+import contextlib
+import io
 import os
 import shutil
 import sys
@@ -103,15 +105,17 @@ class TestParseExtensions(unittest.TestCase):
         self.assertEqual(_parse_extensions("rs"), ["rs"])
 
     def test_unsafe_chars_rejected(self):
-        self.assertEqual(_parse_extensions("py;evil"), [])
-        self.assertEqual(_parse_extensions("py$(cmd)"), [])
-        self.assertEqual(_parse_extensions("py`cmd`"), [])
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(_parse_extensions("py;evil"), [])
+            self.assertEqual(_parse_extensions("py$(cmd)"), [])
+            self.assertEqual(_parse_extensions("py`cmd`"), [])
 
     def test_numeric_extensions_allowed(self):
         self.assertEqual(_parse_extensions("mp3 mp4 h264"), ["mp3", "mp4", "h264"])
 
     def test_mixed_valid_and_invalid(self):
-        result = _parse_extensions("py ;evil txt")
+        with contextlib.redirect_stderr(io.StringIO()):
+            result = _parse_extensions("py ;evil txt")
         self.assertIn("py", result)
         self.assertIn("txt", result)
         self.assertNotIn(";evil", result)
@@ -238,12 +242,14 @@ class TestMergeConfigKey(unittest.TestCase):
     def test_missing_user_value_keeps_default(self):
         cfg = dict(_CONFIG_DEFAULTS)
         original = cfg["editor"]
-        _merge_config_key(cfg, "editor", original, None)
+        with contextlib.redirect_stderr(io.StringIO()):
+            _merge_config_key(cfg, "editor", original, None)
         self.assertEqual(cfg["editor"], original)
 
     def test_wrong_type_uses_default(self):
         cfg = dict(_CONFIG_DEFAULTS)
-        _merge_config_key(cfg, "show_hidden", False, "yes")
+        with contextlib.redirect_stderr(io.StringIO()):
+            _merge_config_key(cfg, "show_hidden", False, "yes")
         self.assertEqual(cfg["show_hidden"], False)
 
     def test_bool_true_accepted(self):
@@ -368,7 +374,8 @@ class TestParseRemoteReloadArgs(unittest.TestCase):
         self.assertEqual(args.ssh_control, "/tmp/ssh_ctl")
 
     def test_too_few_args_returns_none(self):
-        self.assertIsNone(_parse_remote_reload_args(["host"]))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(_parse_remote_reload_args(["host"]))
 
     def test_query_parsed(self):
         args = _parse_remote_reload_args(self._base(["myquery"]))
@@ -393,7 +400,8 @@ class TestParseRemoteReloadArgs(unittest.TestCase):
         self.assertEqual(args.exclude_patterns, ["*.pyc", ".git"])
 
     def test_exclude_missing_arg_returns_none(self):
-        self.assertIsNone(_parse_remote_reload_args(self._base(["--exclude"])))
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertIsNone(_parse_remote_reload_args(self._base(["--exclude"])))
 
     def test_all_flags_combined(self):
         args = _parse_remote_reload_args(
@@ -601,7 +609,7 @@ class TestAssertNotSymlink(unittest.TestCase):
             target.mkdir()
             link = Path(d) / "link"
             link.symlink_to(target)
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
                 _assert_not_symlink(link)
 
 
