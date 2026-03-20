@@ -3,9 +3,9 @@ BINDIR  := $(PREFIX)/bin
 SCRIPT  := fzfr
 SYMLINKS := fzfr-preview fzfr-open fzfr-remote-reload fzfr-remote-preview fzfr-copy
 
-.PHONY: install uninstall check test build lint examples
+.PHONY: install uninstall check test build lint format pre-commit install-hooks dev-install check-imports examples
 
-build:
+build: check-imports
 	python3 scripts/build_single_file.py
 	@if command -v pytest >/dev/null 2>&1; then \
 	    pytest tests/ -q; \
@@ -47,11 +47,43 @@ lint:
 	ruff check src/ tests/
 	ruff format --check src/ tests/
 
+pre-commit:
+	@command -v pre-commit >/dev/null 2>&1 || { \
+	    echo "Error: pre-commit not found. Install with: pip install pre-commit"; exit 1; }
+	pre-commit run --all-files
+
+install-hooks:
+	@command -v pre-commit >/dev/null 2>&1 || { \
+	    echo "Error: pre-commit not found. Install with: pip install pre-commit"; exit 1; }
+	pre-commit install
+	@echo "Pre-commit hooks installed. Ruff will run automatically on git commit."
+
+dev-install:
+	@command -v python3 >/dev/null 2>&1 || { echo "Error: python3 not found."; exit 1; }
+	@python3 -c "import sys; sys.exit(0 if hasattr(sys, 'real_prefix') or sys.prefix != sys.base_prefix else 1)" 2>/dev/null || { \
+	    echo "Error: no virtual environment active."; \
+	    echo "Create and activate one first:"; \
+	    echo "  python3 -m venv venv && source venv/bin/activate"; \
+	    exit 1; }
+	pip install --upgrade pip setuptools --quiet
+	pip install -e '.[dev]' --no-build-isolation
+	pre-commit install
+	@echo ""
+	@echo "Dev environment ready. Available commands:"
+	@echo "  make build       -- rebuild fzfr + run tests"
+	@echo "  make test        -- run tests only"
+	@echo "  make lint        -- ruff check + format check"
+	@echo "  make format      -- ruff check --fix + ruff format"
+	@echo "  make pre-commit  -- run all pre-commit hooks"
+
 format:
 	@command -v ruff >/dev/null 2>&1 || { \
 	    echo "Error: ruff not found. Install with: pip install ruff"; exit 1; }
 	ruff check --fix src/ tests/
 	ruff format src/ tests/
+
+check-imports:
+	@python3 scripts/check_imports.py
 
 examples:
 	python3 scripts/generate_examples.py

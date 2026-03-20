@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fzfr"
-# To release: update VERSION in fzfr.py only — pyproject.toml stays unchanged.
+# To release: update VERSION in src/fzfr/_script.py only.
 dynamic = ["version"]
 description = "Fuzzy file search for local and remote filesystems"
 readme = "README.md"
@@ -26,11 +26,14 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
-# NOTE: [project.scripts] requires the script to be importable as a Python
-# module. Rename fzfr → fzfr.py in the repo before publishing to PyPI.
-# The installed binary at ~/.local/bin/fzfr has no extension regardless.
-# The busybox dispatch (sys.argv[0]) works correctly with pip-installed
-# console scripts since pip names each entry point after its key.
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.15.0",          # linter + formatter (replaces flake8, isort, black)
+    "pre-commit>=3.0.0",    # git hook runner
+    "pyright>=1.1.0",       # type checker (optional, used by VS Code Pylance)
+    "pytest>=7.0.0",        # test runner (unittest also works, pytest gives better output)
+]
+
 [project.scripts]
 fzfr                = "fzfr:main"
 fzfr-preview        = "fzfr:main"
@@ -45,10 +48,23 @@ Repository = "https://github.com/djg11/fzfr"
 Issues     = "https://github.com/djg11/fzfr/issues"
 
 [tool.setuptools]
+# py-modules is used for PyPI packaging (cp fzfr fzfr.py before python -m build).
+# For editable dev installs (pip install -e .[dev]), setuptools finds
+# the src/fzfr/ package via package-dir below.
 py-modules = ["fzfr"]
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [tool.setuptools.dynamic]
-version = {attr = "fzfr.VERSION"}
+version = {attr = "fzfr._script.VERSION"}
+
+# -- Ruff: linter + formatter --------------------------------------------------
+# Ruff replaces flake8, isort, pyupgrade, and black in one tool.
+# Run:  ruff check src/ tests/     (lint)
+#       ruff format src/ tests/    (format)
+#       ruff check --fix src/      (auto-fix safe issues)
+# Or:   make lint / make format
 
 [tool.ruff]
 target-version = "py310"
@@ -66,12 +82,17 @@ select = [
     "TID",  # flake8-tidy-imports (banned / absolute imports)
 ]
 ignore = [
-    "E501",  # line too long -- handled by ruff format, not lint
-    "B006",  # mutable default argument -- used intentionally in dataclasses
-    "B007",  # loop control variable not used in body -- common in fzf callback stubs
-    "SIM102",# nested if -> combined -- sometimes less readable when conditions are long
-    "SIM108",# ternary -- sometimes less readable than if/else
-    "UP007", # X | Y union syntax -- keep Optional[X] for clarity in public APIs
+    "E501",   # line too long -- handled by ruff format, not lint
+    "B006",   # mutable default argument -- used intentionally in dataclasses
+    "B007",   # loop control variable not used -- common in fzf callback stubs
+    "SIM102", # nested if -> combined -- sometimes less readable
+    "SIM105", # contextlib.suppress -- requires top-level import; late imports
+              # are forbidden in this codebase (build script strips them).
+              # Keep explicit try/except/pass instead.
+    "SIM108", # ternary -- sometimes less readable than if/else
+    "SIM110", # any() instead of for loop -- ruff marks this as unsafe fix;
+              # the for-loop form is clearer when the loop body has a return.
+    "UP007",  # X | Y union syntax -- keep Optional[X] for clarity
 ]
 
 [tool.ruff.lint.isort]
@@ -80,8 +101,13 @@ force-single-line = false
 lines-after-imports = 2
 
 [tool.ruff.format]
-# Match the project's existing style
-quote-style            = "double"
-indent-style           = "space"
+quote-style               = "double"
+indent-style              = "space"
 skip-magic-trailing-comma = false
-line-ending            = "auto"
+line-ending               = "auto"
+
+# -- Pytest --------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths    = ["tests"]
+python_files = ["test_*.py"]

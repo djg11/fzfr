@@ -1,0 +1,22 @@
+{
+  "include": ["src/fzfr", "tests"],
+  "pythonVersion": "3.10",
+  "pythonPlatform": "Linux",
+  "typeCheckingMode": "basic",
+
+  "reportMissingImports": true,
+  "reportMissingModuleSource": false,
+
+  "reportUnusedImport": true,
+
+  "reportPrivateUsage": false,
+
+  "reportUnusedVariable": "none",
+
+  "executionEnvironments": [
+    {
+      "root": "src/fzfr",
+      "extraPaths": ["src"]
+    }
+  ]
+}

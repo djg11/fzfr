@@ -1,0 +1,38 @@
+# Pre-commit hooks for fzfr.
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+#
+# IMPORTANT: ruff is run via the local venv (language: system) so it uses
+# the same version as `make lint` and `make format`. This prevents version
+# skew between pre-commit and the developer's installed ruff.
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (lint + fix)
+        entry: ruff check --fix
+        language: system
+        types: [python]
+        pass_filenames: true
+
+      - id: ruff-format
+        name: ruff (format)
+        entry: ruff format
+        language: system
+        types: [python]
+        pass_filenames: true
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: check-json
+        files: '^(src/|tests/|\.config/)'
+      - id: check-toml
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
