@@ -51,6 +51,15 @@ _CONFIG_DEFAULTS: dict = {
     },
 }
 
+_RESERVED_KEYS = {
+    "ctrl-t", "ctrl-d", "ctrl-h", "ctrl-f", "ctrl-x",
+    "ctrl-r", "ctrl-s", "ctrl-c", "ctrl-p", "ctrl-n",
+    "ctrl-g",  # fzf hardcoded exit — cannot be overridden
+    "enter", "esc", "alt-j", "alt-k",
+}
+
+_VALID_OUTPUTS = {"tmux", "overlay", "silent"}
+
 
 def _validate_position(value: object, key: str, default: str) -> str:
     """Validate a position string; warn and return default if invalid."""
@@ -64,47 +73,135 @@ def _validate_position(value: object, key: str, default: str) -> str:
     return value
 
 
+def _validate_action(gk: str, ak: str, av: object, global_output_position: str) -> "dict | None":
+    """Validate one custom action entry. Returns a clean dict or None to skip."""
+    if not isinstance(ak, str) or len(ak) != 1:
+        print(
+            f"Warning: custom_actions group {gk!r} action key {ak!r} must be a "
+            f"single character — skipping action.",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(av, dict):
+        print(
+            f"Warning: custom_actions group {gk!r} action {ak!r} must be a dict — skipping.",
+            file=sys.stderr,
+        )
+        return None
+    cmd = av.get("cmd", "")
+    if not isinstance(cmd, str) or not cmd:
+        print(
+            f"Warning: custom_actions group {gk!r} action {ak!r} requires a "
+            f"non-empty 'cmd' string — skipping.",
+            file=sys.stderr,
+        )
+        return None
+
+    action_label = av.get("label", "")
+    if not isinstance(action_label, str):
+        action_label = ""
+
+    output = av.get("output", "silent")
+    # Accept "preview" as a deprecated alias for "overlay"
+    if output == "preview":
+        output = "overlay"
+    if output not in _VALID_OUTPUTS:
+        print(
+            f"Warning: custom_actions group {gk!r} action {ak!r} output "
+            f"{output!r} must be one of {sorted(_VALID_OUTPUTS)} — defaulting to 'silent'.",
+            file=sys.stderr,
+        )
+        output = "silent"
+
+    # Per-action output_position overrides the global default
+    action_out_pos = (
+        _validate_position(
+            av["output_position"],
+            f"groups.{gk}.actions.{ak}.output_position",
+            global_output_position,
+        )
+        if "output_position" in av
+        else global_output_position
+    )
+
+    return {"cmd": cmd, "label": action_label, "output": output, "output_position": action_out_pos}
+
+
+def _validate_group(gk: str, gv: object, global_output_position: str) -> "dict | None":
+    """Validate one custom action group. Returns a clean dict or None to skip."""
+    if not isinstance(gk, str) or len(gk) != 1:
+        print(
+            f"Warning: custom_actions group key {gk!r} must be a single "
+            f"character — skipping group.",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(gv, dict):
+        print(
+            f"Warning: custom_actions group {gk!r} must be a dict — skipping.",
+            file=sys.stderr,
+        )
+        return None
+
+    label = gv.get("label", "")
+    if not isinstance(label, str):
+        print(
+            f"Warning: custom_actions group {gk!r} label must be a string — skipping.",
+            file=sys.stderr,
+        )
+        return None
+
+    raw_actions = gv.get("actions", {})
+    if not isinstance(raw_actions, dict):
+        print(
+            f"Warning: custom_actions group {gk!r} actions must be a dict — skipping.",
+            file=sys.stderr,
+        )
+        return None
+
+    clean_actions: dict = {}
+    for ak, av in raw_actions.items():
+        action = _validate_action(gk, ak, av, global_output_position)
+        if action is not None:
+            clean_actions[ak] = action
+
+    if not clean_actions:
+        return None
+
+    return {"label": label, "actions": clean_actions}
+
+
 def _validate_custom_actions(value: object) -> "dict | None":
     """Validate the custom_actions config block.
 
     Returns a cleaned dict on success, or None if the top-level structure is
     invalid. Individual bad groups or actions are skipped with a warning so
-    that a single misconfigured action never prevents fzfr from launching.
+    a single misconfigured action never prevents fzfr from launching.
 
-    Rules enforced:
-    - value must be a dict
-    - value["leader"] must be a non-empty string
-    - value["leader"] must not conflict with fzfr's reserved bindings
-    - value["groups"] must be a dict
-    - each group key must be exactly one character
-    - each group must have "label" (str) and "actions" (dict)
-    - each action key must be exactly one character
-    - each action must have "cmd" (non-empty str) and "label" (str)
-    - each action "output" must be one of "tmux", "preview", "silent"
+    Rules:
+      - value must be a dict
+      - leader: non-empty string, not in the reserved binding set
+      - menu_position / output_position: one of the 9 valid positions
+      - groups: dict of single-character keys
+      - each group: "label" (str) + "actions" (dict)
+      - each action key: single character
+      - each action: non-empty "cmd" (str), "label" (str)
+      - action "output": one of "tmux", "overlay", "silent"
+        ("preview" accepted as a deprecated alias for "overlay")
+      - action "output_position" (optional): one of the 9 valid positions
     """
-    _RESERVED = {
-        "ctrl-t", "ctrl-d", "ctrl-h", "ctrl-f", "ctrl-x",
-        "ctrl-r", "ctrl-s", "ctrl-c", "ctrl-p", "ctrl-n",
-        "ctrl-g",  # fzf hardcoded exit — cannot be overridden
-        "enter", "esc", "alt-j", "alt-k",
-    }
-    _VALID_OUTPUTS = {"tmux", "overlay", "silent"}
-
     if not isinstance(value, dict):
-        print(
-            "Warning: 'custom_actions' must be a dict, using default.",
-            file=sys.stderr,
-        )
+        print("Warning: 'custom_actions' must be a dict, using default.", file=sys.stderr)
         return None
 
-    leader = value.get("leader", "ctrl-space")
+    leader = value.get("leader", "ctrl-b")
     if not isinstance(leader, str) or not leader:
         print(
             "Warning: custom_actions.leader must be a non-empty string, using default.",
             file=sys.stderr,
         )
         leader = "ctrl-b"
-    if leader in _RESERVED:
+    if leader in _RESERVED_KEYS:
         print(
             f"Warning: custom_actions.leader {leader!r} conflicts with a reserved "
             f"fzfr keybinding. Choose a different key.",
@@ -112,105 +209,19 @@ def _validate_custom_actions(value: object) -> "dict | None":
         )
         leader = "ctrl-b"
 
-    menu_position = _validate_position(
-        value.get("menu_position", "bottom-right"), "menu_position", "bottom-right"
-    )
-    output_position = _validate_position(
-        value.get("output_position", "bottom-left"), "output_position", "bottom-left"
-    )
+    menu_position   = _validate_position(value.get("menu_position",   "bottom-right"), "menu_position",   "bottom-right")
+    output_position = _validate_position(value.get("output_position", "bottom-left"),  "output_position", "bottom-left")
 
     raw_groups = value.get("groups", {})
     if not isinstance(raw_groups, dict):
-        print(
-            "Warning: custom_actions.groups must be a dict, using empty groups.",
-            file=sys.stderr,
-        )
+        print("Warning: custom_actions.groups must be a dict, using empty groups.", file=sys.stderr)
         raw_groups = {}
 
     clean_groups: dict = {}
     for gk, gv in raw_groups.items():
-        if not isinstance(gk, str) or len(gk) != 1:
-            print(
-                f"Warning: custom_actions group key {gk!r} must be a single "
-                f"character — skipping group.",
-                file=sys.stderr,
-            )
-            continue
-        if not isinstance(gv, dict):
-            print(
-                f"Warning: custom_actions group {gk!r} must be a dict — skipping.",
-                file=sys.stderr,
-            )
-            continue
-        label = gv.get("label", "")
-        if not isinstance(label, str):
-            print(
-                f"Warning: custom_actions group {gk!r} label must be a string — skipping.",
-                file=sys.stderr,
-            )
-            continue
-        raw_actions = gv.get("actions", {})
-        if not isinstance(raw_actions, dict):
-            print(
-                f"Warning: custom_actions group {gk!r} actions must be a dict — skipping.",
-                file=sys.stderr,
-            )
-            continue
-
-        clean_actions: dict = {}
-        for ak, av in raw_actions.items():
-            if not isinstance(ak, str) or len(ak) != 1:
-                print(
-                    f"Warning: custom_actions group {gk!r} action key {ak!r} must be a "
-                    f"single character — skipping action.",
-                    file=sys.stderr,
-                )
-                continue
-            if not isinstance(av, dict):
-                print(
-                    f"Warning: custom_actions group {gk!r} action {ak!r} must be a "
-                    f"dict — skipping.",
-                    file=sys.stderr,
-                )
-                continue
-            cmd = av.get("cmd", "")
-            if not isinstance(cmd, str) or not cmd:
-                print(
-                    f"Warning: custom_actions group {gk!r} action {ak!r} requires a "
-                    f"non-empty 'cmd' string — skipping.",
-                    file=sys.stderr,
-                )
-                continue
-            action_label = av.get("label", "")
-            if not isinstance(action_label, str):
-                action_label = ""
-            output = av.get("output", "silent")
-            # Accept "preview" as deprecated alias for "overlay"
-            if output == "preview":
-                output = "overlay"
-            if output not in _VALID_OUTPUTS:
-                print(
-                    f"Warning: custom_actions group {gk!r} action {ak!r} output "
-                    f"{output!r} must be one of {sorted(_VALID_OUTPUTS)} — "
-                    f"defaulting to 'silent'.",
-                    file=sys.stderr,
-                )
-                output = "silent"
-            # Per-action output_position overrides the global default
-            action_out_pos = _validate_position(
-                av["output_position"],
-                f"groups.{gk}.actions.{ak}.output_position",
-                output_position,
-            ) if "output_position" in av else output_position
-            clean_actions[ak] = {
-                "cmd": cmd,
-                "label": action_label,
-                "output": output,
-                "output_position": action_out_pos,
-            }
-
-        if clean_actions:
-            clean_groups[gk] = {"label": label, "actions": clean_actions}
+        group = _validate_group(gk, gv, output_position)
+        if group is not None:
+            clean_groups[gk] = group
 
     return {
         "leader": leader,
@@ -225,8 +236,7 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
     if key == "exclude_patterns":
         if not isinstance(user_value, list):
             print(
-                "Warning: config key 'exclude_patterns' has wrong type "
-                "(expected list), using default.",
+                "Warning: config key 'exclude_patterns' has wrong type (expected list), using default.",
                 file=sys.stderr,
             )
             return
@@ -235,16 +245,14 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
     elif key == "keybindings":
         if not isinstance(user_value, dict):
             print(
-                "Warning: config key 'keybindings' has wrong type "
-                "(expected dict), using default.",
+                "Warning: config key 'keybindings' has wrong type (expected dict), using default.",
                 file=sys.stderr,
             )
             return
         for action, kbd in user_value.items():
             if not isinstance(kbd, str):
                 print(
-                    f"Warning: keybinding for '{action}' has wrong type "
-                    f"(expected string), using default.",
+                    f"Warning: keybinding for '{action}' has wrong type (expected string), using default.",
                     file=sys.stderr,
                 )
             else:
@@ -253,8 +261,7 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
     elif key == "file_source":
         if user_value not in ("auto", "fd", "git"):
             print(
-                "Warning: config key 'file_source' must be 'auto', 'fd', or 'git', "
-                "using default.",
+                "Warning: config key 'file_source' must be 'auto', 'fd', or 'git', using default.",
                 file=sys.stderr,
             )
             return
@@ -279,11 +286,10 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
 def load_config() -> dict:
     """Load ~/.config/fzfr/config (JSON) and merge with defaults."""
     cfg = dict(_CONFIG_DEFAULTS)
-    # Deep copy the nested dicts so mutations don't affect the defaults
     cfg["keybindings"] = dict(_CONFIG_DEFAULTS["keybindings"])
     cfg["custom_actions"] = {
-        "leader": _CONFIG_DEFAULTS["custom_actions"]["leader"],
-        "menu_position": _CONFIG_DEFAULTS["custom_actions"]["menu_position"],
+        "leader":          _CONFIG_DEFAULTS["custom_actions"]["leader"],
+        "menu_position":   _CONFIG_DEFAULTS["custom_actions"]["menu_position"],
         "output_position": _CONFIG_DEFAULTS["custom_actions"]["output_position"],
         "groups": {},
     }

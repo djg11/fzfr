@@ -1,7 +1,14 @@
+"""fzfr.ssh — SSH option construction for multiplexed connections.
+
+Provides _ssh_opts() and _ssh_opts_str() which return the ControlMaster flags
+needed when config["ssh_multiplexing"] is True, or an empty list/string when
+fzfr defers to the user's ~/.ssh/config.
+"""
 import shlex
 from pathlib import Path
 
 from .config import CONFIG
+
 
 def _ssh_opts(ssh_control: str) -> list[str]:
     """Return SSH multiplexing flags, or [] to let ~/.ssh/config decide.
@@ -15,33 +22,27 @@ def _ssh_opts(ssh_control: str) -> list[str]:
     path so fzfr manages its own dedicated multiplexed connection.
     Activated only when config["ssh_multiplexing"] is True.
     """
-    opts = []
-    if ssh_control:
-        persist = int(CONFIG.get("ssh_control_persist", 60))
+    if not ssh_control:
+        return []
+
+    persist = int(CONFIG.get("ssh_control_persist", 60))
+    opts = [
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath={ssh_control}",
+        "-o", f"ControlPersist={persist}",
+    ]
+
+    if CONFIG.get("ssh_strict_host_key_checking", True):
+        known_hosts_path = Path(ssh_control).parent / "known_hosts"
+        # SECURITY: Touch with 0o600 before the first SSH call. Without this
+        #           the file inherits the user's umask (often 0o644), making
+        #           host keys world-readable.
+        known_hosts_path.touch(mode=0o600, exist_ok=True)
         opts += [
-            "-o",
-            "ControlMaster=auto",
-            "-o",
-            f"ControlPath={ssh_control}",
-            "-o",
-            f"ControlPersist={persist}",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", f"UserKnownHostsFile={known_hosts_path}",
         ]
-        # SECURITY: Enforce host key checking and use a temporary known_hosts
-        #           file to prevent MITM attacks and avoid modifying the user's
-        #           global ~/.ssh/known_hosts for transient connections.
-        if CONFIG.get("ssh_strict_host_key_checking", True):
-            known_hosts_path = Path(ssh_control).parent / "known_hosts"
-            # SECURITY: Touch the known_hosts file with 0o600 before the first
-            #           SSH call. Without this, the file inherits the user's
-            #           umask (often 0o644), making host keys world-readable.
-            #           touch() is a no-op if the file already exists.
-            known_hosts_path.touch(mode=0o600, exist_ok=True)
-            opts += [
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "-o",
-                f"UserKnownHostsFile={known_hosts_path}",
-            ]
+
     return opts
 
 

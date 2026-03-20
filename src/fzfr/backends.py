@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from .cache import _PreviewCache
-from .config import AVAILABLE_TOOLS, CONFIG
+from .config import AVAILABLE_TOOLS
 from .ssh import _ssh_opts
 from .utils import _capture, _get_mime, _parse_extensions, _validate_exclude_pattern
 

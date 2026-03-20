@@ -1,3 +1,8 @@
+"""fzfr.copy -- fzfr-copy sub-command: copy a selected file path to the clipboard.
+
+Also provides _resolve_remote_path() for expanding tilde and relative paths
+on a remote host without touching the local filesystem.
+"""
 import subprocess
 import sys
 from pathlib import Path
@@ -5,6 +10,7 @@ from pathlib import Path
 from .config import AVAILABLE_TOOLS
 from .backends import LocalBackend
 from .ssh import _ssh_opts
+
 
 def cmd_copy(argv: list[str]) -> int:
     """Entry point for the fzfr-copy sub-command.
@@ -21,10 +27,9 @@ def cmd_copy(argv: list[str]) -> int:
         return 1
 
     _, base_path, remote, ssh_control, choice = argv[:5]
-    remote = remote.strip("'\"")
+    remote      = remote.strip("'\"")
     ssh_control = ssh_control.strip("'\"")
 
-    path_to_copy: str
     choice_clean = choice.removeprefix("./")
     path_to_copy = (
         choice_clean
@@ -32,15 +37,10 @@ def cmd_copy(argv: list[str]) -> int:
         else str(Path(base_path) / choice_clean)
     )
 
-    # For local paths, perform safety check. For remote paths, the safety check
-    # was already done on the remote side — we are only copying the path string.
     if not remote:
         backend = LocalBackend(base_path, ssh_control)
         if not backend.is_safe_subpath(path_to_copy):
-            print(
-                f"Error: Blocked path outside search root: {path_to_copy}",
-                file=sys.stderr,
-            )
+            print(f"Error: Blocked path outside search root: {path_to_copy}", file=sys.stderr)
             return 1
 
     if "xclip" in AVAILABLE_TOOLS:
@@ -50,10 +50,7 @@ def cmd_copy(argv: list[str]) -> int:
     elif "wl-copy" in AVAILABLE_TOOLS:
         copy_cmd = ["wl-copy"]
     else:
-        print(
-            "Error: No clipboard tool found (xclip, pbcopy, or wl-copy needed).",
-            file=sys.stderr,
-        )
+        print("Error: No clipboard tool found (xclip, pbcopy, or wl-copy needed).", file=sys.stderr)
         return 1
 
     try:
@@ -72,49 +69,37 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
     """Expand a remote path to its absolute form by querying the remote host.
 
     Handles three cases that cannot be resolved locally:
-      - Empty or ".": ask the remote shell for its current directory via pwd.
-      - "~" or "~/…": ask the remote python for expanded path via stdin.
-      - Anything else: return as-is (already absolute or a known relative path).
+      - Empty or ".": ask the remote shell for its cwd via pwd.
+      - "~" or "~/...": expand via python3 -c on the remote (no shell injection).
+      - Anything else: return as-is.
 
-    We cannot rely on resolving locally here because that would expand the path
-    relative to the *local* home directory, not the remote user's home.
+    SECURITY: Tilde expansion uses python3 stdin rather than shell expansion
+    to avoid injection from a crafted remote path.
 
-    DESIGN: Both SSH branches check returncode and call sys.exit() on failure.
-            Without this, a network or auth failure would return an empty string
-            and fzf would silently search from the remote filesystem root (/).
+    DESIGN: Both SSH branches sys.exit() on failure. Without this, a network
+    or auth failure would return an empty string and fzf would silently search
+    causing fzfr to silently search from the remote filesystem root (/).
     """
     if not raw or raw == ".":
         r = subprocess.run(
             ["ssh"] + _ssh_opts(ssh_control) + [remote, "pwd"],
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
         )
         if r.returncode != 0:
-            print(
-                f"Error: SSH failed to resolve path for {remote} (rc={r.returncode})",
-                file=sys.stderr,
-            )
+            print(f"Error: SSH failed to resolve path for {remote} (rc={r.returncode})", file=sys.stderr)
             sys.exit(1)
         return r.stdout.strip()
 
     if raw == "~" or raw.startswith("~"):
-        # DESIGN: We cannot resolve a remote tilde locally. To avoid shell
-        #         injection when expanding tildes on the remote, we use
-        #         python3 -c to call os.path.expanduser and pass the path via
-        #         stdin. fzfr already requires python3 on the remote.
         r = subprocess.run(
-            ["ssh"] + _ssh_opts(ssh_control) + [remote, "python3 -c 'import os,sys; print(os.path.expanduser(sys.stdin.read().strip()))'"],
+            ["ssh"] + _ssh_opts(ssh_control) + [remote,
+             "python3 -c 'import os,sys; print(os.path.expanduser(sys.stdin.read().strip()))'"],
             input=raw.encode("utf-8"),
             capture_output=True,
         )
         if r.returncode != 0:
-            print(
-                f"Error: SSH failed to expand tilde for {remote} (rc={r.returncode})",
-                file=sys.stderr,
-            )
+            print(f"Error: SSH failed to expand tilde for {remote} (rc={r.returncode})", file=sys.stderr)
             sys.exit(1)
         return r.stdout.decode("utf-8", errors="replace").strip()
 
     return raw
-
-

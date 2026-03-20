@@ -142,29 +142,30 @@ if _sys.version_info < (3, 10):  # type: ignore[comparison-overlap, unreachable]
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
-from pathlib import PurePosixPath as _PP, Path as _P
+from pathlib import Path, PurePosixPath
 from typing import Callable
+from typing import NamedTuple
 from typing import Protocol, runtime_checkable
 import atexit
 import ctypes
+import fcntl
 import hashlib
 import json
 import os
-import os as _os
-import os, fcntl
-import os, signal, termios, tty as _tty
 import re
 import shlex
-import shlex as _sl
 import shutil
 import signal
-import struct, fcntl, termios as _t
+import struct
 import subprocess
 import sys
 import sys as _sys
 import tempfile
+import termios
+import termios as _t
 import threading
 import time
+import tty as _tty
 
 # =============================================================================
 # _script.py
@@ -513,6 +514,15 @@ _CONFIG_DEFAULTS: dict = {
     },
 }
 
+_RESERVED_KEYS = {
+    "ctrl-t", "ctrl-d", "ctrl-h", "ctrl-f", "ctrl-x",
+    "ctrl-r", "ctrl-s", "ctrl-c", "ctrl-p", "ctrl-n",
+    "ctrl-g",  # fzf hardcoded exit — cannot be overridden
+    "enter", "esc", "alt-j", "alt-k",
+}
+
+_VALID_OUTPUTS = {"tmux", "overlay", "silent"}
+
 def _validate_position(value: object, key: str, default: str) -> str:
     """Validate a position string; warn and return default if invalid."""
     if not isinstance(value, str) or value not in _VALID_POSITIONS:
@@ -524,47 +534,133 @@ def _validate_position(value: object, key: str, default: str) -> str:
         return default
     return value
 
+def _validate_action(gk: str, ak: str, av: object, global_output_position: str) -> "dict | None":
+    """Validate one custom action entry. Returns a clean dict or None to skip."""
+    if not isinstance(ak, str) or len(ak) != 1:
+        print(
+            f"Warning: custom_actions group {gk!r} action key {ak!r} must be a "
+            f"single character — skipping action.",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(av, dict):
+        print(
+            f"Warning: custom_actions group {gk!r} action {ak!r} must be a dict — skipping.",
+            file=sys.stderr,
+        )
+        return None
+    cmd = av.get("cmd", "")
+    if not isinstance(cmd, str) or not cmd:
+        print(
+            f"Warning: custom_actions group {gk!r} action {ak!r} requires a "
+            f"non-empty 'cmd' string — skipping.",
+            file=sys.stderr,
+        )
+        return None
+
+    action_label = av.get("label", "")
+    if not isinstance(action_label, str):
+        action_label = ""
+
+    output = av.get("output", "silent")
+    # Accept "preview" as a deprecated alias for "overlay"
+    if output == "preview":
+        output = "overlay"
+    if output not in _VALID_OUTPUTS:
+        print(
+            f"Warning: custom_actions group {gk!r} action {ak!r} output "
+            f"{output!r} must be one of {sorted(_VALID_OUTPUTS)} — defaulting to 'silent'.",
+            file=sys.stderr,
+        )
+        output = "silent"
+
+    # Per-action output_position overrides the global default
+    action_out_pos = (
+        _validate_position(
+            av["output_position"],
+            f"groups.{gk}.actions.{ak}.output_position",
+            global_output_position,
+        )
+        if "output_position" in av
+        else global_output_position
+    )
+
+    return {"cmd": cmd, "label": action_label, "output": output, "output_position": action_out_pos}
+
+def _validate_group(gk: str, gv: object, global_output_position: str) -> "dict | None":
+    """Validate one custom action group. Returns a clean dict or None to skip."""
+    if not isinstance(gk, str) or len(gk) != 1:
+        print(
+            f"Warning: custom_actions group key {gk!r} must be a single "
+            f"character — skipping group.",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(gv, dict):
+        print(
+            f"Warning: custom_actions group {gk!r} must be a dict — skipping.",
+            file=sys.stderr,
+        )
+        return None
+
+    label = gv.get("label", "")
+    if not isinstance(label, str):
+        print(
+            f"Warning: custom_actions group {gk!r} label must be a string — skipping.",
+            file=sys.stderr,
+        )
+        return None
+
+    raw_actions = gv.get("actions", {})
+    if not isinstance(raw_actions, dict):
+        print(
+            f"Warning: custom_actions group {gk!r} actions must be a dict — skipping.",
+            file=sys.stderr,
+        )
+        return None
+
+    clean_actions: dict = {}
+    for ak, av in raw_actions.items():
+        action = _validate_action(gk, ak, av, global_output_position)
+        if action is not None:
+            clean_actions[ak] = action
+
+    if not clean_actions:
+        return None
+
+    return {"label": label, "actions": clean_actions}
+
 def _validate_custom_actions(value: object) -> "dict | None":
     """Validate the custom_actions config block.
 
     Returns a cleaned dict on success, or None if the top-level structure is
     invalid. Individual bad groups or actions are skipped with a warning so
-    that a single misconfigured action never prevents fzfr from launching.
+    a single misconfigured action never prevents fzfr from launching.
 
-    Rules enforced:
-    - value must be a dict
-    - value["leader"] must be a non-empty string
-    - value["leader"] must not conflict with fzfr's reserved bindings
-    - value["groups"] must be a dict
-    - each group key must be exactly one character
-    - each group must have "label" (str) and "actions" (dict)
-    - each action key must be exactly one character
-    - each action must have "cmd" (non-empty str) and "label" (str)
-    - each action "output" must be one of "tmux", "preview", "silent"
+    Rules:
+      - value must be a dict
+      - leader: non-empty string, not in the reserved binding set
+      - menu_position / output_position: one of the 9 valid positions
+      - groups: dict of single-character keys
+      - each group: "label" (str) + "actions" (dict)
+      - each action key: single character
+      - each action: non-empty "cmd" (str), "label" (str)
+      - action "output": one of "tmux", "overlay", "silent"
+        ("preview" accepted as a deprecated alias for "overlay")
+      - action "output_position" (optional): one of the 9 valid positions
     """
-    _RESERVED = {
-        "ctrl-t", "ctrl-d", "ctrl-h", "ctrl-f", "ctrl-x",
-        "ctrl-r", "ctrl-s", "ctrl-c", "ctrl-p", "ctrl-n",
-        "ctrl-g",  # fzf hardcoded exit — cannot be overridden
-        "enter", "esc", "alt-j", "alt-k",
-    }
-    _VALID_OUTPUTS = {"tmux", "overlay", "silent"}
-
     if not isinstance(value, dict):
-        print(
-            "Warning: 'custom_actions' must be a dict, using default.",
-            file=sys.stderr,
-        )
+        print("Warning: 'custom_actions' must be a dict, using default.", file=sys.stderr)
         return None
 
-    leader = value.get("leader", "ctrl-space")
+    leader = value.get("leader", "ctrl-b")
     if not isinstance(leader, str) or not leader:
         print(
             "Warning: custom_actions.leader must be a non-empty string, using default.",
             file=sys.stderr,
         )
         leader = "ctrl-b"
-    if leader in _RESERVED:
+    if leader in _RESERVED_KEYS:
         print(
             f"Warning: custom_actions.leader {leader!r} conflicts with a reserved "
             f"fzfr keybinding. Choose a different key.",
@@ -572,105 +668,19 @@ def _validate_custom_actions(value: object) -> "dict | None":
         )
         leader = "ctrl-b"
 
-    menu_position = _validate_position(
-        value.get("menu_position", "bottom-right"), "menu_position", "bottom-right"
-    )
-    output_position = _validate_position(
-        value.get("output_position", "bottom-left"), "output_position", "bottom-left"
-    )
+    menu_position   = _validate_position(value.get("menu_position",   "bottom-right"), "menu_position",   "bottom-right")
+    output_position = _validate_position(value.get("output_position", "bottom-left"),  "output_position", "bottom-left")
 
     raw_groups = value.get("groups", {})
     if not isinstance(raw_groups, dict):
-        print(
-            "Warning: custom_actions.groups must be a dict, using empty groups.",
-            file=sys.stderr,
-        )
+        print("Warning: custom_actions.groups must be a dict, using empty groups.", file=sys.stderr)
         raw_groups = {}
 
     clean_groups: dict = {}
     for gk, gv in raw_groups.items():
-        if not isinstance(gk, str) or len(gk) != 1:
-            print(
-                f"Warning: custom_actions group key {gk!r} must be a single "
-                f"character — skipping group.",
-                file=sys.stderr,
-            )
-            continue
-        if not isinstance(gv, dict):
-            print(
-                f"Warning: custom_actions group {gk!r} must be a dict — skipping.",
-                file=sys.stderr,
-            )
-            continue
-        label = gv.get("label", "")
-        if not isinstance(label, str):
-            print(
-                f"Warning: custom_actions group {gk!r} label must be a string — skipping.",
-                file=sys.stderr,
-            )
-            continue
-        raw_actions = gv.get("actions", {})
-        if not isinstance(raw_actions, dict):
-            print(
-                f"Warning: custom_actions group {gk!r} actions must be a dict — skipping.",
-                file=sys.stderr,
-            )
-            continue
-
-        clean_actions: dict = {}
-        for ak, av in raw_actions.items():
-            if not isinstance(ak, str) or len(ak) != 1:
-                print(
-                    f"Warning: custom_actions group {gk!r} action key {ak!r} must be a "
-                    f"single character — skipping action.",
-                    file=sys.stderr,
-                )
-                continue
-            if not isinstance(av, dict):
-                print(
-                    f"Warning: custom_actions group {gk!r} action {ak!r} must be a "
-                    f"dict — skipping.",
-                    file=sys.stderr,
-                )
-                continue
-            cmd = av.get("cmd", "")
-            if not isinstance(cmd, str) or not cmd:
-                print(
-                    f"Warning: custom_actions group {gk!r} action {ak!r} requires a "
-                    f"non-empty 'cmd' string — skipping.",
-                    file=sys.stderr,
-                )
-                continue
-            action_label = av.get("label", "")
-            if not isinstance(action_label, str):
-                action_label = ""
-            output = av.get("output", "silent")
-            # Accept "preview" as deprecated alias for "overlay"
-            if output == "preview":
-                output = "overlay"
-            if output not in _VALID_OUTPUTS:
-                print(
-                    f"Warning: custom_actions group {gk!r} action {ak!r} output "
-                    f"{output!r} must be one of {sorted(_VALID_OUTPUTS)} — "
-                    f"defaulting to 'silent'.",
-                    file=sys.stderr,
-                )
-                output = "silent"
-            # Per-action output_position overrides the global default
-            action_out_pos = _validate_position(
-                av["output_position"],
-                f"groups.{gk}.actions.{ak}.output_position",
-                output_position,
-            ) if "output_position" in av else output_position
-            clean_actions[ak] = {
-                "cmd": cmd,
-                "label": action_label,
-                "output": output,
-                "output_position": action_out_pos,
-            }
-
-        if clean_actions:
-            clean_groups[gk] = {"label": label, "actions": clean_actions}
+        group = _validate_group(gk, gv, output_position)
+        if group is not None:
+            clean_groups[gk] = group
 
     return {
         "leader": leader,
@@ -684,8 +694,7 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
     if key == "exclude_patterns":
         if not isinstance(user_value, list):
             print(
-                "Warning: config key 'exclude_patterns' has wrong type "
-                "(expected list), using default.",
+                "Warning: config key 'exclude_patterns' has wrong type (expected list), using default.",
                 file=sys.stderr,
             )
             return
@@ -694,16 +703,14 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
     elif key == "keybindings":
         if not isinstance(user_value, dict):
             print(
-                "Warning: config key 'keybindings' has wrong type "
-                "(expected dict), using default.",
+                "Warning: config key 'keybindings' has wrong type (expected dict), using default.",
                 file=sys.stderr,
             )
             return
         for action, kbd in user_value.items():
             if not isinstance(kbd, str):
                 print(
-                    f"Warning: keybinding for '{action}' has wrong type "
-                    f"(expected string), using default.",
+                    f"Warning: keybinding for '{action}' has wrong type (expected string), using default.",
                     file=sys.stderr,
                 )
             else:
@@ -712,8 +719,7 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
     elif key == "file_source":
         if user_value not in ("auto", "fd", "git"):
             print(
-                "Warning: config key 'file_source' must be 'auto', 'fd', or 'git', "
-                "using default.",
+                "Warning: config key 'file_source' must be 'auto', 'fd', or 'git', using default.",
                 file=sys.stderr,
             )
             return
@@ -737,11 +743,10 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
 def load_config() -> dict:
     """Load ~/.config/fzfr/config (JSON) and merge with defaults."""
     cfg = dict(_CONFIG_DEFAULTS)
-    # Deep copy the nested dicts so mutations don't affect the defaults
     cfg["keybindings"] = dict(_CONFIG_DEFAULTS["keybindings"])
     cfg["custom_actions"] = {
-        "leader": _CONFIG_DEFAULTS["custom_actions"]["leader"],
-        "menu_position": _CONFIG_DEFAULTS["custom_actions"]["menu_position"],
+        "leader":          _CONFIG_DEFAULTS["custom_actions"]["leader"],
+        "menu_position":   _CONFIG_DEFAULTS["custom_actions"]["menu_position"],
         "output_position": _CONFIG_DEFAULTS["custom_actions"]["output_position"],
         "groups": {},
     }
@@ -818,39 +823,32 @@ def _ssh_opts(ssh_control: str) -> list[str]:
     path so fzfr manages its own dedicated multiplexed connection.
     Activated only when config["ssh_multiplexing"] is True.
     """
-    opts = []
-    if ssh_control:
-        persist = int(CONFIG.get("ssh_control_persist", 60))
+    if not ssh_control:
+        return []
+
+    persist = int(CONFIG.get("ssh_control_persist", 60))
+    opts = [
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath={ssh_control}",
+        "-o", f"ControlPersist={persist}",
+    ]
+
+    if CONFIG.get("ssh_strict_host_key_checking", True):
+        known_hosts_path = Path(ssh_control).parent / "known_hosts"
+        # SECURITY: Touch with 0o600 before the first SSH call. Without this
+        #           the file inherits the user's umask (often 0o644), making
+        #           host keys world-readable.
+        known_hosts_path.touch(mode=0o600, exist_ok=True)
         opts += [
-            "-o",
-            "ControlMaster=auto",
-            "-o",
-            f"ControlPath={ssh_control}",
-            "-o",
-            f"ControlPersist={persist}",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", f"UserKnownHostsFile={known_hosts_path}",
         ]
-        # SECURITY: Enforce host key checking and use a temporary known_hosts
-        #           file to prevent MITM attacks and avoid modifying the user's
-        #           global ~/.ssh/known_hosts for transient connections.
-        if CONFIG.get("ssh_strict_host_key_checking", True):
-            known_hosts_path = Path(ssh_control).parent / "known_hosts"
-            # SECURITY: Touch the known_hosts file with 0o600 before the first
-            #           SSH call. Without this, the file inherits the user's
-            #           umask (often 0o644), making host keys world-readable.
-            #           touch() is a no-op if the file already exists.
-            known_hosts_path.touch(mode=0o600, exist_ok=True)
-            opts += [
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "-o",
-                f"UserKnownHostsFile={known_hosts_path}",
-            ]
+
     return opts
 
 def _ssh_opts_str(ssh_control: str) -> str:
     """Shell-quoted string form of _ssh_opts(), for embedding in shell commands."""
     return " ".join(shlex.quote(o) for o in _ssh_opts(ssh_control))
-
 # =============================================================================
 # state.py
 # =============================================================================
@@ -1007,115 +1005,82 @@ class _PreviewCache:
 # =============================================================================
 
 ARCHIVE_EXTENSIONS = {
-    ".cbt",
-    ".tbz2",
-    ".tbz",
-    ".tgz",
-    ".txz",
-    ".tar",
-    ".cbz",
-    ".epub",
-    ".zip",
-    ".cbr",
-    ".rar",
-    ".gz",
-    ".lzma",
-    ".bz2",
-    ".xz",
-    ".lz4",
-    ".zst",
-    ".7z",
-    ".apk",
-    ".arj",
-    ".cab",
-    ".cb7",
-    ".chm",
-    ".deb",
-    ".iso",
-    ".lzh",
-    ".msi",
-    ".pkg",
-    ".rpm",
-    ".udf",
-    ".wim",
-    ".xar",
-    ".vhd",
-    ".dmg",
-    ".cpio",
+    ".cbt", ".tbz2", ".tbz", ".tgz", ".txz", ".tar",
+    ".cbz", ".epub", ".zip", ".cbr", ".rar",
+    ".gz", ".lzma", ".bz2", ".xz", ".lz4", ".zst",
+    ".7z", ".apk", ".arj", ".cab", ".cb7", ".chm",
+    ".deb", ".iso", ".lzh", ".msi", ".pkg", ".rpm",
+    ".udf", ".wim", ".xar", ".vhd", ".dmg", ".cpio",
 }
+
 COMPOUND_EXTENSIONS = {
     # DESIGN: Must be checked before ARCHIVE_EXTENSIONS because Path.suffix only
     #         returns the final component — Path("f.tar.gz").suffix == ".gz".
-    #         Checking compound forms first ensures ".tar.gz" wins over ".gz".
-    ".tar.bz2",
-    ".tar.gz",
-    ".tar.xz",
-    ".tar.lz4",
-    ".tar.zst",
-    ".tar.br",
+    ".tar.bz2", ".tar.gz", ".tar.xz", ".tar.lz4", ".tar.zst", ".tar.br",
 }
 
-# DESIGN: Maps each extension to the command that lists its contents.
-#         {filepath} is substituted with the actual path at call time in
-#         _list_archive(). Keeping the template here (not inline in the
-#         dispatch logic) makes it easy to add support for new formats.
+# Maps each extension to the command that lists its contents.
+# {filepath} is substituted with the actual path at call time in _list_archive().
 ARCHIVE_LIST_COMMANDS = {
-    ".cbt": ["tar", "-tjf", "{filepath}"],
-    ".tar.bz2": ["tar", "-tjf", "{filepath}"],
-    ".tbz2": ["tar", "-tjf", "{filepath}"],
-    ".tbz": ["tar", "-tjf", "{filepath}"],
-    ".tar.gz": ["tar", "-tzf", "{filepath}"],
-    ".tgz": ["tar", "-tzf", "{filepath}"],
-    ".tar.xz": ["tar", "-tJf", "{filepath}"],
-    ".txz": ["tar", "-tJf", "{filepath}"],
-    ".tar.lz4": ["tar", "--use-compress-program=lz4", "-tf", "{filepath}"],
-    ".tar.zst": ["tar", "-I", "zstd", "-tf", "{filepath}"],
-    ".tar.br": ["tar", "--use-compress-program=pbzip2", "-tf", "{filepath}"],
-    ".tar": ["tar", "-tf", "{filepath}"],
-    ".cbz": ["unzip", "-l", "{filepath}"],
-    ".epub": ["unzip", "-l", "{filepath}"],
-    ".zip": ["unzip", "-l", "{filepath}"],
-    ".cbr": ["unrar", "l", "{filepath}"],
-    ".rar": ["unrar", "l", "{filepath}"],
-    ".bz2": ["bzcat", "{filepath}"],
-    ".xz": ["xzcat", "{filepath}"],
-    ".lz4": ["lz4", "-d", "{filepath}", "--stdout"],
-    ".zst": ["zstd", "-d", "{filepath}", "--stdout"],
+    ".cbt":      ["tar", "-tjf", "{filepath}"],
+    ".tar.bz2":  ["tar", "-tjf", "{filepath}"],
+    ".tbz2":     ["tar", "-tjf", "{filepath}"],
+    ".tbz":      ["tar", "-tjf", "{filepath}"],
+    ".tar.gz":   ["tar", "-tzf", "{filepath}"],
+    ".tgz":      ["tar", "-tzf", "{filepath}"],
+    ".tar.xz":   ["tar", "-tJf", "{filepath}"],
+    ".txz":      ["tar", "-tJf", "{filepath}"],
+    ".tar.lz4":  ["tar", "--use-compress-program=lz4", "-tf", "{filepath}"],
+    ".tar.zst":  ["tar", "-I", "zstd", "-tf", "{filepath}"],
+    ".tar.br":   ["tar", "--use-compress-program=pbzip2", "-tf", "{filepath}"],
+    ".tar":      ["tar", "-tf", "{filepath}"],
+    ".cbz":      ["unzip", "-l", "{filepath}"],
+    ".epub":     ["unzip", "-l", "{filepath}"],
+    ".zip":      ["unzip", "-l", "{filepath}"],
+    ".cbr":      ["unrar", "l", "{filepath}"],
+    ".rar":      ["unrar", "l", "{filepath}"],
+    ".bz2":      ["bzcat", "{filepath}"],
+    ".xz":       ["xzcat", "{filepath}"],
+    ".lz4":      ["lz4", "-d", "{filepath}", "--stdout"],
+    ".zst":      ["zstd", "-d", "{filepath}", "--stdout"],
 }
 
 ARCHIVE_INSTALL_HINTS = {
-    ".cbt": "bzip2 tar: install tar",
-    ".tar.bz2": "bzip2 tar: install tar",
-    ".tbz2": "bzip2 tar: install tar",
-    ".tbz": "bzip2 tar: install tar",
-    ".tar.gz": "gzip tar: install tar",
-    ".tgz": "gzip tar: install tar",
-    ".tar.xz": "xz tar: install tar",
-    ".txz": "xz tar: install tar",
-    ".tar.lz4": "lz4 tar: install tar + lz4",
-    ".tar.zst": "zst tar: install tar + zstd",
-    ".tar.br": "brotli tar: install tar + pbzip2",
-    ".tar": "tar: install tar",
-    ".cbz": "zip: install unzip",
-    ".epub": "zip: install unzip",
-    ".zip": "zip: install unzip",
-    ".cbr": "rar: install unrar",
-    ".rar": "rar: install unrar",
-    ".bz2": "bzip2: install bzip2",
-    ".xz": "xz: install xz-utils",
-    ".lz4": "lz4: install lz4",
-    ".zst": "zst: install zstd",
+    ".cbt":      "bzip2 tar: install tar",
+    ".tar.bz2":  "bzip2 tar: install tar",
+    ".tbz2":     "bzip2 tar: install tar",
+    ".tbz":      "bzip2 tar: install tar",
+    ".tar.gz":   "gzip tar: install tar",
+    ".tgz":      "gzip tar: install tar",
+    ".tar.xz":   "xz tar: install tar",
+    ".txz":      "xz tar: install tar",
+    ".tar.lz4":  "lz4 tar: install tar + lz4",
+    ".tar.zst":  "zst tar: install tar + zstd",
+    ".tar.br":   "brotli tar: install tar + pbzip2",
+    ".tar":      "tar: install tar",
+    ".cbz":      "zip: install unzip",
+    ".epub":     "zip: install unzip",
+    ".zip":      "zip: install unzip",
+    ".cbr":      "rar: install unrar",
+    ".rar":      "rar: install unrar",
+    ".bz2":      "bzip2: install bzip2",
+    ".xz":       "xz: install xz-utils",
+    ".lz4":      "lz4: install lz4",
+    ".zst":      "zst: install zstd",
+}
+
+_7Z_EXTENSIONS = {
+    ".7z", ".apk", ".arj", ".cab", ".cb7", ".chm",
+    ".deb", ".iso", ".lzh", ".msi", ".pkg", ".rpm",
+    ".udf", ".wim", ".xar", ".vhd", ".dmg",
 }
 
 def _hint_suffix(hint: str) -> str:
     """Extract the longest matching extension from a filename.
 
-    Python's Path.suffix only returns the last extension, so "file.tar.gz"
-    would yield ".gz" and be misidentified. We check compound extensions
-    first so ".tar.gz" takes priority over ".gz".
-
-    The 'hint' parameter is the original filename even when we are actually
-    reading from a temp file — see cmd_preview for why.
+    Checks compound extensions first so ".tar.gz" takes priority over ".gz".
+    The 'hint' parameter is the original filename even when reading from a
+    temp file — see cmd_preview for why.
     """
     lower = hint.lower()
     for ext in COMPOUND_EXTENSIONS:
@@ -1123,139 +1088,80 @@ def _hint_suffix(hint: str) -> str:
             return ext
     return Path(lower).suffix
 
-# =============================================================================
-# File classification
-# =============================================================================
-
 class FileKind(Enum):
     """The categories the preview and open logic cares about.
 
-    ARCHIVE  — a compressed or packaged file whose contents should be listed
-               or searched via rga/tar/unzip/7z. Determined purely by extension.
-    PDF      — a Portable Document Format file. Needs pdftotext or rga for
-               text extraction; plain cat produces binary noise.
-    DIRECTORY — a directory entry. Should be listed via tree/exa/ls.
-    BINARY   — an unknown binary file. Should be shown as a hex dump.
-    TEXT     — everything else: source code, prose, config, binary files that
-               fell through the archive/PDF checks. Rendered by bat → cat, or
-               searched by rga → grep.
+    ARCHIVE  — compressed or packaged file; list contents via tar/unzip/7z.
+    PDF      — Portable Document Format; needs pdftotext or rga for text.
+    DIRECTORY — directory entry; list via tree/exa/ls.
+    BINARY   — unknown binary; show as hex dump.
+    TEXT     — everything else: source code, prose, config.
     """
-
-    ARCHIVE = auto()
-    PDF = auto()
+    ARCHIVE   = auto()
+    PDF       = auto()
     DIRECTORY = auto()
-    BINARY = auto()
-    TEXT = auto()
+    BINARY    = auto()
+    TEXT      = auto()
 
 def classify(hint: str, mime: str = "") -> FileKind:
     """Return the FileKind for a file given its name hint and optional MIME type.
 
-    Classification priority (matches the original dispatch order in cmd_preview):
-      1. Extension check for archives — definitive, fast, no subprocess needed.
+    Classification priority:
+      1. Extension check for archives — definitive, no subprocess.
       2. Extension check for .pdf — definitive for well-named files.
       3. MIME type for application/pdf — catches headerless or oddly-named PDFs.
       4. MIME type for inode/directory — catches folders.
-      5. MIME type check for non-text/non-application binary files.
+      5. MIME type for non-text/non-application binaries.
       6. Everything else → TEXT.
-
-    Arguments:
-        hint  — the original filename (not a temp-file path) used for extension
-                matching. May be an absolute path; only the suffix matters.
-        mime  — MIME type string from file(1), e.g. "application/pdf". Optional;
-                omit when the caller has not yet run MIME detection.
-
-    DESIGN: Centralising all "what kind of file is this?" logic here means
-            cmd_preview, _dispatch_preview, and _open all ask the same question
-            in the same way. Previously each site had its own inline checks
-            (hint.endswith(".pdf"), _is_archive(hint), mime == "application/pdf")
-            that could drift out of sync.
     """
     if mime == "inode/directory":
         return FileKind.DIRECTORY
     suffix = _hint_suffix(hint)
     if suffix in ARCHIVE_EXTENSIONS or suffix in COMPOUND_EXTENSIONS:
         return FileKind.ARCHIVE
-    lower = hint.lower()
-    if lower.endswith(".pdf") or mime == "application/pdf":
+    if hint.lower().endswith(".pdf") or mime == "application/pdf":
         return FileKind.PDF
-
-    # If MIME is available, use it to detect binary files that shouldn't be
-    # opened as text (e.g. executables, images, unknown formats).
     if mime and not _is_text_mime(mime):
         return FileKind.BINARY
-
     return FileKind.TEXT
 
 def _list_archive(filepath: str, hint: str) -> None:
     """List the contents of an archive file to stdout (max 50 lines).
 
-    Dispatches to the appropriate tool based on the file extension taken from
-    'hint' (the original filename). 'filepath' may point to a temp file when
-    the content arrived via stdin.
+    Dispatches to the appropriate tool based on the file extension from
+    'hint' (the original filename). 'filepath' may point to a temp file.
 
     Falls back to rga if the primary tool is unavailable, and prints a
     human-readable install hint as a last resort.
-
-    DESIGN: Extension-to-tool dispatch lives in ARCHIVE_LIST_COMMANDS so
-            adding support for a new format only requires a new dict entry,
-            not a new branch in this function.
     """
     suffix = _hint_suffix(hint)
 
-    def try_pass(cmd) -> bool:
-        """Run cmd, cap at 50 lines. Return True on success."""
+    def try_pass(cmd: list[str]) -> bool:
         return _passthrough(cmd, head_n=50) == 0
 
     def rga_fallback(msg: str) -> None:
-        """Try rga as a universal fallback; if that fails, print an install hint."""
         if _passthrough(["rga", "--pretty", "--color=always", ".", filepath]) != 0:
             print(f"[{msg}]")
 
     if suffix in ARCHIVE_LIST_COMMANDS:
-        # Substitute the actual filepath into the command template.
-        cmd = [
-            arg.replace("{filepath}", filepath) for arg in ARCHIVE_LIST_COMMANDS[suffix]
-        ]
+        cmd = [arg.replace("{filepath}", filepath) for arg in ARCHIVE_LIST_COMMANDS[suffix]]
         if not try_pass(cmd):
             rga_fallback(ARCHIVE_INSTALL_HINTS.get(suffix, "unknown"))
         return
 
-    # .gz and .lzma: try gunzip -l first (shows compressed/uncompressed sizes),
-    # fall back to streaming the decompressed content via zcat.
     if suffix in (".gz", ".lzma"):
         if not try_pass(["gunzip", "-l", filepath]):
             if not try_pass(["zcat", filepath]):
                 rga_fallback("gzip: install gzip")
         return
 
-    # These formats are all handled by 7z.
-    if suffix in (
-        ".7z",
-        ".apk",
-        ".arj",
-        ".cab",
-        ".cb7",
-        ".chm",
-        ".deb",
-        ".iso",
-        ".lzh",
-        ".msi",
-        ".pkg",
-        ".rpm",
-        ".udf",
-        ".wim",
-        ".xar",
-        ".vhd",
-        ".dmg",
-    ):
+    if suffix in _7Z_EXTENSIONS:
         if not try_pass(["7z", "l", filepath]):
             rga_fallback("7z: install p7zip")
         return
 
     if suffix == ".cpio":
-        # DESIGN: cpio --list reads from stdin rather than a filename argument,
-        #         so we open the file ourselves and pass it as stdin rather than
-        #         adding it to the command list like the other archive tools.
+        # cpio --list reads from stdin rather than a filename argument.
         try:
             with open(filepath, "rb") as fin:
                 p1 = subprocess.Popen(
@@ -1274,8 +1180,6 @@ def _list_archive(filepath: str, hint: str) -> None:
         return
 
     rga_fallback("unknown archive format")
-
-
 # =============================================================================
 # backends.py
 # =============================================================================
@@ -1789,39 +1693,18 @@ def _local_content_search(
 def _preview_pdf(filepath: str, query: str) -> None:
     """Render a PDF file in the preview pane.
 
-    With a query: use rga for highlighted, context-aware search results;
-    fall back to pdftotext + grep if rga is unavailable.
+    With a query: rga for highlighted, context-aware results; falls back to
+    pdftotext + grep when rga is unavailable.
 
-    Without a query: extract the first 50 lines of text via pdftotext;
-    fall back to rga for scanned/image-only PDFs that have no text layer.
-
-    DESIGN: pdftotext handles native-text PDFs; rga extends coverage to scanned
-            documents (via OCR plugins) and adds match highlighting. Plain cat
-            cannot be used because PDFs are binary; a text-extraction step is
-            always required.
+    Without a query: pdftotext for the first 50 lines of text; falls back to
+    rga for scanned/image-only PDFs that have no native text layer.
     """
     if query:
-        # Prefer rga: handles OCR'd and mixed PDFs, adds colour highlighting.
-        # Fall back to pdftotext + grep for systems without rga.
-        if (
-            _try_run(
-                [
-                    [
-                        "rga",
-                        "--pretty",
-                        "--color=always",
-                        "--context",
-                        "5",
-                        query,
-                        filepath,
-                    ]
-                ],
-                "",
-            )
-            == 0
-        ):
+        if _try_run(
+            [["rga", "--pretty", "--color=always", "--context", "5", query, filepath]],
+            "",
+        ) == 0:
             return
-
         out, rc = _capture(["pdftotext", filepath, "-"], max_bytes=_CAPTURE_PDF_MAX)
         if rc == 0:
             hits = [line for line in out.splitlines() if query.lower() in line.lower()]
@@ -1829,45 +1712,25 @@ def _preview_pdf(filepath: str, query: str) -> None:
         else:
             print("[PDF: install poppler or rga]")
     else:
-        # Prefer pdftotext: fast and produces clean line-oriented output.
-        # Fall back to rga for scanned/image-only PDFs that have no text layer.
         out, rc = _capture(["pdftotext", filepath, "-"], max_bytes=_CAPTURE_PDF_MAX)
         if rc == 0 and out.strip():
             print("\n".join(out.splitlines()[:50]))
             return
-
         _try_run(
             [["rga", "--pretty", "--color=always", ".", filepath]],
             "PDF: no text layer, may be scanned or encrypted",
         )
 
 def _preview_text(filepath: str, query: str) -> None:
-    """Render a text file (or any non-archive, non-PDF file) in the preview pane.
+    """Render a text file in the preview pane.
 
-    With a query: show only the matching lines with surrounding context so the
-    developer can see why this file was returned by the content search.
-    rga is preferred because it handles more file types and adds highlighting;
-    grep is the fallback for plain text files.
-
-    Without a query: show the full file with syntax highlighting via bat.
-    Falls back to plain cat if bat is not installed.
-
-    DESIGN: --color=always is required for both rga and grep because fzf's
-            preview sub-shell connects stdout to a pipe, not a TTY. Without
-            this flag both tools suppress all ANSI colour codes automatically.
+    With a query: matching lines with context via rga or grep.
+    Without a query: full file with syntax highlighting via bat or cat.
     """
     if query:
         _try_run(
             [
-                [
-                    "rga",
-                    "--pretty",
-                    "--color=always",
-                    "--context",
-                    "5",
-                    query,
-                    filepath,
-                ],
+                ["rga", "--pretty", "--color=always", "--context", "5", query, filepath],
                 ["grep", "--color=always", "-iF", "-C", "5", query, filepath],
             ],
             "No matches found",
@@ -1883,44 +1746,33 @@ def _preview_text(filepath: str, query: str) -> None:
     _preview_git_context(filepath)
 
 def _preview_git_context(filepath: str) -> None:
-    """Append a git context block to the preview pane for the given file.
+    """Append git log and diff context to the preview pane for the given file.
 
-    Shows the last 5 commits that touched the file and the current
-    uncommitted diff. Both sections are omitted silently when git is
-    unavailable, the file is not tracked, or the working directory is
-    not inside a git repository.
-
-    DESIGN: Runs git with stderr suppressed so no error messages leak into
-    the preview pane. Uses subprocess.run with capture_output rather than
-    _passthrough so we can check for empty output before printing the
-    separator — avoiding a trailing divider when the file is outside a repo.
+    Shows the last 5 commits and any uncommitted diff. Both are omitted
+    silently when git is unavailable or the file is outside a repository.
     """
     if "git" not in AVAILABLE_TOOLS:
         return
 
     log_result = subprocess.run(
         ["git", "log", "--oneline", "--color=always", "-5", "--", filepath],
-        capture_output=True,
-        text=True,
+        capture_output=True, text=True,
     )
-    log_out = log_result.stdout.strip()
-
     diff_result = subprocess.run(
         ["git", "diff", "HEAD", "--color=always", "--", filepath],
-        capture_output=True,
-        text=True,
+        capture_output=True, text=True,
     )
+
+    log_out  = log_result.stdout.strip()
     diff_out = diff_result.stdout.strip()
 
     if not log_out and not diff_out:
-        return  # not in a repo, or file is untracked with no changes
+        return
 
-    print("\n\033[2m" + "─" * 40 + "\033[0m")  # dim separator
-
+    print("\n\033[2m" + "-" * 40 + "\033[0m")  # dim separator
     if log_out:
         print("\033[2mgit log\033[0m")
         print(log_out)
-
     if diff_out:
         if log_out:
             print()
@@ -1928,18 +1780,11 @@ def _preview_git_context(filepath: str) -> None:
         print(diff_out)
 
 def _preview_archive(filepath: str, hint: str, query: str) -> None:
-    """Render an archive file in the preview pane.
-
-    Extracted from cmd_preview so the archive path can be taken without
-    first calling _get_mime() — the extension is already definitive.
-    """
+    """Render an archive file in the preview pane."""
     if query:
-        if (
-            _passthrough(
-                ["rga", "--pretty", "--color=always", "--context", "5", query, filepath]
-            )
-            != 0
-        ):
+        if _passthrough(
+            ["rga", "--pretty", "--color=always", "--context", "5", query, filepath]
+        ) != 0:
             print("[Archive search requires rga with dependencies]")
     else:
         _list_archive(filepath, hint)
@@ -1947,12 +1792,8 @@ def _preview_archive(filepath: str, hint: str, query: str) -> None:
 def _preview_directory(filepath: str) -> None:
     """Render a directory listing in the preview pane.
 
-    Tries modern listing tools (eza, exa) first for icons and color, then
-    falls back to tree(1) for structure, and finally ls(1) as a last resort.
-
-    DESIGN: --color=always is forced because fzf's preview sub-shell is a pipe.
-            -L 2 (for tree/eza) ensures we don't dump the entire tree of a
-            deep directory into the pane.
+    Tries eza/exa for icons and colour, then tree for structure, then ls.
+    --color=always is forced because fzf's preview sub-shell is a pipe.
     """
     _try_run(
         [
@@ -1960,17 +1801,13 @@ def _preview_directory(filepath: str) -> None:
             ["exa", "--color=always", "--tree", "--level=2", filepath],
             ["tree", "-L", "2", "-C", filepath],
             ["ls", "-la", "--color=always", filepath],
-            ["ls", "-la", filepath],  # fallback if ls doesn't support --color
+            ["ls", "-la", filepath],
         ],
         "Directory preview failed",
     )
 
 def _preview_binary(filepath: str) -> None:
-    """Render a truncated hexdump of a binary file.
-
-    Capped at 256 bytes (16 lines) to provide a quick look at file headers
-    and content without flooding the preview pane or loading large files.
-    """
+    """Render a truncated hexdump of a binary file (first 256 bytes)."""
     _try_run(
         [
             ["xxd", "-l", "256", filepath],
@@ -1981,12 +1818,7 @@ def _preview_binary(filepath: str) -> None:
     )
 
 def _dispatch_preview(filepath: str, hint: str, mime: str, query: str) -> None:
-    """Dispatch to the correct renderer once MIME type is known.
-
-    Called from cmd_preview after MIME detection. Separated so both the
-    stdin path (which always needs MIME) and the ambiguous-extension path
-    can share the same branching logic without duplication.
-    """
+    """Dispatch to the correct renderer once MIME type is known."""
     kind = classify(hint, mime)
     if kind is FileKind.ARCHIVE:
         _preview_archive(filepath, hint, query)
@@ -1994,13 +1826,46 @@ def _dispatch_preview(filepath: str, hint: str, mime: str, query: str) -> None:
         _preview_pdf(filepath, query)
     elif kind is FileKind.DIRECTORY:
         _preview_directory(filepath)
+    elif mime and not _is_text_mime(mime):
+        _preview_binary(filepath)
     else:
-        # For TEXT kind, we further distinguish between true text and binary
-        # if the MIME type is available.
-        if mime and not _is_text_mime(mime):
-            _preview_binary(filepath)
-        else:
-            _preview_text(filepath, query)
+        _preview_text(filepath, query)
+
+def _preview_stdin(hint: str, query: str) -> None:
+    """Buffer stdin to a temp file and preview it.
+
+    Archive and PDF tools require a seekable file descriptor; stdin is a
+    pipe and is not seekable. We buffer to RAM-backed tmpfs in WORK_BASE.
+    """
+    fd, tmpfile = tempfile.mkstemp(prefix="fzfr-preview-", dir=str(WORK_BASE))
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(sys.stdin.buffer.read())
+        mime = _get_mime(tmpfile)
+        # Honour the original filename as a tiebreaker for headerless PDFs
+        if hint.endswith(".pdf"):
+            mime = "application/pdf"
+        _dispatch_preview(tmpfile, hint, mime, query)
+    finally:
+        Path(tmpfile).unlink(missing_ok=True)
+
+def _preview_file(filepath: str, query: str) -> None:
+    """Preview a file on the local filesystem."""
+    # PERF: Check directory first -- cheap and avoids forking file(1).
+    if Path(filepath).is_dir():
+        _preview_directory(filepath)
+        return
+
+    # PERF: classify() checks extension before forking file(1).
+    # For the common case of source files this avoids a subprocess.
+    kind = classify(filepath)
+    if kind is FileKind.ARCHIVE:
+        _preview_archive(filepath, filepath, query)
+    elif kind is FileKind.PDF:
+        _preview_pdf(filepath, query)
+    else:
+        mime = _get_mime(filepath)
+        _dispatch_preview(filepath, filepath, mime, query)
 
 def cmd_preview(argv: list[str]) -> int:
     """Entry point for the fzfr-preview sub-command.
@@ -2009,107 +1874,53 @@ def cmd_preview(argv: list[str]) -> int:
     file. Dispatches to the correct renderer based on MIME type and extension.
 
     Arguments:
-        argv[0]  filepath  — path to preview, or "/dev/stdin" for piped input
-        argv[1]  query     — current fzf search query (optional, for highlighting)
-        argv[2]  hint      — original filename when filepath is a temp file (optional)
-
-    The 'hint' parameter exists for the stdin case: when content is piped in
-    we buffer it to a temp file so archive/PDF tools can seek in it, but we
-    still need the original filename to determine the file type by extension.
+        argv[0]  filepath  -- path to preview, or "/dev/stdin" for piped input
+        argv[1]  query     -- current fzf search query (optional, for highlighting)
+        argv[2]  hint      -- original filename when filepath is a temp file (optional)
 
     DESIGN: Dispatches on MIME type rather than extension alone so that files
             without extensions (or with misleading ones) are handled correctly.
-            Extension hints are used only as a tiebreaker when file(1) is
-            inconclusive (e.g. headerless PDFs).
+            Extension hints are used as a tiebreaker when file(1) is inconclusive.
+
+    LIMITATION: Filenames containing a literal newline character are split by
+                fd into multiple fzf entries. Each fragment resolves to a path
+                that does not exist -- we catch that here and show a clear message.
     """
     if not argv:
         print("Usage: fzfr-preview <file> [query] [hint]", file=sys.stderr)
         return 1
 
     file_arg = argv[0]
-    query = argv[1] if len(argv) > 1 else ""
-    hint = argv[2] if len(argv) > 2 else file_arg
+    query    = argv[1] if len(argv) > 1 else ""
+    hint     = argv[2] if len(argv) > 2 else file_arg
 
     if not file_arg:
         return 0
 
-    tmpfile = None
-    filepath = file_arg
-
-    # LIMITATION: Filenames containing a literal newline character are split by
-    #             fd into multiple fzf entries (one per fragment), because fd uses
-    #             newlines as its output separator. Each fragment resolves to a
-    #             path that does not exist on disk. We catch that here and show a
-    #             clear message rather than letting tools fail with cryptic errors.
-    #             Root fix would require fd --print0 + fzf --read0, but --read0 is
-    #             a global fzf flag that breaks content-mode (rga/grep) output.
-    if file_arg != "/dev/stdin" and not Path(filepath).exists():
-        print(f"[File not found: {filepath}]")
+    if file_arg == "/dev/stdin":
+        _preview_stdin(hint, query)
         return 0
 
-    try:
-        if file_arg == "/dev/stdin":
-            # DESIGN: Archive and PDF tools require a seekable file descriptor;
-            #         stdin is a pipe and is not seekable. We buffer the content
-            #         to a RAM-backed temp file in WORK_BASE so those tools can
-            #         seek freely without touching disk on Linux.
-            fd, tmpfile = tempfile.mkstemp(prefix="fzfr-preview-", dir=str(WORK_BASE))
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(sys.stdin.buffer.read())
-            filepath = tmpfile
-            # For stdin we must detect type by content; extension alone is
-            # unreliable. file(1) is the tiebreaker for ambiguous content.
-            mime = _get_mime(tmpfile)
-            # DESIGN: file(1) may not identify a PDF by content alone if it
-            #         lacks a standard %PDF header (e.g. some encrypted PDFs).
-            #         The original filename extension is honoured as a tiebreaker.
-            if hint.endswith(".pdf"):
-                mime = "application/pdf"
-            _dispatch_preview(filepath, hint, mime, query)
-        else:
-            hint = filepath  # use the real path for extension matching
-            # PERF: Check if it's a directory first. This is cheap for local
-            #       files and avoids calling file(1) or extension matching
-            #       for directory entries in CTRL-D mode.
-            if Path(filepath).is_dir():
-                _preview_directory(filepath)
-                return 0
-
-            # PERF: classify() checks extension first for the two unambiguous
-            #       categories (archives and PDFs) before forking file(1). For
-            #       the common case of source files and documents this avoids a
-            #       subprocess on every cursor movement — file(1) is only called
-            #       when classify() returns TEXT and the extension is ambiguous.
-            kind = classify(hint)
-            if kind is FileKind.ARCHIVE:
-                _preview_archive(filepath, hint, query)
-            elif kind is FileKind.PDF:
-                _preview_pdf(filepath, query)
-            else:
-                # Extension is ambiguous (no extension, or e.g. ".dat").
-                # Fall back to MIME detection to distinguish text from binary.
-                mime = _get_mime(filepath)
-                _dispatch_preview(filepath, hint, mime, query)
+    if not Path(file_arg).exists():
+        print(f"[File not found: {file_arg}]")
         return 0
 
-    finally:
-        # Always delete the temp file, even if an exception propagated above.
-        if tmpfile:
-            Path(tmpfile).unlink(missing_ok=True)
+    _preview_file(file_arg, query)
+    return 0
 # =============================================================================
 # internal.py
 # =============================================================================
 
-# ── Internal sub-commands ─────────────────────────────────────────────────────
+# -- Internal sub-commands --
 #
 # All cmd_internal_* functions are dispatched by _internal-dispatch and called
 # as fzf execute / execute-silent / transform targets. They communicate with
 # the running fzf session exclusively through:
-#   • the session state file  (read/write via _load_state / _mutate_state)
-#   • stdout                  (fzf reads it for transform / preview targets)
-#   • exit code               (fzf surfaces non-zero exits as errors)
+#   - the session state file  (read/write via _load_state / _mutate_state)
+#   - stdout                  (fzf reads it for transform / preview targets)
+#   - exit code               (fzf surfaces non-zero exits as errors)
 #
-# None of them take keyword arguments — argv is always a raw list[str].
+# None of them take keyword arguments -- argv is always a raw list[str].
 
 def cmd_internal_prompt(argv: list[str]) -> int:
     """Prompt for input on the terminal and update one key in the state file.
@@ -2123,7 +1934,6 @@ def cmd_internal_prompt(argv: list[str]) -> int:
     if len(argv) < 3:
         return 1
     path, key, prompt_text = Path(argv[0]), argv[1], argv[2]
-    # Extension filter is meaningless in directory mode — silently no-op.
     if key == "ext":
         state = _load_state(path)
         if state.get("ftype") == "d":
@@ -2160,12 +1970,12 @@ def cmd_internal_exclude(argv: list[str]) -> int:
 
 def _prompt_str(state: dict) -> str:
     """Return the fzf prompt string for the given state."""
-    mode     = state.get("mode", "content")
-    ftype    = state.get("ftype", "f")
-    ext      = state.get("ext", "")
-    remote   = state.get("remote", "")
-    base_path = state.get("base_path", "")
-    hidden   = state.get("show_hidden", False)
+    mode          = state.get("mode", "content")
+    ftype         = state.get("ftype", "f")
+    ext           = state.get("ext", "")
+    remote        = state.get("remote", "")
+    base_path     = state.get("base_path", "")
+    hidden        = state.get("show_hidden", False)
     exclude_patterns = state.get("exclude_patterns", [])
 
     if ftype == "d":
@@ -2209,14 +2019,10 @@ def _header_str(state: dict) -> str:
     copy_key    = _kb("copy_path")
     exit_key    = _kb("exit")
 
-    if ftype == "d":
-        toggle_label = "Dir Name (name only)"
-    else:
-        toggle_label = "Content" if mode == "name" else "File Name"
-
+    toggle_label      = "Dir Name (name only)" if ftype == "d" else ("Content" if mode == "name" else "File Name")
     toggle_type_label = "Dirs" if ftype == "f" else "Files"
-    hidden_label = "Hide" if hidden else "Show"
-    filter_hint = "" if ftype == "d" else f" | {filter_key}: Filter | {exclude_key}: Exclude"
+    hidden_label      = "Hide" if hidden else "Show"
+    filter_hint       = "" if ftype == "d" else f" | {filter_key}: Filter | {exclude_key}: Exclude"
 
     return (
         f"{toggle_key}: {toggle_label} | {ftype_key}: {toggle_type_label}"
@@ -2255,10 +2061,7 @@ def cmd_internal_get_header(argv: list[str]) -> int:
 def cmd_internal_get_search_action(argv: list[str]) -> int:
     """Print 'disable-search' or 'enable-search' based on the current mode.
 
-    Used as a fzf transform() target so fzf applies the correct search-filter
-    state after a mode toggle without needing a full transform action.
-
-    Content mode: fzf must not re-filter the result list — the items ARE the
+    Content mode: fzf must not re-filter the result list -- the items ARE the
     search results. Name mode: fzf fuzzy-filters the list itself.
 
     Usage: fzfr _internal-get-search-action <state_path>
@@ -2289,17 +2092,11 @@ def cmd_internal_toggle_mode(argv: list[str]) -> int:
 def cmd_internal_toggle_ftype(argv: list[str]) -> int:
     """Toggle ftype between 'f' (files) and 'd' (directories) in the state file.
 
-    DESIGN: Directory mode is always a name search — extension filters are
+    DESIGN: Directory mode is always a name search -- extension filters are
             meaningless for directories (fd ignores -e with --type d).
 
-            f → d: save current mode and ext as mode_before_dir / ext_before_dir,
-                   force mode="name", clear ext="".
-            d → f: restore mode and ext from the saved values, clear the saves.
-
-            This makes CTRL-D independent of CTRL-T and CTRL-F: the user can
-            have an active extension filter and content mode, press CTRL-D to
-            browse directories, then CTRL-D again to return to their previous
-            state automatically.
+            f -> d: save current mode and ext, force mode="name", clear ext.
+            d -> f: restore mode and ext from saved values.
 
     Usage: fzfr _internal-toggle-ftype <state_path>
     """
@@ -2341,20 +2138,19 @@ def _substitute_placeholders(cmd: str, path: str, paths: list[str], base: str, q
     ~/.bashrc).
 
     Placeholders:
-      {path}   — single highlighted file, shell-quoted
-      {paths}  — all TAB-selected files, space-joined, each shell-quoted;
+      {path}   -- single highlighted file, shell-quoted
+      {paths}  -- all TAB-selected files, space-joined, each shell-quoted;
                  falls back to {path} if nothing is multi-selected
-      {dir}    — directory containing {path}, shell-quoted
-      {base}   — search root BASE_PATH, shell-quoted
-      {q}      — current fzf query string, shell-quoted
+      {dir}    -- directory containing {path}, shell-quoted
+      {base}   -- search root BASE_PATH, shell-quoted
+      {q}      -- current fzf query string, shell-quoted
 
     Note: {paths} is substituted before {path} so a cmd containing both
     placeholders gets the correct value for each.
     """
-    import os as _os
     safe_path  = shlex.quote(path) if path else "''"
     safe_paths = " ".join(shlex.quote(p) for p in paths) if paths else safe_path
-    safe_dir   = shlex.quote(_os.path.dirname(path)) if path else "''"
+    safe_dir   = shlex.quote(os.path.dirname(path)) if path else "''"
     safe_base  = shlex.quote(base) if base else "''"
     safe_q     = shlex.quote(q) if q else "''"
 
@@ -2366,6 +2162,21 @@ def _substitute_placeholders(cmd: str, path: str, paths: list[str], base: str, q
     result = result.replace("{q}",     safe_q)
     return result
 
+def _abs_path(p: str, remote: str, base_path: str) -> str:
+    """Resolve a relative path to absolute for use in commands.
+
+    For remote sessions, uses PurePosixPath against the remote base_path
+    (no local filesystem access). For local sessions, uses Path against
+    base_path or cwd.
+    """
+    if not p:
+        return p
+    if remote:
+        pp = PurePosixPath(p)
+        return p if pp.is_absolute() else str(PurePosixPath(base_path) / pp) if base_path else p
+    pp = Path(p)
+    return p if pp.is_absolute() else str((Path(base_path) if base_path else Path.cwd()) / pp)
+
 def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int:
     """Execute a custom action identified by 'group_key.action_key'.
 
@@ -2373,14 +2184,14 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
     absolute, substitutes placeholders, and runs the command.
 
     Usage: fzfr _internal-exec <state_path> <action_id> [path ...]
-      state_path  — session state file (provides base_path, query, remote info)
-      action_id   — "group_key.action_key" e.g. "f.d"
-      path ...    — selected file paths from fzf {+} (one or more)
+      state_path  -- session state file (provides base_path, query, remote info)
+      action_id   -- "group_key.action_key" e.g. "f.d"
+      path ...    -- selected file paths from fzf {+} (one or more)
 
     Output modes:
-      "silent"   — run silently; stderr is surfaced on non-zero exit only
-      "tmux"     — open a new tmux window and run the command there
-      "overlay"  — run the command and return output via overlay_out for the
+      "silent"   -- run silently; stderr is surfaced on non-zero exit only
+      "tmux"     -- open a new tmux window and run the command there
+      "overlay"  -- run the command and return output via overlay_out for the
                    caller (cmd_internal_action_menu) to display in a box while
                    fzf is still frozen. Falls back to stdout if called directly.
 
@@ -2390,10 +2201,7 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
       the remote base_path using PurePosixPath (no local filesystem access).
     """
     if len(argv) < 3:
-        print(
-            "Usage: fzfr _internal-exec <state_path> <action_id> [path ...]",
-            file=sys.stderr,
-        )
+        print("Usage: fzfr _internal-exec <state_path> <action_id> [path ...]", file=sys.stderr)
         return 1
 
     state_path_str, action_id = argv[0], argv[1]
@@ -2401,10 +2209,7 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
 
     parts = action_id.split(".", 1)
     if len(parts) != 2:
-        print(
-            f"[fzfr] invalid action_id {action_id!r} — expected 'group.action'",
-            file=sys.stderr,
-        )
+        print(f"[fzfr] invalid action_id {action_id!r} -- expected 'group.action'", file=sys.stderr)
         return 1
     group_key, action_key = parts
 
@@ -2425,29 +2230,11 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
         print(f"[fzfr] no action {action_key!r} in group {group_key!r}", file=sys.stderr)
         return 1
 
-    # Resolve relative paths to absolute before placeholder substitution so
-    # commands like `du` and `stat` work regardless of the working directory.
-    # Remote paths are resolved against the remote base_path using
-    # PurePosixPath — no local filesystem access.
-    def _abs(p: str) -> str:
-        if not p:
-            return p
-        from pathlib import PurePosixPath as _PP, Path as _P
-        if remote:
-            pp = _PP(p)
-            return p if pp.is_absolute() else str(_PP(base_path) / pp) if base_path else p
-        pp = _P(p)
-        return p if pp.is_absolute() else str((_P(base_path) if base_path else _P.cwd()) / pp)
-
-    primary   = _abs(selected_paths[0]) if selected_paths else ""
-    abs_paths = [_abs(p) for p in selected_paths]
+    primary   = _abs_path(selected_paths[0], remote, base_path) if selected_paths else ""
+    abs_paths = [_abs_path(p, remote, base_path) for p in selected_paths]
 
     cmd = _substitute_placeholders(
-        action["cmd"],
-        path=primary,
-        paths=abs_paths,
-        base=base_path,
-        q=q,
+        action["cmd"], path=primary, paths=abs_paths, base=base_path, q=q,
     )
 
     output = action.get("output", "silent")
@@ -2459,17 +2246,15 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
             return subprocess.run(ssh_base + [cmd], **extra)
     else:
         # shell=True is intentional: cmd is a user-defined shell string that
-        # may contain pipes, redirects, or shell operators (e.g. "du -sh {path}
-        # | head -5"). All placeholder values ({path} etc.) are shlex.quote()'d
-        # by _substitute_placeholders before reaching here.
+        # may contain pipes, redirects, or shell operators. All placeholder
+        # values are shlex.quote()'d by _substitute_placeholders before here.
         def _run(extra: dict):
             return subprocess.run(cmd, shell=True, **extra)  # nosemgrep: fzfr-subprocess-shell-true
 
     if output == "tmux":
         if "tmux" in AVAILABLE_TOOLS:
             if remote:
-                import shlex as _sl
-                tmux_cmd = " ".join(_sl.quote(a) for a in ssh_base) + " " + _sl.quote(cmd)
+                tmux_cmd = " ".join(shlex.quote(a) for a in ssh_base) + " " + shlex.quote(cmd)
             else:
                 tmux_cmd = cmd
             return subprocess.run(["tmux", "new-window", tmux_cmd]).returncode
@@ -2482,7 +2267,7 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
         # box while fzf is still SIGSTOPed. If called directly (no
         # overlay_out), fall back to printing to stdout.
         r = _run({"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT})
-        raw = r.stdout.decode("utf-8", errors="replace").rstrip()
+        raw   = r.stdout.decode("utf-8", errors="replace").rstrip()
         lines = raw.splitlines() if raw else ["(no output)"]
         if overlay_out is not None:
             overlay_out["lines"]    = lines
@@ -2503,7 +2288,7 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
                 print(f"[fzfr] {err}", file=sys.stderr)
         return r.returncode
 
-# ── Terminal box renderer ─────────────────────────────────────────────────────
+# -- Terminal box renderer --
 #
 # Draws a Unicode-bordered box directly on the terminal at any of 9 positions,
 # used by the which-key menu and the "overlay" output mode. fzf is SIGSTOPed
@@ -2516,9 +2301,16 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
 #
 # Box width is sized to content: min 22, max 60 inner characters.
 # Title is centred in the top border; footer hint in the bottom border.
-# _erase_box() uses dimensions saved by the last _draw_box() call.
+#
+# _draw_box() returns a _BoxGeometry namedtuple that _erase_box() uses to
+# clear the exact region -- no mutable global state.
 
-_BOX_STATE: dict = {"row": 0, "col": 0, "h": 0, "w": 0, "tty_fd": -1}
+class _BoxGeometry(NamedTuple):
+    tty_fd:    int
+    start_row: int
+    start_col: int
+    box_h:     int
+    box_w:     int
 
 _TL, _TR, _BL, _BR = "╭", "╮", "╰", "╯"
 _H, _V = "─", "│"
@@ -2528,11 +2320,10 @@ def _box_build(lines: list[str], title: str | None, footer: str | None) -> list[
     inner = max(22, min(60, max(
         len(title or ""),
         len(footer or ""),
-        max((len(l) for l in lines), default=0),
+        max((len(ln) for ln in lines), default=0),
     ) + 2))
 
     def _border(text: str | None, left: str, right: str) -> str:
-        """Build a border line with optional centred label."""
         if not text:
             return left + _H * (inner + 2) + right
         gap       = inner - len(text)
@@ -2547,7 +2338,7 @@ def _box_build(lines: list[str], title: str | None, footer: str | None) -> list[
     return rows
 
 def _box_origin(rows: int, cols: int, box_h: int, box_w: int, position: str) -> tuple[int, int]:
-    """Return (start_row, start_col) — 1-indexed terminal coordinates."""
+    """Return (start_row, start_col) -- 1-indexed terminal coordinates."""
     if position == "top-left":
         return (1, 1)
     elif position == "top-center":
@@ -2573,48 +2364,39 @@ def _draw_box(
     position: str = "bottom-right",
     title: str | None = None,
     footer: str | None = None,
-) -> None:
-    """Draw a bordered box at position and save its geometry for _erase_box."""
-    import os
+) -> _BoxGeometry:
+    """Draw a bordered box at position and return its geometry for _erase_box."""
     box   = _box_build(lines, title, footer)
     box_h = len(box)
-    box_w = max(len(l) for l in box)
+    box_w = max(len(ln) for ln in box)
     term_rows, term_cols = _terminal_size(tty_fd)
     start_row, start_col = _box_origin(term_rows, term_cols, box_h, box_w, position)
 
-    _BOX_STATE.update({"row": start_row, "col": start_col,
-                        "h": box_h, "w": box_w, "tty_fd": tty_fd})
-
-    # \033[s — save cursor; position each line; \033[u — restore cursor
+    # \033[s -- save cursor; position each line; \033[u -- restore cursor
     buf = "\033[s"
     for i, line in enumerate(box):
         buf += f"\033[{start_row + i};{start_col}H{line}"
     buf += "\033[u"
     os.write(tty_fd, buf.encode("utf-8"))
 
-def _erase_box() -> None:
-    """Erase the last box drawn by _draw_box using its saved geometry."""
-    import os
-    tty_fd = _BOX_STATE["tty_fd"]
-    if tty_fd < 0:
-        return
-    start_row = _BOX_STATE["row"]
-    box_h     = _BOX_STATE["h"]
-    buf = "\033[s"
-    for i in range(box_h):
-        buf += f"\033[{start_row + i};1H\033[2K"   # move to row, erase whole line
-    buf += "\033[u"
-    os.write(tty_fd, buf.encode("utf-8"))
-    _BOX_STATE["tty_fd"] = -1
+    return _BoxGeometry(tty_fd, start_row, start_col, box_h, box_w)
 
-# ── TTY key reading ───────────────────────────────────────────────────────────
+def _erase_box(geom: _BoxGeometry) -> None:
+    """Erase a box drawn by _draw_box using its returned geometry."""
+    buf = "\033[s"
+    for i in range(geom.box_h):
+        buf += f"\033[{geom.start_row + i};1H\033[2K"   # move to row, erase whole line
+    buf += "\033[u"
+    os.write(geom.tty_fd, buf.encode("utf-8"))
+
+# -- TTY key reading --
 
 def _read_single_key(tty_fd: int) -> str:
     """Read one keypress from an open TTY file descriptor.
 
     Returns the character as a string, or "" for unrecognised input.
     A bare ESC is returned as "esc"; multi-byte escape sequences (arrow
-    keys, function keys) are consumed and discarded — callers that need
+    keys, function keys) are consumed and discarded -- callers that need
     'any key' semantics should use _read_any_key() instead.
 
     DESIGN: Read one byte. If it is ESC (0x1b), do a non-blocking peek:
@@ -2622,7 +2404,7 @@ def _read_single_key(tty_fd: int) -> str:
     sequence sends 0x1b immediately followed by more bytes. Discard the
     full sequence and return "" so the menu loop treats it as a no-op.
     """
-    import os, fcntl
+    import fcntl
     b = os.read(tty_fd, 1)
     if not b:
         return ""
@@ -2632,9 +2414,9 @@ def _read_single_key(tty_fd: int) -> str:
         fcntl.fcntl(tty_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         try:
             if os.read(tty_fd, 8):
-                return ""   # escape sequence — discard
+                return ""   # escape sequence - discard
         except BlockingIOError:
-            pass            # bare ESC — nothing followed
+            pass            # bare ESC -- nothing followed
         finally:
             fcntl.fcntl(tty_fd, fcntl.F_SETFL, flags)
         return "esc"
@@ -2644,10 +2426,9 @@ def _read_any_key(tty_fd: int) -> None:
     """Block until any single byte arrives on the TTY.
 
     Used for 'press any key to dismiss' prompts. Unlike _read_single_key,
-    this does not inspect or discard escape sequences — the first byte of
+    this does not inspect or discard escape sequences -- the first byte of
     any keypress (including arrow keys and function keys) is sufficient.
     """
-    import os
     try:
         os.read(tty_fd, 1)
     except OSError:
@@ -2658,7 +2439,9 @@ def _terminal_size(tty_fd: int) -> tuple[int, int]:
 
     Falls back to (24, 80) if the ioctl fails (e.g. in a pipe or test).
     """
-    import struct, fcntl, termios as _t
+    import struct
+    import fcntl
+    import termios as _t
     try:
         packed = fcntl.ioctl(tty_fd, _t.TIOCGWINSZ, b"\x00" * 8)
         rows, cols = struct.unpack("HHHH", packed)[:2]
@@ -2666,17 +2449,66 @@ def _terminal_size(tty_fd: int) -> tuple[int, int]:
     except Exception:
         return (24, 80)
 
-# ── Which-key action menu ─────────────────────────────────────────────────────
+# -- Which-key action menu --
+
+def _run_which_key_menu(
+    tty_fd: int,
+    groups: dict,
+    menu_pos: str,
+) -> str:
+    """Drive the two-level which-key navigation and return the chosen action_id.
+
+    Returns "group_key.action_key" on selection, or "" on cancel/ESC.
+    Raises exceptions -- caller is responsible for cleanup.
+    """
+    while True:
+        # Level 1 -- group menu
+        group_items = [
+            f"[{gk}] {gv['label']}" for gk, gv in sorted(groups.items())
+        ] + ["[q] cancel"]
+        geom = _draw_box(tty_fd, group_items, menu_pos, title="actions")
+
+        gk = _read_single_key(tty_fd)
+        if not gk or gk in ("q", "esc"):
+            _erase_box(geom)
+            return ""
+        if gk not in groups:
+            _erase_box(geom)
+            continue
+
+        group   = groups[gk]
+        actions = group.get("actions", {})
+        if not actions:
+            _erase_box(geom)
+            continue
+
+        # Level 2 -- action menu
+        while True:
+            action_items = [
+                f"[{ak}] {av['label']}" for ak, av in sorted(actions.items())
+            ] + ["[q] back"]
+            geom = _draw_box(tty_fd, action_items, menu_pos, title=group.get("label", gk))
+
+            ak = _read_single_key(tty_fd)
+            if not ak or ak in ("q", "esc"):
+                _erase_box(geom)
+                break   # back to group menu
+            if ak not in actions:
+                _erase_box(geom)
+                continue
+
+            _erase_box(geom)
+            return f"{gk}.{ak}"
 
 def cmd_internal_action_menu(argv: list[str]) -> int:
     """Present the which-key action menu and execute the chosen action.
 
     Called by fzf via execute-silent when the user presses the leader key.
 
-    DESIGN — SIGSTOP/SIGCONT approach:
+    DESIGN -- SIGSTOP/SIGCONT approach:
       fzf is started with subprocess.Popen; its PID is saved to the state
       file immediately after launch. When the leader key fires, this function
-      sends SIGSTOP to fzf as its very first operation — before argv checks,
+      sends SIGSTOP to fzf as its very first operation -- before argv checks,
       config access, or TTY setup. fzf is frozen before it can react.
 
       With fzf frozen we take exclusive ownership of /dev/tty, hide the
@@ -2688,23 +2520,21 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
       not issue its own redraw when our subprocess exits.
 
     Flow:
-      1. SIGSTOP fzf   — freeze before anything else
+      1. SIGSTOP fzf   -- freeze before anything else
       2. Open /dev/tty, setraw, hide cursor
-      3. Draw group menu box at menu_position
-      4. Keypress → group key  (q / ESC → cancel)
-      5. Draw action menu box at menu_position
-      6. Keypress → action key (q / ESC → back to step 3)
-      7. Erase box
-      8. Run action via cmd_internal_exec
-      9. For overlay output: draw result box, wait for any key, erase box
-     10. Show cursor, restore terminal, SIGCONT fzf, SIGWINCH fzf
+      3. _run_which_key_menu() -- group -> action key selection
+      4. Run action via cmd_internal_exec
+      5. For overlay output: draw result box, wait for any key, erase box
+      6. Show cursor, restore terminal, SIGCONT fzf, SIGWINCH fzf
 
     Usage: fzfr _internal-action-menu <state_path> [path ...]
     """
-    import os, signal, termios, tty as _tty
+    import signal
+    import termios
+    import tty as _tty
 
-    # ── Step 1: freeze fzf immediately ───────────────────────────────────────
-    # Must be the very first operation. execute-silent is asynchronous —
+    # -- Step 1: freeze fzf immediately --
+    # Must be the very first operation. execute-silent is asynchronous --
     # fzf continues running until we SIGSTOP it.
     fzf_pid = None
     if argv:
@@ -2730,7 +2560,7 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
             os.kill(fzf_pid, signal.SIGCONT)
         return 0
 
-    # ── Step 2: take over the terminal ────────────────────────────────────────
+    # -- Step 2: take over the terminal --
     try:
         tty_fd    = os.open("/dev/tty", os.O_RDWR)
         old_attrs = termios.tcgetattr(tty_fd)
@@ -2750,58 +2580,23 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
             os.kill(fzf_pid, signal.SIGCONT)
             os.kill(fzf_pid, signal.SIGWINCH)  # force fzf to redraw cleanly
 
-    menu_pos = custom_actions.get("menu_position", "bottom-right")
-
-    # ── Steps 3–7: which-key navigation ──────────────────────────────────────
+    menu_pos  = custom_actions.get("menu_position", "bottom-right")
     action_id = ""
+
+    # -- Step 3: which-key navigation --
     try:
-        while True:
-            # Level 1 — group menu
-            group_items = [
-                f"[{gk}] {gv['label']}" for gk, gv in sorted(groups.items())
-            ] + ["[q] cancel"]
-            _draw_box(tty_fd, group_items, menu_pos, title="actions")
-
-            gk = _read_single_key(tty_fd)
-            if not gk or gk in ("q", "esc"):
-                _erase_box()
-                break
-            if gk not in groups:
-                continue
-
-            group   = groups[gk]
-            actions = group.get("actions", {})
-            if not actions:
-                continue
-
-            # Level 2 — action menu
-            while True:
-                action_items = [
-                    f"[{ak}] {av['label']}" for ak, av in sorted(actions.items())
-                ] + ["[q] back"]
-                _draw_box(tty_fd, action_items, menu_pos, title=group.get("label", gk))
-
-                ak = _read_single_key(tty_fd)
-                if not ak or ak in ("q", "esc"):
-                    break
-                if ak not in actions:
-                    continue
-
-                _erase_box()
-                action_id = f"{gk}.{ak}"
-                break
-
-            if action_id:
-                break
-
+        action_id = _run_which_key_menu(tty_fd, groups, menu_pos)
+    except KeyboardInterrupt:
+        _restore()
+        return 0
     except Exception:
-        pass
+        pass  # unexpected error -- fall through to _restore() and return 0
 
     if not action_id:
         _restore()
         return 0
 
-    # ── Steps 8–9: run action, show overlay if needed ────────────────────────
+    # -- Steps 4-5: run action, show overlay if needed --
     overlay_out: dict = {}
     rc = cmd_internal_exec(
         [state_path_str, action_id] + selected_paths,
@@ -2810,7 +2605,7 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
 
     if overlay_out.get("lines"):
         try:
-            _draw_box(
+            geom = _draw_box(
                 tty_fd,
                 overlay_out["lines"],
                 overlay_out.get("position", "bottom-left"),
@@ -2818,14 +2613,13 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
                 footer="any key to dismiss",
             )
             _read_any_key(tty_fd)
-            _erase_box()
+            _erase_box(geom)
         except Exception:
             pass
 
-    # ── Step 10: hand control back to fzf ────────────────────────────────────
+    # -- Step 6: hand control back to fzf --
     _restore()
     return rc
-
 # =============================================================================
 # dispatch.py
 # =============================================================================
@@ -2849,18 +2643,18 @@ def cmd_dispatch(argv: list[str]) -> int:
     if not state:
         return 1
 
-    backend = backend_from_state(state)
-    mode = state.get("mode", "content")
-    ftype = state.get("ftype", "f")
-    ext = state.get("ext", "")
-    hidden = state.get("show_hidden", False)
+    backend         = backend_from_state(state)
+    mode            = state.get("mode", "content")
+    ftype           = state.get("ftype", "f")
+    ext             = state.get("ext", "")
+    hidden          = state.get("show_hidden", False)
     exclude_patterns = state.get("exclude_patterns", [])
-    path_format = state.get("path_format", "absolute")
-    file_source = state.get("file_source", "auto")
+    path_format     = state.get("path_format", "absolute")
+    file_source     = state.get("file_source", "auto")
 
     if command == "preview":
         filename = command_args[0] if command_args else ""
-        query = command_args[1] if len(command_args) > 1 else ""
+        query    = command_args[1] if len(command_args) > 1 else ""
         if filename and not Path(filename).is_absolute():
             base_path = state.get("base_path", "")
             if base_path:
@@ -2878,7 +2672,6 @@ def cmd_dispatch(argv: list[str]) -> int:
         )
 
     return 1  # Unknown command
-
 # =============================================================================
 # open.py
 # =============================================================================
@@ -2886,14 +2679,12 @@ def cmd_dispatch(argv: list[str]) -> int:
 def _find_editor() -> str:
     """Return the editor to use.
 
-    Priority: config file > $EDITOR > compiled-in fallback chain (nvim, vim,
-    vi). Returns 'vi' as a last resort — POSIX-required on every Unix system
-    (Linux, macOS, BSD).
+    Priority: config > $EDITOR > compiled-in fallback chain (nvim, vim, vi).
+    Returns 'vi' as a last resort — POSIX-required on every Unix system.
 
     DESIGN: nano is intentionally absent from the fallback chain. It is not
     universally present and adds no reliability guarantee beyond what vi
-    already provides. Users who prefer nano should set $EDITOR or the
-    'editor' config key.
+    already provides.
     """
     if CONFIG.get("editor"):
         return CONFIG["editor"]
@@ -2906,26 +2697,16 @@ def _find_editor() -> str:
     return "vi"
 
 def _in_tmux() -> bool:
-    """Return True if we are running inside a tmux session.
-
-    Checked by the presence of $TMUX, which tmux sets automatically. When True,
-    text files are opened in a new tmux window instead of replacing the current
-    terminal, so fzf remains visible and reusable.
-    """
+    """Return True if running inside a tmux session ($TMUX is set)."""
     return bool(os.environ.get("TMUX"))
 
 def _dquote(s: str) -> str:
-    """Wrap s in double quotes, escaping the characters special inside them:
-    backslash, double-quote, dollar, backtick, !, and }.
+    """Wrap s in double quotes, escaping characters special inside them.
 
     DESIGN: shlex.quote() produces single-quoted strings which cannot be
             nested inside another single-quoted context. This breaks the
-            tmux → ssh → remote shell chain used for opening remote files,
-            where the outer tmux command is already single-quoted. Double-
-            quoted strings pass through that chain safely.
-
-    Used in _open() for remote paths that must survive:
-      local shell (tmux) → ssh transport → remote shell
+            tmux → ssh → remote shell chain. Double-quoted strings pass
+            through that chain safely.
     """
     for ch in ("\\", '"', "$", "`", "!", "}"):
         s = s.replace(ch, "\\" + str(ch))
@@ -2934,16 +2715,8 @@ def _dquote(s: str) -> str:
 def _xdg_open(path: str) -> None:
     """Open path with the platform file opener and detach immediately.
 
-    Uses xdg-open on Linux, open on macOS. Both are called via Popen so
-    the opener detaches and fzf remains interactive — run() would block
-    until the application closes.
-
-    DESIGN: sys.platform == "darwin" is the canonical Python check for
-    macOS. xdg-open is Linux-specific (part of xdg-utils); it does not
-    exist on macOS or BSD. 'open' is a macOS built-in, always present.
-    On BSD without a desktop environment neither tool is available — the
-    Popen call will fail with FileNotFoundError which is caught and
-    reported rather than crashing fzfr.
+    Uses xdg-open on Linux, open on macOS. Popen is used (not run) so
+    the opener detaches and fzf remains interactive.
     """
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     try:
@@ -2959,187 +2732,153 @@ def _xdg_open(path: str) -> None:
             file=sys.stderr,
         )
 
+def _strip_quotes(s: str) -> str:
+    """Strip residual shell quotes from an argv token (e.g. literal '' tokens)."""
+    return s.strip("'\"")
+
 def _open(
     choice: str,
     editor: str,
     state: dict,
     self_path: Path | None,
-    backend: LocalBackend | RemoteBackend,
+    backend: "LocalBackend | RemoteBackend",
 ) -> None:
     """Open a selected file or directory using the session backend.
 
-    The backend encapsulates all local/remote divergence: safety checking,
-    directory detection, MIME detection, and the actual open actions. This
-    function contains no `if remote:` branches — it calls backend methods
-    and interprets the results.
-
-    Arguments:
-        choice      — path as returned by fzf (may be relative, e.g. "./foo")
-        editor      — resolved editor binary (from _find_editor())
-        state       — current session state dict (used for mode on dir-open)
-        self_path   — frozen script path for launching new fzfr windows
-        backend     — LocalBackend or RemoteBackend for this session
+    The backend encapsulates all local/remote divergence. This function
+    contains no `if remote:` branches — it calls backend methods and
+    interprets the results.
     """
     # DESIGN: removeprefix("./") not lstrip("./"): lstrip treats its argument
-    #         as a *set* of characters, so lstrip("./") on "..hidden" would
-    #         incorrectly strip to "hidden". removeprefix matches the exact
-    #         string "./", leaving dotfiles and dot-dot paths untouched.
-    choice_clean = choice.removeprefix("./")
-
-    # --- 1. Build the full path --------------------------------------------------
-    # Path construction is identical for both backends: join relative paths
-    # against base_path, leave absolute paths untouched.
-    full_path_str = (
+    #         as a *set* of characters — lstrip("./") on "..hidden" would
+    #         incorrectly strip to "hidden".
+    choice_clean   = choice.removeprefix("./")
+    is_remote      = isinstance(backend, RemoteBackend)
+    full_path_str  = (
         choice_clean
         if Path(choice_clean).is_absolute()
         else str(Path(backend.base_path) / choice_clean)
     )
 
-    # --- 2. Safety check ---------------------------------------------------------
     if not backend.is_safe_subpath(full_path_str):
-        print(
-            f"Error: Blocked path outside search root: {full_path_str}",
-            file=sys.stderr,
-        )
+        print(f"Error: Blocked path outside search root: {full_path_str}", file=sys.stderr)
         return
 
     window_name = Path(choice_clean).name
-    mode = state.get("mode", "content")
-    is_remote = isinstance(backend, RemoteBackend)
+    mode        = state.get("mode", "content")
+    safe_editor = shlex.quote(editor)
 
-    # --- 3. Directory handling ---------------------------------------------------
+    # ── Directory ──────────────────────────────────────────────────────────
     if backend.is_dir(full_path_str):
         if _in_tmux():
-            # DESIGN: Use the absolute script path so the new tmux window finds
-            #         the script even if the user's PATH differs from the parent.
             if is_remote:
                 cmd = f"{_self_cmd(self_path)} {shlex.quote(backend.remote)} {shlex.quote(full_path_str)} {shlex.quote(mode)}"
             else:
                 cmd = f"{_self_cmd(self_path)} local {shlex.quote(full_path_str)} {shlex.quote(mode)}"
             subprocess.run(["tmux", "new-window", "-n", window_name, cmd])
             return
-        # No tmux: fall through to xdg-open below.
+        # No tmux: fall through to xdg-open below
 
-    # --- 4. MIME detection -------------------------------------------------------
     mime = backend.get_mime(full_path_str)
-    safe_editor = shlex.quote(editor)
 
-    # --- 5. Open the file --------------------------------------------------------
+    # ── Remote text ────────────────────────────────────────────────────────
     if is_remote and _is_text_mime(mime):
-        # DESIGN: _dquote() is used here (not shlex.quote) because the path
-        #         must survive two shell levels: tmux new-window evaluates its
-        #         command string through a local shell, and ssh then passes it
-        #         to the remote shell. A double-quoted path passes through both
-        #         layers safely; a single-quoted path would break at the first.
-        #         See _dquote() for the full explanation.
-        safe_path_dq = _dquote(full_path_str)
-        ssh_cmd = f"{safe_editor} {safe_path_dq}"
+        # _dquote() survives two shell levels: tmux → ssh → remote shell.
+        ssh_cmd = f"{safe_editor} {_dquote(full_path_str)}"
         if _in_tmux():
             opts_str = _ssh_opts_str(backend.ssh_control)
-            subprocess.run(
-                [
-                    "tmux",
-                    "new-window",
-                    "-n",
-                    window_name,
-                    f"ssh {opts_str} {shlex.quote(backend.remote)} -t {shlex.quote(ssh_cmd)}",
-                ]
-            )
+            subprocess.run([
+                "tmux", "new-window", "-n", window_name,
+                f"ssh {opts_str} {shlex.quote(backend.remote)} -t {shlex.quote(ssh_cmd)}",
+            ])
         else:
             subprocess.run(
-                ["ssh"]
-                + _ssh_opts(backend.ssh_control)
-                + [backend.remote, "-t", ssh_cmd]
+                ["ssh"] + _ssh_opts(backend.ssh_control) + [backend.remote, "-t", ssh_cmd]
             )
+        return
 
-    elif is_remote:
-        # Binary remote file: stream into the session directory then xdg-open.
-        #
-        # DESIGN: The session dir (parent of self_path) is private to this
-        #         session (mode 0o700) and is removed entirely by _cleanup()
-        #         on exit. No separate cleanup logic needed here.
-        #
-        # SIZE GUARD: Refuse files over the configured limit (max_stream_mb, default 100 MB).
-        #             WORK_BASE is tmpfs (RAM-backed), so large files consume memory.
-        #
-        # SECURITY: mkstemp() creates the file with O_CREAT|O_EXCL (mode 0o600).
-        _max_mb = CONFIG.get("max_stream_mb", 100)
-        _MAX_OPEN_BYTES = _max_mb * 1024 * 1024 if _max_mb > 0 else float("inf")
-        # Use `ls -l` for remote size — POSIX, works on Linux and macOS,
-        # does not read file content. Output field 4 (0-indexed) is the size.
-        _size_result = subprocess.run(
-            ["ssh"] + _ssh_opts(backend.ssh_control)
-            + [backend.remote, shlex.join(["ls", "-l", full_path_str])],
-            capture_output=True, text=True,
-        )
-        if _size_result.returncode == 0:
-            try:
-                _remote_size = int(_size_result.stdout.split()[4])
-                if _remote_size > _MAX_OPEN_BYTES:
-                    print(
-                        f"Error: remote file is too large to stream "
-                        f"({_remote_size // 1024 // 1024} MB > {_max_mb} MB limit). "
-                        f"Use ssh to access it directly.",
-                        file=sys.stderr,
-                    )
-                    return
-            except (ValueError, IndexError):
-                pass  # unparseable — proceed and let cat fail naturally
+    # ── Remote binary ──────────────────────────────────────────────────────
+    if is_remote:
+        _open_remote_binary(full_path_str, backend, self_path, window_name)
+        return
 
-        session_dir = self_path.parent if self_path is not None else WORK_BASE
-        suffix = Path(full_path_str).suffix or ""
-        fd, temp_local = tempfile.mkstemp(
-            prefix="fzfr-open-", suffix=suffix, dir=session_dir
-        )
+    # ── Local text in tmux ─────────────────────────────────────────────────
+    if _in_tmux() and _is_text_mime(mime):
+        subprocess.run([
+            "tmux", "new-window", "-n", window_name,
+            f"{safe_editor} {shlex.quote(full_path_str)}",
+        ])
+        return
+
+    # ── Local binary / text without tmux ──────────────────────────────────
+    _xdg_open(full_path_str)
+
+def _open_remote_binary(
+    full_path_str: str,
+    backend: "RemoteBackend",
+    self_path: Path | None,
+    window_name: str,
+) -> None:
+    """Stream a remote binary file locally and open with xdg-open.
+
+    SIZE GUARD: Refuses files over max_stream_mb (default 100 MB) since
+    WORK_BASE is tmpfs (RAM-backed).
+
+    SECURITY: mkstemp() creates the file with O_CREAT|O_EXCL (mode 0o600).
+    The session dir (parent of self_path) is private (mode 0o700) and is
+    removed entirely by _cleanup() on exit.
+    """
+    _max_mb = CONFIG.get("max_stream_mb", 100)
+    _max_bytes = _max_mb * 1024 * 1024 if _max_mb > 0 else float("inf")
+
+    size_result = subprocess.run(
+        ["ssh"] + _ssh_opts(backend.ssh_control)
+        + [backend.remote, shlex.join(["ls", "-l", full_path_str])],
+        capture_output=True, text=True,
+    )
+    if size_result.returncode == 0:
         try:
-            with os.fdopen(fd, "wb") as fh:
-                subprocess.run(
-                    ["ssh"]
-                    + _ssh_opts(backend.ssh_control)
-                    + [backend.remote, shlex.join(["cat", full_path_str])],
-                    stdout=fh,
+            remote_size = int(size_result.stdout.split()[4])
+            if remote_size > _max_bytes:
+                print(
+                    f"Error: remote file is too large to stream "
+                    f"({remote_size // 1024 // 1024} MB > {_max_mb} MB limit). "
+                    f"Use ssh to access it directly.",
+                    file=sys.stderr,
                 )
-        except Exception:
-            os.unlink(temp_local)
-            raise
-        _xdg_open(temp_local)
+                return
+        except (ValueError, IndexError):
+            pass  # unparseable — proceed and let cat fail naturally
 
-    elif _in_tmux() and _is_text_mime(mime):
-        # Local text file in tmux: open in a new window.
-        subprocess.run(
-            [
-                "tmux",
-                "new-window",
-                "-n",
-                window_name,
-                f"{safe_editor} {shlex.quote(full_path_str)}",
-            ]
-        )
-
-    else:
-        # Local file (binary, or text without tmux): hand off to the
-        # platform file opener. _xdg_open() uses xdg-open on Linux and
-        # 'open' on macOS, detaching immediately so fzf stays interactive.
-        _xdg_open(full_path_str)
+    session_dir = self_path.parent if self_path is not None else WORK_BASE
+    suffix      = Path(full_path_str).suffix or ""
+    fd, temp_local = tempfile.mkstemp(prefix="fzfr-open-", suffix=suffix, dir=session_dir)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            subprocess.run(
+                ["ssh"] + _ssh_opts(backend.ssh_control)
+                + [backend.remote, shlex.join(["cat", full_path_str])],
+                stdout=fh,
+            )
+    except Exception:
+        os.unlink(temp_local)
+        raise
+    _xdg_open(temp_local)
 
 def cmd_open(argv: list[str]) -> int:
     """Entry point for the fzfr-open sub-command.
 
-    Called by fzf when the user presses Enter. Receives the positional
-    arguments that build_fzf_invocation() embeds in the --bind string:
+    Called by fzf when the user presses Enter.
 
-        argv[0]  target      — "local" or the ssh host string
-        argv[1]  base_path   — absolute base directory used by fd
-        argv[2]  remote      — ssh host (same as target for remote, "" for local)
-        argv[3]  remote_dir  — unused, kept for argv compatibility with existing fzf bind strings
-        argv[4]  ssh_control — ControlPath socket, or "" to use ~/.ssh/config
-        argv[5]  state_path  — session state file
-        argv[6]  self_path   — path to the script (original or frozen)
-        argv[7]  query       — current fzf query ({q}), written to history
-        argv[8+] choices     — selected file paths ({+} expands to all of them)
-
-    remote and ssh_control arrive as empty strings for local mode. We strip
-    residual shell quotes defensively in case the caller passed literal '' tokens.
+    argv[0]  target      — "local" or the ssh host string
+    argv[1]  base_path   — absolute base directory used by fd
+    argv[2]  remote      — ssh host (same as target for remote, "" for local)
+    argv[3]  remote_dir  — unused, kept for argv compatibility
+    argv[4]  ssh_control — ControlPath socket, or "" to use ~/.ssh/config
+    argv[5]  state_path  — session state file
+    argv[6]  self_path   — path to the script (original or frozen)
+    argv[7]  query       — current fzf query ({q}), written to history
+    argv[8+] choices     — selected file paths ({+} expands to all of them)
     """
     if len(argv) < 9:
         print(
@@ -3149,47 +2888,40 @@ def cmd_open(argv: list[str]) -> int:
         )
         return 1
 
-    _, base_path, remote, _, ssh_control, state_path, self_path_str = (
-        argv[:7]
-    )
-    query = argv[7]
+    _, base_path, remote, _, ssh_control, state_path, self_path_str = argv[:7]
+    query   = argv[7]
     choices = argv[8:]
-    remote = remote.strip("'\"")
-    ssh_control = ssh_control.strip("'\"")
-    state_path = state_path.strip("'\"")
-    self_path_str = self_path_str.strip("'\"")
-    self_path = (
-        Path(self_path_str) if self_path_str and self_path_str != "None" else None
+
+    # Strip residual shell quotes that the fzf bind string may produce
+    remote, ssh_control, state_path, self_path_str = (
+        _strip_quotes(remote),
+        _strip_quotes(ssh_control),
+        _strip_quotes(state_path),
+        _strip_quotes(self_path_str),
     )
+    self_path = Path(self_path_str) if self_path_str and self_path_str != "None" else None
 
     if not choices:
         return 0
 
-    # Write the query to the history file on every Enter press.
+    # Write the query to history on every Enter press.
     # fzf only writes --history on normal exit (ESC), so queries that lead
     # to an open-and-continue workflow would never be saved without this.
-    # DESIGN: Matches fzf's own history write behaviour: the new entry is
-    #         prepended and any existing duplicate is removed, so the most
-    #         recent query always appears first when navigating with ctrl-p.
-    #         The file is capped at --history-size (default 1000) entries.
     if query and CONFIG.get("search_history", False):
         try:
-            existing = (
-                HISTORY_PATH.read_text().splitlines() if HISTORY_PATH.exists() else []
-            )
-            deduped = [query] + [e for e in existing if e != query]
-            max_entries = 1000  # matches fzf's --history-size default
-            HISTORY_PATH.write_text("\n".join(deduped[:max_entries]) + "\n")
+            existing = HISTORY_PATH.read_text().splitlines() if HISTORY_PATH.exists() else []
+            deduped  = [query] + [e for e in existing if e != query]
+            HISTORY_PATH.write_text("\n".join(deduped[:1000]) + "\n")
         except OSError:
-            pass  # non-fatal: history write failure never blocks the open
+            pass  # non-fatal
 
-    state = _load_state(Path(state_path))
+    state  = _load_state(Path(state_path))
     editor = _find_editor()
-    # Cache not needed here — cmd_open opens files, not previews.
-    if remote:
-        be: LocalBackend | RemoteBackend = RemoteBackend(remote, base_path, ssh_control)
-    else:
-        be = LocalBackend(base_path, ssh_control)
+    be: "LocalBackend | RemoteBackend" = (
+        RemoteBackend(remote, base_path, ssh_control)
+        if remote
+        else LocalBackend(base_path, ssh_control)
+    )
     for choice in choices:
         _open(choice, editor, state, self_path, be)
     return 0
@@ -3212,10 +2944,9 @@ def cmd_copy(argv: list[str]) -> int:
         return 1
 
     _, base_path, remote, ssh_control, choice = argv[:5]
-    remote = remote.strip("'\"")
+    remote      = remote.strip("'\"")
     ssh_control = ssh_control.strip("'\"")
 
-    path_to_copy: str
     choice_clean = choice.removeprefix("./")
     path_to_copy = (
         choice_clean
@@ -3223,15 +2954,10 @@ def cmd_copy(argv: list[str]) -> int:
         else str(Path(base_path) / choice_clean)
     )
 
-    # For local paths, perform safety check. For remote paths, the safety check
-    # was already done on the remote side — we are only copying the path string.
     if not remote:
         backend = LocalBackend(base_path, ssh_control)
         if not backend.is_safe_subpath(path_to_copy):
-            print(
-                f"Error: Blocked path outside search root: {path_to_copy}",
-                file=sys.stderr,
-            )
+            print(f"Error: Blocked path outside search root: {path_to_copy}", file=sys.stderr)
             return 1
 
     if "xclip" in AVAILABLE_TOOLS:
@@ -3241,10 +2967,7 @@ def cmd_copy(argv: list[str]) -> int:
     elif "wl-copy" in AVAILABLE_TOOLS:
         copy_cmd = ["wl-copy"]
     else:
-        print(
-            "Error: No clipboard tool found (xclip, pbcopy, or wl-copy needed).",
-            file=sys.stderr,
-        )
+        print("Error: No clipboard tool found (xclip, pbcopy, or wl-copy needed).", file=sys.stderr)
         return 1
 
     try:
@@ -3262,52 +2985,40 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
     """Expand a remote path to its absolute form by querying the remote host.
 
     Handles three cases that cannot be resolved locally:
-      - Empty or ".": ask the remote shell for its current directory via pwd.
-      - "~" or "~/…": ask the remote python for expanded path via stdin.
-      - Anything else: return as-is (already absolute or a known relative path).
+      - Empty or ".": ask the remote shell for its cwd via pwd.
+      - "~" or "~/...": expand via python3 -c on the remote (no shell injection).
+      - Anything else: return as-is.
 
-    We cannot rely on resolving locally here because that would expand the path
-    relative to the *local* home directory, not the remote user's home.
+    SECURITY: Tilde expansion uses python3 stdin rather than shell expansion
+    to avoid injection from a crafted remote path.
 
-    DESIGN: Both SSH branches check returncode and call sys.exit() on failure.
-            Without this, a network or auth failure would return an empty string
-            and fzf would silently search from the remote filesystem root (/).
+    DESIGN: Both SSH branches sys.exit() on failure. Without this, a network
+    or auth failure would return an empty string and fzf would silently search
+    causing fzfr to silently search from the remote filesystem root (/).
     """
     if not raw or raw == ".":
         r = subprocess.run(
             ["ssh"] + _ssh_opts(ssh_control) + [remote, "pwd"],
-            capture_output=True,
-            text=True,
+            capture_output=True, text=True,
         )
         if r.returncode != 0:
-            print(
-                f"Error: SSH failed to resolve path for {remote} (rc={r.returncode})",
-                file=sys.stderr,
-            )
+            print(f"Error: SSH failed to resolve path for {remote} (rc={r.returncode})", file=sys.stderr)
             sys.exit(1)
         return r.stdout.strip()
 
     if raw == "~" or raw.startswith("~"):
-        # DESIGN: We cannot resolve a remote tilde locally. To avoid shell
-        #         injection when expanding tildes on the remote, we use
-        #         python3 -c to call os.path.expanduser and pass the path via
-        #         stdin. fzfr already requires python3 on the remote.
         r = subprocess.run(
-            ["ssh"] + _ssh_opts(ssh_control) + [remote, "python3 -c 'import os,sys; print(os.path.expanduser(sys.stdin.read().strip()))'"],
+            ["ssh"] + _ssh_opts(ssh_control) + [remote,
+             "python3 -c 'import os,sys; print(os.path.expanduser(sys.stdin.read().strip()))'"],
             input=raw.encode("utf-8"),
             capture_output=True,
         )
         if r.returncode != 0:
-            print(
-                f"Error: SSH failed to expand tilde for {remote} (rc={r.returncode})",
-                file=sys.stderr,
-            )
+            print(f"Error: SSH failed to expand tilde for {remote} (rc={r.returncode})", file=sys.stderr)
             sys.exit(1)
         return r.stdout.decode("utf-8", errors="replace").strip()
 
     return raw
-
-
 # =============================================================================
 # remote.py
 # =============================================================================
@@ -3325,44 +3036,30 @@ def _build_remote_cmd(
     All tokens are built with shlex.join / shlex.quote so no injection
     is possible from unusual base_path, query, or extension values.
 
-    relative=True  — cd to base_path first; fd/rga run from "." so output
-                     paths are relative to the search root.
+    relative=True  — cd to base_path first; output paths are relative.
     relative=False — pass base_path directly; output paths are absolute.
     """
-    safe_base = shlex.quote(base_path)
-    fd_cmd = shlex.join(fd_args)
-    grep_cmd = shlex.join(["xargs", "-P4", "-0", "grep", "-ilF", query])
+    safe_base    = shlex.quote(base_path)
+    fd_cmd       = shlex.join(fd_args)
+    grep_cmd     = shlex.join(["xargs", "-P4", "-0", "grep", "-ilF", query])
+    error_suffix = "|| { echo 'Error: cannot access directory' >&2; exit 1; }"
 
     if not query:
-        if relative:
-            return (
-                f"cd {safe_base} 2>/dev/null && {fd_cmd} . "
-                f"|| {{ echo 'Error: cannot access directory' >&2; exit 1; }}"
-            )
-        return (
-            f"{fd_cmd} . {safe_base} "
-            f"|| {{ echo 'Error: cannot access directory' >&2; exit 1; }}"
-        )
+        root = "." if relative else f". {safe_base}"
+        prefix = f"cd {safe_base} 2>/dev/null && " if relative else ""
+        return f"{prefix}{fd_cmd} {root} {error_suffix}"
 
     if relative:
-        rga_cmd = shlex.join(
-            ["rga"] + rga_glob_args
-            + ["--files-with-matches", "--fixed-strings", query, "."]
-        )
-        fd_grep_cmd = shlex.join(fd_args + ["-0", "."])
+        rga_cmd      = shlex.join(["rga"] + rga_glob_args + ["--files-with-matches", "--fixed-strings", query, "."])
+        fd_grep_cmd  = shlex.join(fd_args + ["-0", "."])
         return (
             f"cd {safe_base} 2>/dev/null && "
             f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
         )
     else:
-        rga_cmd = shlex.join(
-            ["rga"] + rga_glob_args
-            + ["--files-with-matches", "--fixed-strings", query, base_path]
-        )
-        fd_grep_cmd = shlex.join(fd_args + ["-0", ".", base_path])
-        return (
-            f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
-        )
+        rga_cmd      = shlex.join(["rga"] + rga_glob_args + ["--files-with-matches", "--fixed-strings", query, base_path])
+        fd_grep_cmd  = shlex.join(fd_args + ["-0", ".", base_path])
+        return f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
 
 def _build_git_remote_cmd(
     hidden: bool,
@@ -3375,24 +3072,18 @@ def _build_git_remote_cmd(
 
     Always runs from base_path (cd first). Output is relative to base_path
     natively; for absolute paths we pipe through awk to prepend the base.
-    Extension filtering uses git pathspecs (-- '*.py') appended after --.
-
-    DESIGN: git ls-files does not support a content search query — this
-    function is only called for name-mode listing, never content search.
     """
-    safe_base = shlex.quote(base_path)
-    git_args = ["git", "ls-files", "-c"]
+    safe_base  = shlex.quote(base_path)
+    git_args   = ["git", "ls-files", "-c"]
     if hidden:
         git_args += ["--others", "--exclude-standard"]
     for p in exclude_patterns:
-        if not _validate_exclude_pattern(p):
-            continue
-        git_args += ["--exclude", shlex.quote(p)]
+        if _validate_exclude_pattern(p):
+            git_args += ["--exclude", shlex.quote(p)]
     exts = _parse_extensions(ext)
     if exts:
         git_args.append("--")
-        for e in exts:
-            git_args.append(f"*.{e}")
+        git_args.extend(f"*.{e}" for e in exts)
     git_cmd = shlex.join(git_args)
 
     if relative:
@@ -3400,7 +3091,6 @@ def _build_git_remote_cmd(
             f"cd {safe_base} 2>/dev/null && {git_cmd} "
             f"|| {{ echo 'Error: cannot access git repository' >&2; exit 1; }}"
         )
-    # Absolute: prepend base_path to each line
     awk_cmd = shlex.join(["awk", f'{{print "{base_path.rstrip("/")}/" $0}}'])
     return (
         f"cd {safe_base} 2>/dev/null && {git_cmd} | {awk_cmd} "
@@ -3410,16 +3100,16 @@ def _build_git_remote_cmd(
 @dataclass
 class _RemoteReloadArgs:
     """Parsed arguments for cmd_remote_reload."""
-    remote: str
-    base_path: str
-    ssh_control: str
-    ftype: str
-    ext: str
-    query: str = ""
-    hidden: bool = False
-    relative: bool = False
+    remote:           str
+    base_path:        str
+    ssh_control:      str
+    ftype:            str
+    ext:              str
+    query:            str = ""
+    hidden:           bool = False
+    relative:         bool = False
     exclude_patterns: list[str] = field(default_factory=list)
-    file_source: str = "fd"  # "fd" or "git" — "auto" resolved locally before SSH
+    file_source:      str = "fd"  # "fd" or "git" — "auto" resolved locally
 
 def _parse_remote_reload_args(argv: list[str]) -> "_RemoteReloadArgs | None":
     """Parse argv for cmd_remote_reload. Returns None on error."""
@@ -3460,28 +3150,27 @@ def _build_fd_rga_args(
     exclude_patterns: list[str],
 ) -> tuple[list[str], list[str]]:
     """Build fd and rga argument lists from shared search parameters."""
-    fd_args = ["fd", "-L", "--type", ftype]
+    fd_args:       list[str] = ["fd", "-L", "--type", ftype]
     rga_glob_args: list[str] = []
     if hidden:
         fd_args.append("--hidden")
         rga_glob_args.append("--hidden")
     for e in _parse_extensions(ext):
-        fd_args += ["-e", e]
+        fd_args       += ["-e", e]
         rga_glob_args += ["-g", f"*.{e}"]
     for p in exclude_patterns:
         if not _validate_exclude_pattern(p):
             print(f"Warning: ignoring unsafe exclude pattern {p!r}", file=sys.stderr)
             continue
-        fd_args += ["-E", p]
+        fd_args       += ["-E", p]
         rga_glob_args += ["--exclude", p]
     return fd_args, rga_glob_args
 
 def cmd_remote_reload(argv: list[str]) -> int:
     """Entry point for the fzfr-remote-reload sub-command.
 
-    Unified remote reload handler. With file_source="git" uses git ls-files
-    for name-mode listing. Otherwise uses fd with rga/grep fallback for
-    content search. The single entry point covers both list and search.
+    Unified remote reload handler: git ls-files for name-mode listing when
+    file_source="git", otherwise fd with rga/grep fallback for content search.
 
     Usage: fzfr fzfr-remote-reload <remote> <base_path> <ssh_control>
                                     <type> <ext> [query] [--hidden]
@@ -3492,35 +3181,27 @@ def cmd_remote_reload(argv: list[str]) -> int:
     if args is None:
         return 1
 
-    # git ls-files path — name mode only, no content search
     if args.file_source == "git" and args.ftype == "f" and not args.query:
         remote_cmd = _build_git_remote_cmd(
             args.hidden, args.exclude_patterns, args.base_path, args.relative
         )
-        r = subprocess.run(["ssh"] + _ssh_opts(args.ssh_control) + [args.remote, remote_cmd])
-        return r.returncode
+    else:
+        fd_args, rga_glob_args = _build_fd_rga_args(
+            args.ftype, args.ext, args.hidden, args.exclude_patterns
+        )
+        remote_cmd = _build_remote_cmd(
+            fd_args, rga_glob_args, args.query, args.base_path, args.relative
+        )
 
-    # fd / rga path (original behaviour)
-    fd_args, rga_glob_args = _build_fd_rga_args(
-        args.ftype, args.ext, args.hidden, args.exclude_patterns
-    )
-    remote_cmd = _build_remote_cmd(
-        fd_args, rga_glob_args, args.query, args.base_path, args.relative
-    )
     r = subprocess.run(["ssh"] + _ssh_opts(args.ssh_control) + [args.remote, remote_cmd])
     return r.returncode
 
 def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     """Upload SCRIPT_BYTES to the remote script cache in one SSH call.
 
-    Prefers /dev/shm/fzfr/ (tmpfs, RAM-backed, nothing persists on disk after
-    reboot) and falls back to ~/.cache/fzfr/ on systems where /dev/shm is
-    absent or not writable (e.g. macOS, some containers). Exactly one location
-    is written — never both.
-
-    Uses atomic tmp-then-rename to avoid partial reads by a concurrent
-    bootstrap call. Returns True on success, False if both locations failed
-    (caller falls back to piping SCRIPT_BYTES inline).
+    Prefers /dev/shm/fzfr/ (tmpfs, RAM-backed) and falls back to
+    ~/.cache/fzfr/. Uses atomic tmp-then-rename to avoid partial reads.
+    Returns True on success, False if both locations failed.
 
     SECURITY: SCRIPT_HASH is asserted hex-only before interpolation.
     """
@@ -3533,11 +3214,8 @@ def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     script_tmp  = f"{SCRIPT_HASH}.py.tmp"  # nosemgrep: fzfr-upload-cmd-unquoted-var
 
     install_cmd = (
-        f'if [ -d /dev/shm ] && [ -w /dev/shm ]; then '
-        f'D=/dev/shm/fzfr; '
-        f'else '
-        f'D=~/.cache/fzfr; '
-        f'fi && '
+        f'if [ -d /dev/shm ] && [ -w /dev/shm ]; then D=/dev/shm/fzfr; '
+        f'else D=~/.cache/fzfr; fi && '
         f'mkdir -p "$D" && '
         f'cat > "$D/{script_tmp}" && '                  # nosemgrep: fzfr-upload-cmd-unquoted-var
         f'mv "$D/{script_tmp}" "$D/{script_name}" && '  # nosemgrep: fzfr-upload-cmd-unquoted-var
@@ -3546,69 +3224,71 @@ def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     r = subprocess.run(ssh_prefix + [install_cmd], input=SCRIPT_BYTES)
     return r.returncode == 0
 
+def _remote_preview_run(
+    ssh_prefix: list[str],
+    remote_cmd: str,
+    capture: bool,
+) -> "tuple[int, bytes] | int":
+    """Run a remote preview command using the bootstrap/upload/inline strategy.
+
+    Three phases:
+      1. Bootstrap fast path (~250 bytes): check remote cache, run if found.
+      2. Cache miss: upload the full script once, retry bootstrap.
+      3. Fallback: pipe SCRIPT_BYTES inline (always works, ~60 KB per call).
+
+    If capture=True returns (rc, stdout_bytes).
+    If capture=False returns rc and streams to stdout directly.
+
+    DESIGN: The single implementation here removes the duplication that
+    previously existed between cmd_remote_preview and _cmd_remote_preview_capture.
+    """
+    run_kwargs: dict = {"capture_output": True} if capture else {}
+
+    def _run(input_bytes: bytes) -> "subprocess.CompletedProcess[bytes]":
+        return subprocess.run(ssh_prefix + [remote_cmd], input=input_bytes, **run_kwargs)
+
+    def _emit(r: "subprocess.CompletedProcess[bytes]") -> "tuple[int, bytes] | int":
+        if capture:
+            return r.returncode, r.stdout
+        return r.returncode
+
+    if SCRIPT_BOOTSTRAP:
+        r = _run(SCRIPT_BOOTSTRAP)
+        if r.returncode == 0:
+            return _emit(r)
+        if r.returncode == _BOOTSTRAP_CACHE_MISS and _upload_remote_script(ssh_prefix):
+            r = _run(SCRIPT_BOOTSTRAP)
+            if r.returncode == 0:
+                return _emit(r)
+        # Any other rc or failed upload: fall through to inline
+
+    r = _run(SCRIPT_BYTES)
+    return _emit(r)
+
 def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
     """Capturing variant of cmd_remote_preview — returns (rc, stdout_bytes).
 
-    Uses the bootstrap/hash caching strategy so the caller gets the benefit
-    of the ~250 byte bootstrap transfer on all subsequent calls after the
-    first visit. capture_output=True lets the caller inspect and cache the
-    rendered output before writing it to stdout.
-
-    HARDENING: Any non-zero rc from the bootstrap that is not
-    _BOOTSTRAP_CACHE_MISS falls through to the full inline SCRIPT_BYTES path
-    rather than being returned directly. This prevents a broken bootstrap from
-    silently returning rc≠0 and causing cache.put() to be skipped forever
-    (symptom: every cursor move re-fetches from remote even for visited files).
+    Used by RemoteBackend.preview() to cache the rendered output.
     """
     if len(argv) < 4:
         return 1, b""
-
     remote, base_path, ssh_control, filename = argv[0], argv[1], argv[2], argv[3]
     query = argv[4] if len(argv) > 4 else ""
 
-    full_path = (
-        filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
-    )
+    full_path  = filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
     ssh_prefix = ["ssh"] + _ssh_opts(ssh_control) + [remote]
-    if query:
-        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path, query])
-    else:
-        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path])
+    args       = ["fzfr-preview", full_path] + ([query] if query else [])
+    remote_cmd = shlex.join(["python3", "-"] + args)
 
-    # Phase 1: bootstrap fast path (~250 bytes sent).
-    if SCRIPT_BOOTSTRAP:
-        r = subprocess.run(
-            ssh_prefix + [remote_cmd],
-            input=SCRIPT_BOOTSTRAP,
-            capture_output=True,
-        )
-        if r.returncode == 0:
-            return 0, r.stdout
-        if r.returncode == _BOOTSTRAP_CACHE_MISS:
-            if _upload_remote_script(ssh_prefix):
-                r = subprocess.run(
-                    ssh_prefix + [remote_cmd],
-                    input=SCRIPT_BOOTSTRAP,
-                    capture_output=True,
-                )
-                if r.returncode == 0:
-                    return 0, r.stdout
-        # Any other rc: fall through.
-
-    # Phase 2: inline fallback.
-    r = subprocess.run(
-        ssh_prefix + [remote_cmd],
-        input=SCRIPT_BYTES,
-        capture_output=True,
-    )
-    return r.returncode, r.stdout
+    result = _remote_preview_run(ssh_prefix, remote_cmd, capture=True)
+    assert isinstance(result, tuple)
+    return result
 
 def cmd_remote_preview(argv: list[str]) -> int:
     """Entry point for the fzfr-remote-preview sub-command.
 
-    Generates a preview of a file on a remote host. Uses hash-based remote
+    Generates a preview of a file on a remote host using hash-based remote
     script caching to avoid piping the full ~60 KB script on every call.
-    See _cmd_remote_preview_capture for the full bootstrap/fallback strategy.
     """
     if len(argv) < 4:
         print(
@@ -3616,94 +3296,42 @@ def cmd_remote_preview(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 1
-
     remote, base_path, ssh_control, filename = argv[0], argv[1], argv[2], argv[3]
     query = argv[4] if len(argv) > 4 else ""
 
-    full_path = (
-        filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
-    )
+    full_path  = filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
     ssh_prefix = ["ssh"] + _ssh_opts(ssh_control) + [remote]
-    if query:
-        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path, query])
-    else:
-        remote_cmd = shlex.join(["python3", "-", "fzfr-preview", full_path])
+    args       = ["fzfr-preview", full_path] + ([query] if query else [])
+    remote_cmd = shlex.join(["python3", "-"] + args)
 
-    # Phase 1: bootstrap fast path.
-    if SCRIPT_BOOTSTRAP:
-        r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
-        if r.returncode == 0:
-            return 0
-        if r.returncode == _BOOTSTRAP_CACHE_MISS:
-            if _upload_remote_script(ssh_prefix):
-                r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BOOTSTRAP)
-                if r.returncode == 0:
-                    return 0
-        # Broken bootstrap or upload failed: fall through.
-
-    # Phase 2: inline fallback.
-    r = subprocess.run(ssh_prefix + [remote_cmd], input=SCRIPT_BYTES)
-    return r.returncode
+    result = _remote_preview_run(ssh_prefix, remote_cmd, capture=False)
+    assert isinstance(result, int)
+    return result
 # =============================================================================
 # search.py
 # =============================================================================
 
 def _self_cmd(path: Path | str | None) -> str:
-    """Return a shell-safe invocation string for the given script path.
-
-    Produces:  python3 '/absolute/path/to/script'
-
-    Using an absolute path ensures callbacks work regardless of PATH.
-    If path is None (e.g. running via stdin over SSH), returns 'python3'
-    and relies on the script being piped to the remote process.
-    """
     if path is None:
         return "python3"
     return f"python3 {shlex.quote(str(path))}"
 
-# Minimum fzf version required for the action chains used in build_fzf_invocation:
-# transform-prompt, transform-header, execute-silent, disable-search (0.38+).
 _FZF_MIN_VERSION = (0, 38)
 
 def _parse_fzf_version(version_str: str) -> tuple[int, ...]:
-    """Parse the first two numeric components from 'fzf --version' output.
-
-    fzf --version emits e.g. "0.44.1" or "0.44.1 (debian)".
-    Returns a tuple of ints for comparison, e.g. (0, 44).
-    Returns (0, 0) if the string cannot be parsed.
-    """
     m = re.match(r"(\d+)\.(\d+)", version_str.strip())
     return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 
 def check_dependencies() -> None:
-    """Verify that mandatory tools (fzf, fd) are installed and version-compatible.
-
-    Also checks that fzf meets the minimum version required for the action
-    chains (transform-prompt, transform-header, execute-silent, disable-search)
-    used by the UI bindings. Prints a warning for missing optional tools so
-    the user understands which features will be degraded.
-
-    DESIGN: Only called for local mode. In remote mode the tools run on the
-            remote host where we cannot check them without an SSH round-trip;
-            remote tool absence surfaces naturally as a fallback or empty result.
-    """
     mandatory = ["fzf", "fd"]
     optional = ["bat", "rga", "pdftotext", "tmux", "file"]
-    # PERF: Use the module-level AVAILABLE_TOOLS cache instead of calling
-    #       shutil.which() again — the results were already computed at import.
     missing_mandatory = [t for t in mandatory if t not in AVAILABLE_TOOLS]
     missing_optional = [t for t in optional if t not in AVAILABLE_TOOLS]
 
     if missing_mandatory:
-        print(
-            f"Error: Missing mandatory tools: {', '.join(missing_mandatory)}",
-            file=sys.stderr,
-        )
+        print(f"Error: Missing mandatory tools: {', '.join(missing_mandatory)}", file=sys.stderr)
         sys.exit(1)
 
-    # Version check: fzf must be >= _FZF_MIN_VERSION for the action chains
-    # used in build_fzf_invocation (transform-prompt, execute-silent, etc.).
-    # Only run if fzf was found above.
     fzf_ver_str, rc = _capture(["fzf", "--version"])
     if rc == 0:
         fzf_ver = _parse_fzf_version(fzf_ver_str)
@@ -3711,35 +3339,18 @@ def check_dependencies() -> None:
             min_str = ".".join(str(v) for v in _FZF_MIN_VERSION)
             got_str = fzf_ver_str.strip().split()[0]
             print(
-                f"Error: fzf {min_str} or later is required "
-                f"(found {got_str}). "
-                "Please upgrade fzf.",
+                f"Error: fzf {min_str} or later is required (found {got_str}). Please upgrade fzf.",
                 file=sys.stderr,
             )
             sys.exit(1)
 
     if missing_optional:
         print(
-            f"Note: Optional tools not found (reduced functionality): "
-            f"{', '.join(missing_optional)}",
+            f"Note: Optional tools not found (reduced functionality): {', '.join(missing_optional)}",
             file=sys.stderr,
         )
 
-def _dispatch_cmd(
-    ctx: SearchContext, state_path: Path, subcommand: str, *extra: str
-) -> str:
-    """Return a shell-safe callback string: python3 <script> <subcommand> <state> [extra...].
-
-    All fzf --preview, reload, and open commands are callbacks into this same
-    script via the internal dispatcher. Every one of them needs the same prefix
-    (python3 + script path + subcommand + state path), differing only in the
-    fzf placeholders that follow. Centralising that prefix here removes the
-    repeated _self_cmd / shlex.quote boilerplate from every builder.
-
-    fzf placeholders (e.g. {}, {q}, {+}) must be passed as *extra and are
-    appended verbatim — they must not be shell-quoted because fzf itself
-    performs the substitution and quoting before the sub-shell sees them.
-    """
+def _dispatch_cmd(ctx: SearchContext, state_path: Path, subcommand: str, *extra: str) -> str:
     self_cmd = _self_cmd(ctx.self_path)
     safe_state = shlex.quote(str(state_path))
     parts = [self_cmd, subcommand, safe_state] + list(extra)
@@ -3748,23 +3359,21 @@ def _dispatch_cmd(
 def _build_custom_action_binds(
     self_cmd: str,
     safe_state: str,
-    get_header: str,
     custom_actions: dict,
 ) -> list[str]:
     """Generate fzf --bind strings for the custom action leader.
 
     The which-key chained bind approach (key1+key2+key3) is not supported
-    by fzf. The leader key fires execute() which calls _internal-action-menu,
-    which uses SIGSTOP/SIGCONT to freeze fzf and handle the menu itself.
+    by fzf. The leader key fires execute-silent which calls
+    _internal-action-menu, which uses SIGSTOP/SIGCONT to freeze fzf and
+    handle the menu itself.
 
-    Only generates a single leader bind — no chaining, no +esc binds.
+    Returns a single leader bind, or an empty list when no groups are configured.
     """
     leader = custom_actions.get("leader", "ctrl-b")
     groups = custom_actions.get("groups", {})
-
     if not groups:
         return []
-
     return [
         f"--bind={leader}:execute-silent({self_cmd} _internal-action-menu {safe_state} {{+}})",
     ]
@@ -3774,25 +3383,7 @@ def build_fzf_invocation(
     fzf_remote_dir: Path,
     state_path: Path,
 ) -> list[str]:
-    """Return the complete fzf argv list for one fzfr session.
-
-    Requires fzf >= 0.38 for the action chains used:
-      execute-silent    — mutate state file without disrupting the UI
-      transform-prompt  — re-read state, print new prompt string
-      transform-header  — re-read state, print new header string
-      transform         — re-read state, emit disable-search or enable-search
-      reload            — repopulate the item list
-
-    DESIGN notes:
-      • change:reload fires on every keystroke. In content mode the dispatcher
-        runs rga/grep; in name mode it runs fd and fzf fuzzy-filters the list.
-        Both modes share the same reload command string; the dispatcher reads
-        the state file to decide what to do.
-      • {q} and {+} placeholders are left UNQUOTED. fzf shell-escapes them
-        before substitution; quoting them would cause double-escaping.
-      • --history path is passed as a plain string (not shlex.quote'd) because
-        fzf receives it as an argv element, not a shell string.
-    """
+    """Return the complete fzf argv list for one fzfr session."""
     self_cmd = _self_cmd(ctx.self_path)
     safe_state = shlex.quote(str(state_path))
     safe_self = shlex.quote(str(ctx.self_path))
@@ -3800,16 +3391,11 @@ def build_fzf_invocation(
     keybindings = CONFIG.get("keybindings", {})
 
     reload_cmd = _dispatch_cmd(ctx, state_path, "_internal-dispatch", "reload", "{q}")
-    preview_cmd = _dispatch_cmd(
-        ctx, state_path, "_internal-dispatch", "preview", "{}", "{q}"
-    )
+    preview_cmd = _dispatch_cmd(ctx, state_path, "_internal-dispatch", "preview", "{}", "{q}")
     get_prompt = f"{self_cmd} _internal-get-prompt {safe_state}"
     get_header = f"{self_cmd} _internal-get-header {safe_state}"
     get_search = f"{self_cmd} _internal-get-search-action {safe_state}"
 
-    # DESIGN: {q} is passed to fzfr-open so the query is written to history on
-    #         every Enter press. fzf only writes --history on ESC exit, so queries
-    #         that end in an open-and-continue workflow would be lost without this.
     if ctx.remote:
         open_cmd = (
             f"{self_cmd} fzfr-open {ctx.safe_remote} {ctx.safe_base} "
@@ -3823,7 +3409,6 @@ def build_fzf_invocation(
         )
 
     def _toggle(action_name: str, op: str) -> str:
-        """Build a fzf key binding: mutate state → update prompt/header/search → reload."""
         key = keybindings.get(action_name, _CONFIG_DEFAULTS["keybindings"][action_name])
         mutate = f"{self_cmd} _internal-toggle-{op} {safe_state}"
         return (
@@ -3836,15 +3421,9 @@ def build_fzf_invocation(
         )
 
     return [
-        # Static display placeholders — overwritten immediately by start: chain.
         "--prompt=: ",
         "--header= ",
-        # DESIGN: --history is omitted when search_history=false. Passed as a
-        #         plain string (not shlex.quote'd) because fzf receives it as an
-        #         argv element, not a shell string. The file stores every query
-        #         typed; users can opt out to avoid logging sensitive terms.
         *([f"--history={HISTORY_PATH}"] if CONFIG.get("search_history", False) else []),
-        # start: fires once on launch — sets prompt/header/search-mode then loads items.
         (
             f"--bind=start:"
             f"transform-prompt({get_prompt})"
@@ -3870,9 +3449,6 @@ def build_fzf_invocation(
             f"+transform-header({get_header})"
             f"+reload({reload_cmd})"
         ),
-        # Explicit history navigation binds so the keys are remappable.
-        # fzf's --history binds ctrl-p/ctrl-n implicitly; we override them
-        # here so the user can remap without losing the functionality.
         *(
             [
                 f"--bind={keybindings.get('history_prev', _CONFIG_DEFAULTS['keybindings']['history_prev'])}:previous-history",
@@ -3900,36 +3476,18 @@ def build_fzf_invocation(
                     else f"--bind={keybindings.get('copy_path', _CONFIG_DEFAULTS['keybindings']['copy_path'])}:execute-silent({self_cmd} fzfr-copy local {ctx.safe_base} '' '' {{}})"
                 )
             ]
-            if (
-                "xclip" in AVAILABLE_TOOLS
-                or "pbcopy" in AVAILABLE_TOOLS
-                or "wl-copy" in AVAILABLE_TOOLS
-            )
+            if "xclip" in AVAILABLE_TOOLS or "pbcopy" in AVAILABLE_TOOLS or "wl-copy" in AVAILABLE_TOOLS
             else []
         ),
-        # Custom action leader bind — single key fires _internal-action-menu
-        # which uses SIGSTOP/SIGCONT to freeze fzf and handle which-key itself.
         *_build_custom_action_binds(
             self_cmd=self_cmd,
             safe_state=safe_state,
-            get_header=get_header,
             custom_actions=CONFIG.get("custom_actions", {}),
         ),
     ]
 
 def _cleanup(session_dir: Path, ssh_control: str) -> None:
-    """Remove temporary files and optionally close the managed SSH master.
-
-    The SSH master is only closed when ssh_control is non-empty, i.e. when
-    config["ssh_multiplexing"] is True and fzfr created the socket
-    itself. When the user relies on their own ~/.ssh/config multiplexing we
-    do not touch their connection.
-
-    Also sweeps orphaned session directories in WORK_BASE that are older than
-    5 minutes (left over from crashed previous sessions).
-    """
-    # Only close the SSH master when we created it. If the user relies on their
-    # own ~/.ssh/config multiplexing we must not touch their connection.
+    """Remove temporary files and optionally close the managed SSH master."""
     if ssh_control and Path(ssh_control).exists():
         remote = os.environ.get("FZFR_REMOTE", "")
         if remote:
@@ -3938,15 +3496,8 @@ def _cleanup(session_dir: Path, ssh_control: str) -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-
-    # rmtree removes the frozen script, state file, remote-bin dir, SSH
-    # socket, and any fzfr-open-* temp files created during this session.
     if session_dir.exists():
         shutil.rmtree(str(session_dir), ignore_errors=True)
-
-    # Sweep orphaned session directories left behind by previous crashes or SIGKILL.
-    # The 5-minute mtime threshold avoids racing with a concurrently running session.
-    # fzfr-open-* temp files are swept by the background monitor thread instead.
     if WORK_BASE.is_dir():
         now = time.time()
         for entry in os.scandir(str(WORK_BASE)):
@@ -3958,42 +3509,41 @@ def _cleanup(session_dir: Path, ssh_control: str) -> None:
                 shutil.rmtree(entry.path, ignore_errors=True)
 
 def _find_git_root() -> str | None:
-    """Search upwards from the current directory for a .git folder.
-
-    Returns the absolute path to the directory containing .git, or None
-    if no Git repository is found.
-
-    DESIGN: Used as the default BASE_PATH when none is supplied on the command
-            line. This aligns the search root with the developer's project
-            boundary rather than defaulting to cwd, which may be a deeply
-            nested subdirectory with few results.
-    """
+    """Search upwards from cwd for a .git folder."""
     curr = Path.cwd().resolve()
     for parent in [curr] + list(curr.parents):
         if (parent / ".git").is_dir():
             return str(parent)
     return None
 
-def cmd_search(argv: list[str]) -> int:
-    """Entry point for the main fzfr UI.
+def _parse_argv(argv: list[str]) -> tuple[str, str, str, list[str]]:
+    """Parse cmd_search argv into (target, raw_base, mode, exclude_patterns).
 
-    Sets up the environment, resolves paths, writes the initial state file,
-    and runs fzf exactly once. All dynamic behaviour (mode switching, type
-    toggling, extension filtering, prompt/header updates) is handled at
-    runtime via fzf's transform actions — no process restart required.
-
-    Requires fzf >= 0.38 (transform-prompt, transform-header, disable-search,
-    change-header, execute-silent).
-
-    State file (state_path):
-        Written once here with the initial state; updated in place by
-        transform callbacks on every CTRL-T / CTRL-D / CTRL-F. The
-        _internal-dispatch preview/reload handlers read it on every fzf event.
-
-    DESIGN: Single-script, zero-remote-install architecture — the same file
-            drives the local UI, all fzf callbacks, and remote preview (via
-            stdin-over-SSH).
+    Separates --exclude flags from positional arguments so cmd_search stays
+    focused on session setup rather than argument wrangling.
     """
+    exclude_patterns: list[str] = []
+    positional: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--exclude":
+            if i + 1 < len(argv):
+                exclude_patterns.append(argv[i + 1])
+                i += 2
+            else:
+                print("Error: --exclude requires an argument.", file=sys.stderr)
+                sys.exit(1)
+        else:
+            positional.append(argv[i])
+            i += 1
+
+    target   = positional[0] if positional else "local"
+    raw_base = positional[1] if len(positional) > 1 else ""
+    mode     = positional[2] if len(positional) > 2 else CONFIG.get("default_mode", "content")
+    return target, raw_base, mode, exclude_patterns
+
+def cmd_search(argv: list[str]) -> int:
+    """Entry point for the main fzfr UI."""
     if argv and argv[0] in ("--help", "-h"):
         print((__doc__ or "").strip())
         return 0
@@ -4001,55 +3551,21 @@ def cmd_search(argv: list[str]) -> int:
         print(f"fzfr {VERSION}")
         return 0
 
-    exclude_patterns_cli: list[str] = []
-    positional_args: list[str] = []
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == "--exclude":
-            if i + 1 < len(argv):
-                exclude_patterns_cli.append(argv[i + 1])
-                i += 1  # Skip next arg as it's the pattern
-            else:
-                print("Error: --exclude requires an argument.", file=sys.stderr)
-                return 1
-        else:
-            positional_args.append(arg)
-        i += 1
-
-    target = positional_args[0] if len(positional_args) > 0 else "local"
-    raw_base = positional_args[1] if len(positional_args) > 1 else ""
-    mode = (
-        positional_args[2]
-        if len(positional_args) > 2
-        else CONFIG.get("default_mode", "content")
-    )
+    target, raw_base, mode, exclude_patterns_cli = _parse_argv(argv)
 
     if target == "local":
         check_dependencies()
     else:
         if "ssh" not in AVAILABLE_TOOLS:
-            print(
-                "Error: 'ssh' is required for remote mode but was not found in PATH.",
-                file=sys.stderr,
-            )
+            print("Error: 'ssh' is required for remote mode but was not found in PATH.", file=sys.stderr)
             sys.exit(1)
 
-    # SECURITY: mkdtemp creates the directory with mode 0o700 (owner-only),
-    #           preventing other local users from reading state, injecting
-    #           into the frozen script, or hijacking the remote-bin directory.
     session_dir = Path(tempfile.mkdtemp(prefix="fzfr-session-", dir=str(WORK_BASE)))
 
-    # SECURITY: Copy the running script into the private session dir. All fzf
-    #           callbacks reference this frozen copy, so replacing the source
-    #           file on disk after launch cannot affect this session.
     frozen_self = session_dir / "fzfr-frozen.py"
     frozen_self.write_bytes(SCRIPT_BYTES)
     frozen_self.chmod(0o700)
 
-    # DESIGN: ssh_control is non-empty only when the user has opted in via
-    #         config["ssh_multiplexing"]. Default is "" which defers all
-    #         multiplexing decisions to the user's ~/.ssh/config.
     ssh_control = ""
     if target != "local" and CONFIG.get("ssh_multiplexing"):
         ssh_control = str(session_dir / "ssh.sock")
@@ -4059,39 +3575,10 @@ def cmd_search(argv: list[str]) -> int:
     fzf_remote_dir = session_dir / "remote-bin"
     fzf_remote_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    # DESIGN: Register cleanup via both signal handlers and atexit for
-    #         defence-in-depth:
-    #
-    #         signal handlers — catch Ctrl-C (SIGINT) and external SIGTERM
-    #             so the session dir and SSH socket are removed even when
-    #             the process is killed from outside.
-    #
-    #         atexit — catches normal exits and unhandled Python exceptions
-    #             that the signal handlers cannot intercept (e.g. an
-    #             exception raised inside the try block before fzf starts).
-    #             Does NOT fire on SIGKILL, but covers far more cases than
-    #             signal handlers alone.
-    #
-    #         _cleanup() is idempotent: shutil.rmtree(ignore_errors=True) and
-    #         the SSH socket close are both no-ops on a path that no longer
-    #         exists, so the double-call from atexit + finally is harmless.
-    #
-    # LIMITATION: signal.signal() only works in the main thread. If cmd_search
-    #             is ever called from a secondary thread, remove the signal
-    #             registrations and rely solely on atexit.
     atexit.register(_cleanup, session_dir, ssh_control)
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(
-            sig,
-            lambda *_: (_cleanup(session_dir, ssh_control), sys.exit(0)),
-        )
+        signal.signal(sig, lambda *_: (_cleanup(session_dir, ssh_control), sys.exit(0)))
 
-    # Background thread: delete fzfr-open-* temp files from this session's
-    # directory once they are older than 30 seconds. Each file is a remote
-    # binary streamed for xdg-open — 30 s is enough for any application to
-    # finish reading from tmpfs. Scoped to session_dir only, so concurrent
-    # sessions never interfere with each other. Daemon thread so it never
-    # blocks process exit; _cleanup() removes anything left on exit anyway.
     def _open_file_sweeper() -> None:
         while True:
             time.sleep(10)
@@ -4108,13 +3595,11 @@ def cmd_search(argv: list[str]) -> int:
                         except OSError:
                             pass
             except OSError:
-                pass  # session_dir removed by _cleanup — thread will exit next iteration
+                pass
 
     threading.Thread(target=_open_file_sweeper, daemon=True, name="fzfr-open-sweeper").start()
 
     try:
-        # Build the backend — it resolves the base path and owns all local/remote
-        # divergence for the rest of the session.
         if target != "local":
             be: LocalBackend | RemoteBackend = RemoteBackend(target, "", ssh_control)
             base_path = be.resolve_base(raw_base)
@@ -4127,10 +3612,8 @@ def cmd_search(argv: list[str]) -> int:
             remote = ""
 
         safe_remote = shlex.quote(remote)
-        safe_base = shlex.quote(base_path)
+        safe_base   = shlex.quote(base_path)
 
-        # Initial state — persisted to disk so every fzf callback can
-        # reconstruct the backend via backend_from_state().
         state = {
             "mode": mode,
             "ftype": "f",
@@ -4148,58 +3631,35 @@ def cmd_search(argv: list[str]) -> int:
         }
         _save_state(state_path, state)
 
-        # DESIGN: SearchContext carries the quoted path/remote strings needed
-        #         by build_fzf_invocation() to embed them into fzf bind strings.
         ctx = SearchContext(
-            remote,
-            safe_remote,
-            base_path,
-            safe_base,
-            target,
-            ssh_control,
-            "f",
-            "",
-            state["exclude_patterns"],
-            frozen_self,
+            remote, safe_remote, base_path, safe_base,
+            target, ssh_control, "f", "",
+            state["exclude_patterns"], frozen_self,
         )
 
         fzf_args = build_fzf_invocation(ctx, fzf_remote_dir, state_path)
 
-        # DESIGN: In name mode, fzf needs an initial item list to fuzzy-filter
-        #         against before the user types anything. We pipe the backend's
-        #         initial list command into fzf's stdin so items appear immediately.
-        #
-        #         In content mode the list IS the search result — nothing meaningful
-        #         to show before the user types. The start: reload populates it.
+        path_format  = state["path_format"]
+        file_source  = state.get("file_source", "auto")
+
         if mode == "content":
             fzf_proc = subprocess.Popen(["fzf"] + fzf_args)
             _save_state(state_path, {**_load_state(state_path), "fzf_pid": fzf_proc.pid})
             fzf_proc.wait()
         else:
-            path_format = state["path_format"]
-            path_format = state["path_format"]
-            file_source = state.get("file_source", "auto")
             list_cmd = be.initial_list_cmd(
                 frozen_self,
                 hidden=state["show_hidden"],
                 path_format=path_format,
                 file_source=file_source,
             )
-            # DESIGN: For relative local paths, or when using git ls-files,
-            #         run the list command with cwd=base_path so output paths
-            #         are relative to the search root. git ls-files always
-            #         needs cwd=base_path to find the repo root correctly.
             list_cwd = (
                 base_path
                 if (not remote and (path_format == "relative" or file_source in ("auto", "git")))
                 else None
             )
-            list_proc = subprocess.Popen(
-                list_cmd,
-                stdout=subprocess.PIPE,
-                cwd=list_cwd,
-            )
-            fzf_proc = subprocess.Popen(["fzf"] + fzf_args, stdin=list_proc.stdout)
+            list_proc = subprocess.Popen(list_cmd, stdout=subprocess.PIPE, cwd=list_cwd)
+            fzf_proc  = subprocess.Popen(["fzf"] + fzf_args, stdin=list_proc.stdout)
             assert list_proc.stdout is not None
             list_proc.stdout.close()
             _save_state(state_path, {**_load_state(state_path), "fzf_pid": fzf_proc.pid})

@@ -5,7 +5,7 @@
 #     python3 scripts/build_single_file.py
 #
 # The output file (fzfr) is the sole distributable artefact. Never edit it
-# directly — always edit the source modules in src/fzfr/ and rebuild.
+# directly -- always edit the source modules in src/fzfr/ and rebuild.
 
 import ast
 import re
@@ -65,24 +65,45 @@ def _read_module(name):
 
 def _collect_imports(raw_sources):
     # Collect and deduplicate stdlib imports from raw (unstripped) source files.
+    # Uses ast.parse to extract only real import statements -- not lines inside
+    # docstrings or comments that happen to start with "from" or "import".
     seen = set()
     imports = []
     for src in raw_sources:
-        for line in src.splitlines():
-            stripped = line.strip()
-            if not stripped.startswith(("import ", "from ")):
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
                 continue
-            if re.match(r"from \.|from fzfr\.", stripped):
+            # Skip intra-package imports
+            if isinstance(node, ast.ImportFrom) and (
+                node.level and node.level > 0  # relative: from .x import y
+                or (node.module or "").startswith("fzfr.")  # from fzfr.x import y
+            ):
                 continue
-            if stripped not in seen:
-                seen.add(stripped)
-                imports.append(stripped)
+            # Reconstruct the import line
+            if isinstance(node, ast.Import):
+                line = "import " + ", ".join(
+                    (f"{a.name} as {a.asname}" if a.asname else a.name)
+                    for a in node.names
+                )
+            else:
+                names = ", ".join(
+                    (f"{a.name} as {a.asname}" if a.asname else a.name)
+                    for a in node.names
+                )
+                line = f"from {node.module} import {names}"
+            if line not in seen:
+                seen.add(line)
+                imports.append(line)
     return sorted(imports)
 
 
 def _get_module_doc():
     # Read the module docstring from src/fzfr/__init__.py using ast.
-    # This is the single source of truth — no circular dependency on the built file.
+    # This is the single source of truth -- no circular dependency on the built file.
     src = (SRC / "__init__.py").read_text()
     try:
         tree = ast.parse(src)
@@ -146,7 +167,7 @@ def build():
 
     output = "".join(sections)
 
-    # In the flat built file, relative imports don't exist — everything is
+    # In the flat built file, relative imports don't exist -- everything is
     # already in the global scope. Replace the try/except ImportError pattern
     # used in backends.py for circular-import resolution with a direct
     # globals() lookup, which is what the except branch already does.

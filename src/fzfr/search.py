@@ -33,70 +33,32 @@ from pathlib import Path
 
 from ._script import VERSION, SCRIPT_BYTES
 from .config import CONFIG, _CONFIG_DEFAULTS, HISTORY_PATH, AVAILABLE_TOOLS
-from .state import _save_state
+from .state import _save_state, _load_state
 from .backends import SearchContext, LocalBackend, RemoteBackend
 from .workbase import WORK_BASE
 from .utils import _capture
 
 def _self_cmd(path: Path | str | None) -> str:
-    """Return a shell-safe invocation string for the given script path.
-
-    Produces:  python3 '/absolute/path/to/script'
-
-    Using an absolute path ensures callbacks work regardless of PATH.
-    If path is None (e.g. running via stdin over SSH), returns 'python3'
-    and relies on the script being piped to the remote process.
-    """
     if path is None:
         return "python3"
     return f"python3 {shlex.quote(str(path))}"
 
-
-# Minimum fzf version required for the action chains used in build_fzf_invocation:
-# transform-prompt, transform-header, execute-silent, disable-search (0.38+).
 _FZF_MIN_VERSION = (0, 38)
 
-
 def _parse_fzf_version(version_str: str) -> tuple[int, ...]:
-    """Parse the first two numeric components from 'fzf --version' output.
-
-    fzf --version emits e.g. "0.44.1" or "0.44.1 (debian)".
-    Returns a tuple of ints for comparison, e.g. (0, 44).
-    Returns (0, 0) if the string cannot be parsed.
-    """
     m = re.match(r"(\d+)\.(\d+)", version_str.strip())
     return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 
-
 def check_dependencies() -> None:
-    """Verify that mandatory tools (fzf, fd) are installed and version-compatible.
-
-    Also checks that fzf meets the minimum version required for the action
-    chains (transform-prompt, transform-header, execute-silent, disable-search)
-    used by the UI bindings. Prints a warning for missing optional tools so
-    the user understands which features will be degraded.
-
-    DESIGN: Only called for local mode. In remote mode the tools run on the
-            remote host where we cannot check them without an SSH round-trip;
-            remote tool absence surfaces naturally as a fallback or empty result.
-    """
     mandatory = ["fzf", "fd"]
     optional = ["bat", "rga", "pdftotext", "tmux", "file"]
-    # PERF: Use the module-level AVAILABLE_TOOLS cache instead of calling
-    #       shutil.which() again — the results were already computed at import.
     missing_mandatory = [t for t in mandatory if t not in AVAILABLE_TOOLS]
     missing_optional = [t for t in optional if t not in AVAILABLE_TOOLS]
 
     if missing_mandatory:
-        print(
-            f"Error: Missing mandatory tools: {', '.join(missing_mandatory)}",
-            file=sys.stderr,
-        )
+        print(f"Error: Missing mandatory tools: {', '.join(missing_mandatory)}", file=sys.stderr)
         sys.exit(1)
 
-    # Version check: fzf must be >= _FZF_MIN_VERSION for the action chains
-    # used in build_fzf_invocation (transform-prompt, execute-silent, etc.).
-    # Only run if fzf was found above.
     fzf_ver_str, rc = _capture(["fzf", "--version"])
     if rc == 0:
         fzf_ver = _parse_fzf_version(fzf_ver_str)
@@ -104,91 +66,51 @@ def check_dependencies() -> None:
             min_str = ".".join(str(v) for v in _FZF_MIN_VERSION)
             got_str = fzf_ver_str.strip().split()[0]
             print(
-                f"Error: fzf {min_str} or later is required "
-                f"(found {got_str}). "
-                "Please upgrade fzf.",
+                f"Error: fzf {min_str} or later is required (found {got_str}). Please upgrade fzf.",
                 file=sys.stderr,
             )
             sys.exit(1)
 
     if missing_optional:
         print(
-            f"Note: Optional tools not found (reduced functionality): "
-            f"{', '.join(missing_optional)}",
+            f"Note: Optional tools not found (reduced functionality): {', '.join(missing_optional)}",
             file=sys.stderr,
         )
 
-
-def _dispatch_cmd(
-    ctx: SearchContext, state_path: Path, subcommand: str, *extra: str
-) -> str:
-    """Return a shell-safe callback string: python3 <script> <subcommand> <state> [extra...].
-
-    All fzf --preview, reload, and open commands are callbacks into this same
-    script via the internal dispatcher. Every one of them needs the same prefix
-    (python3 + script path + subcommand + state path), differing only in the
-    fzf placeholders that follow. Centralising that prefix here removes the
-    repeated _self_cmd / shlex.quote boilerplate from every builder.
-
-    fzf placeholders (e.g. {}, {q}, {+}) must be passed as *extra and are
-    appended verbatim — they must not be shell-quoted because fzf itself
-    performs the substitution and quoting before the sub-shell sees them.
-    """
+def _dispatch_cmd(ctx: SearchContext, state_path: Path, subcommand: str, *extra: str) -> str:
     self_cmd = _self_cmd(ctx.self_path)
     safe_state = shlex.quote(str(state_path))
     parts = [self_cmd, subcommand, safe_state] + list(extra)
     return " ".join(parts)
 
-
 def _build_custom_action_binds(
     self_cmd: str,
     safe_state: str,
-    get_header: str,
     custom_actions: dict,
 ) -> list[str]:
     """Generate fzf --bind strings for the custom action leader.
 
     The which-key chained bind approach (key1+key2+key3) is not supported
-    by fzf. The leader key fires execute() which calls _internal-action-menu,
-    which uses SIGSTOP/SIGCONT to freeze fzf and handle the menu itself.
+    by fzf. The leader key fires execute-silent which calls
+    _internal-action-menu, which uses SIGSTOP/SIGCONT to freeze fzf and
+    handle the menu itself.
 
-    Only generates a single leader bind — no chaining, no +esc binds.
+    Returns a single leader bind, or an empty list when no groups are configured.
     """
     leader = custom_actions.get("leader", "ctrl-b")
     groups = custom_actions.get("groups", {})
-
     if not groups:
         return []
-
     return [
         f"--bind={leader}:execute-silent({self_cmd} _internal-action-menu {safe_state} {{+}})",
     ]
-
 
 def build_fzf_invocation(
     ctx: SearchContext,
     fzf_remote_dir: Path,
     state_path: Path,
 ) -> list[str]:
-    """Return the complete fzf argv list for one fzfr session.
-
-    Requires fzf >= 0.38 for the action chains used:
-      execute-silent    — mutate state file without disrupting the UI
-      transform-prompt  — re-read state, print new prompt string
-      transform-header  — re-read state, print new header string
-      transform         — re-read state, emit disable-search or enable-search
-      reload            — repopulate the item list
-
-    DESIGN notes:
-      • change:reload fires on every keystroke. In content mode the dispatcher
-        runs rga/grep; in name mode it runs fd and fzf fuzzy-filters the list.
-        Both modes share the same reload command string; the dispatcher reads
-        the state file to decide what to do.
-      • {q} and {+} placeholders are left UNQUOTED. fzf shell-escapes them
-        before substitution; quoting them would cause double-escaping.
-      • --history path is passed as a plain string (not shlex.quote'd) because
-        fzf receives it as an argv element, not a shell string.
-    """
+    """Return the complete fzf argv list for one fzfr session."""
     self_cmd = _self_cmd(ctx.self_path)
     safe_state = shlex.quote(str(state_path))
     safe_self = shlex.quote(str(ctx.self_path))
@@ -196,16 +118,11 @@ def build_fzf_invocation(
     keybindings = CONFIG.get("keybindings", {})
 
     reload_cmd = _dispatch_cmd(ctx, state_path, "_internal-dispatch", "reload", "{q}")
-    preview_cmd = _dispatch_cmd(
-        ctx, state_path, "_internal-dispatch", "preview", "{}", "{q}"
-    )
+    preview_cmd = _dispatch_cmd(ctx, state_path, "_internal-dispatch", "preview", "{}", "{q}")
     get_prompt = f"{self_cmd} _internal-get-prompt {safe_state}"
     get_header = f"{self_cmd} _internal-get-header {safe_state}"
     get_search = f"{self_cmd} _internal-get-search-action {safe_state}"
 
-    # DESIGN: {q} is passed to fzfr-open so the query is written to history on
-    #         every Enter press. fzf only writes --history on ESC exit, so queries
-    #         that end in an open-and-continue workflow would be lost without this.
     if ctx.remote:
         open_cmd = (
             f"{self_cmd} fzfr-open {ctx.safe_remote} {ctx.safe_base} "
@@ -219,7 +136,6 @@ def build_fzf_invocation(
         )
 
     def _toggle(action_name: str, op: str) -> str:
-        """Build a fzf key binding: mutate state → update prompt/header/search → reload."""
         key = keybindings.get(action_name, _CONFIG_DEFAULTS["keybindings"][action_name])
         mutate = f"{self_cmd} _internal-toggle-{op} {safe_state}"
         return (
@@ -232,15 +148,9 @@ def build_fzf_invocation(
         )
 
     return [
-        # Static display placeholders — overwritten immediately by start: chain.
         "--prompt=: ",
         "--header= ",
-        # DESIGN: --history is omitted when search_history=false. Passed as a
-        #         plain string (not shlex.quote'd) because fzf receives it as an
-        #         argv element, not a shell string. The file stores every query
-        #         typed; users can opt out to avoid logging sensitive terms.
         *([f"--history={HISTORY_PATH}"] if CONFIG.get("search_history", False) else []),
-        # start: fires once on launch — sets prompt/header/search-mode then loads items.
         (
             f"--bind=start:"
             f"transform-prompt({get_prompt})"
@@ -266,9 +176,6 @@ def build_fzf_invocation(
             f"+transform-header({get_header})"
             f"+reload({reload_cmd})"
         ),
-        # Explicit history navigation binds so the keys are remappable.
-        # fzf's --history binds ctrl-p/ctrl-n implicitly; we override them
-        # here so the user can remap without losing the functionality.
         *(
             [
                 f"--bind={keybindings.get('history_prev', _CONFIG_DEFAULTS['keybindings']['history_prev'])}:previous-history",
@@ -296,37 +203,19 @@ def build_fzf_invocation(
                     else f"--bind={keybindings.get('copy_path', _CONFIG_DEFAULTS['keybindings']['copy_path'])}:execute-silent({self_cmd} fzfr-copy local {ctx.safe_base} '' '' {{}})"
                 )
             ]
-            if (
-                "xclip" in AVAILABLE_TOOLS
-                or "pbcopy" in AVAILABLE_TOOLS
-                or "wl-copy" in AVAILABLE_TOOLS
-            )
+            if "xclip" in AVAILABLE_TOOLS or "pbcopy" in AVAILABLE_TOOLS or "wl-copy" in AVAILABLE_TOOLS
             else []
         ),
-        # Custom action leader bind — single key fires _internal-action-menu
-        # which uses SIGSTOP/SIGCONT to freeze fzf and handle which-key itself.
         *_build_custom_action_binds(
             self_cmd=self_cmd,
             safe_state=safe_state,
-            get_header=get_header,
             custom_actions=CONFIG.get("custom_actions", {}),
         ),
     ]
 
 
 def _cleanup(session_dir: Path, ssh_control: str) -> None:
-    """Remove temporary files and optionally close the managed SSH master.
-
-    The SSH master is only closed when ssh_control is non-empty, i.e. when
-    config["ssh_multiplexing"] is True and fzfr created the socket
-    itself. When the user relies on their own ~/.ssh/config multiplexing we
-    do not touch their connection.
-
-    Also sweeps orphaned session directories in WORK_BASE that are older than
-    5 minutes (left over from crashed previous sessions).
-    """
-    # Only close the SSH master when we created it. If the user relies on their
-    # own ~/.ssh/config multiplexing we must not touch their connection.
+    """Remove temporary files and optionally close the managed SSH master."""
     if ssh_control and Path(ssh_control).exists():
         remote = os.environ.get("FZFR_REMOTE", "")
         if remote:
@@ -335,15 +224,8 @@ def _cleanup(session_dir: Path, ssh_control: str) -> None:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-
-    # rmtree removes the frozen script, state file, remote-bin dir, SSH
-    # socket, and any fzfr-open-* temp files created during this session.
     if session_dir.exists():
         shutil.rmtree(str(session_dir), ignore_errors=True)
-
-    # Sweep orphaned session directories left behind by previous crashes or SIGKILL.
-    # The 5-minute mtime threshold avoids racing with a concurrently running session.
-    # fzfr-open-* temp files are swept by the background monitor thread instead.
     if WORK_BASE.is_dir():
         now = time.time()
         for entry in os.scandir(str(WORK_BASE)):
@@ -356,16 +238,7 @@ def _cleanup(session_dir: Path, ssh_control: str) -> None:
 
 
 def _find_git_root() -> str | None:
-    """Search upwards from the current directory for a .git folder.
-
-    Returns the absolute path to the directory containing .git, or None
-    if no Git repository is found.
-
-    DESIGN: Used as the default BASE_PATH when none is supplied on the command
-            line. This aligns the search root with the developer's project
-            boundary rather than defaulting to cwd, which may be a deeply
-            nested subdirectory with few results.
-    """
+    """Search upwards from cwd for a .git folder."""
     curr = Path.cwd().resolve()
     for parent in [curr] + list(curr.parents):
         if (parent / ".git").is_dir():
@@ -373,26 +246,35 @@ def _find_git_root() -> str | None:
     return None
 
 
-def cmd_search(argv: list[str]) -> int:
-    """Entry point for the main fzfr UI.
+def _parse_argv(argv: list[str]) -> tuple[str, str, str, list[str]]:
+    """Parse cmd_search argv into (target, raw_base, mode, exclude_patterns).
 
-    Sets up the environment, resolves paths, writes the initial state file,
-    and runs fzf exactly once. All dynamic behaviour (mode switching, type
-    toggling, extension filtering, prompt/header updates) is handled at
-    runtime via fzf's transform actions — no process restart required.
-
-    Requires fzf >= 0.38 (transform-prompt, transform-header, disable-search,
-    change-header, execute-silent).
-
-    State file (state_path):
-        Written once here with the initial state; updated in place by
-        transform callbacks on every CTRL-T / CTRL-D / CTRL-F. The
-        _internal-dispatch preview/reload handlers read it on every fzf event.
-
-    DESIGN: Single-script, zero-remote-install architecture — the same file
-            drives the local UI, all fzf callbacks, and remote preview (via
-            stdin-over-SSH).
+    Separates --exclude flags from positional arguments so cmd_search stays
+    focused on session setup rather than argument wrangling.
     """
+    exclude_patterns: list[str] = []
+    positional: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--exclude":
+            if i + 1 < len(argv):
+                exclude_patterns.append(argv[i + 1])
+                i += 2
+            else:
+                print("Error: --exclude requires an argument.", file=sys.stderr)
+                sys.exit(1)
+        else:
+            positional.append(argv[i])
+            i += 1
+
+    target   = positional[0] if positional else "local"
+    raw_base = positional[1] if len(positional) > 1 else ""
+    mode     = positional[2] if len(positional) > 2 else CONFIG.get("default_mode", "content")
+    return target, raw_base, mode, exclude_patterns
+
+
+def cmd_search(argv: list[str]) -> int:
+    """Entry point for the main fzfr UI."""
     if argv and argv[0] in ("--help", "-h"):
         print((__doc__ or "").strip())
         return 0
@@ -400,55 +282,21 @@ def cmd_search(argv: list[str]) -> int:
         print(f"fzfr {VERSION}")
         return 0
 
-    exclude_patterns_cli: list[str] = []
-    positional_args: list[str] = []
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-        if arg == "--exclude":
-            if i + 1 < len(argv):
-                exclude_patterns_cli.append(argv[i + 1])
-                i += 1  # Skip next arg as it's the pattern
-            else:
-                print("Error: --exclude requires an argument.", file=sys.stderr)
-                return 1
-        else:
-            positional_args.append(arg)
-        i += 1
-
-    target = positional_args[0] if len(positional_args) > 0 else "local"
-    raw_base = positional_args[1] if len(positional_args) > 1 else ""
-    mode = (
-        positional_args[2]
-        if len(positional_args) > 2
-        else CONFIG.get("default_mode", "content")
-    )
+    target, raw_base, mode, exclude_patterns_cli = _parse_argv(argv)
 
     if target == "local":
         check_dependencies()
     else:
         if "ssh" not in AVAILABLE_TOOLS:
-            print(
-                "Error: 'ssh' is required for remote mode but was not found in PATH.",
-                file=sys.stderr,
-            )
+            print("Error: 'ssh' is required for remote mode but was not found in PATH.", file=sys.stderr)
             sys.exit(1)
 
-    # SECURITY: mkdtemp creates the directory with mode 0o700 (owner-only),
-    #           preventing other local users from reading state, injecting
-    #           into the frozen script, or hijacking the remote-bin directory.
     session_dir = Path(tempfile.mkdtemp(prefix="fzfr-session-", dir=str(WORK_BASE)))
 
-    # SECURITY: Copy the running script into the private session dir. All fzf
-    #           callbacks reference this frozen copy, so replacing the source
-    #           file on disk after launch cannot affect this session.
     frozen_self = session_dir / "fzfr-frozen.py"
     frozen_self.write_bytes(SCRIPT_BYTES)
     frozen_self.chmod(0o700)
 
-    # DESIGN: ssh_control is non-empty only when the user has opted in via
-    #         config["ssh_multiplexing"]. Default is "" which defers all
-    #         multiplexing decisions to the user's ~/.ssh/config.
     ssh_control = ""
     if target != "local" and CONFIG.get("ssh_multiplexing"):
         ssh_control = str(session_dir / "ssh.sock")
@@ -458,39 +306,10 @@ def cmd_search(argv: list[str]) -> int:
     fzf_remote_dir = session_dir / "remote-bin"
     fzf_remote_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    # DESIGN: Register cleanup via both signal handlers and atexit for
-    #         defence-in-depth:
-    #
-    #         signal handlers — catch Ctrl-C (SIGINT) and external SIGTERM
-    #             so the session dir and SSH socket are removed even when
-    #             the process is killed from outside.
-    #
-    #         atexit — catches normal exits and unhandled Python exceptions
-    #             that the signal handlers cannot intercept (e.g. an
-    #             exception raised inside the try block before fzf starts).
-    #             Does NOT fire on SIGKILL, but covers far more cases than
-    #             signal handlers alone.
-    #
-    #         _cleanup() is idempotent: shutil.rmtree(ignore_errors=True) and
-    #         the SSH socket close are both no-ops on a path that no longer
-    #         exists, so the double-call from atexit + finally is harmless.
-    #
-    # LIMITATION: signal.signal() only works in the main thread. If cmd_search
-    #             is ever called from a secondary thread, remove the signal
-    #             registrations and rely solely on atexit.
     atexit.register(_cleanup, session_dir, ssh_control)
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(
-            sig,
-            lambda *_: (_cleanup(session_dir, ssh_control), sys.exit(0)),
-        )
+        signal.signal(sig, lambda *_: (_cleanup(session_dir, ssh_control), sys.exit(0)))
 
-    # Background thread: delete fzfr-open-* temp files from this session's
-    # directory once they are older than 30 seconds. Each file is a remote
-    # binary streamed for xdg-open — 30 s is enough for any application to
-    # finish reading from tmpfs. Scoped to session_dir only, so concurrent
-    # sessions never interfere with each other. Daemon thread so it never
-    # blocks process exit; _cleanup() removes anything left on exit anyway.
     def _open_file_sweeper() -> None:
         while True:
             time.sleep(10)
@@ -507,13 +326,11 @@ def cmd_search(argv: list[str]) -> int:
                         except OSError:
                             pass
             except OSError:
-                pass  # session_dir removed by _cleanup — thread will exit next iteration
+                pass
 
     threading.Thread(target=_open_file_sweeper, daemon=True, name="fzfr-open-sweeper").start()
 
     try:
-        # Build the backend — it resolves the base path and owns all local/remote
-        # divergence for the rest of the session.
         if target != "local":
             be: LocalBackend | RemoteBackend = RemoteBackend(target, "", ssh_control)
             base_path = be.resolve_base(raw_base)
@@ -526,10 +343,8 @@ def cmd_search(argv: list[str]) -> int:
             remote = ""
 
         safe_remote = shlex.quote(remote)
-        safe_base = shlex.quote(base_path)
+        safe_base   = shlex.quote(base_path)
 
-        # Initial state — persisted to disk so every fzf callback can
-        # reconstruct the backend via backend_from_state().
         state = {
             "mode": mode,
             "ftype": "f",
@@ -547,58 +362,35 @@ def cmd_search(argv: list[str]) -> int:
         }
         _save_state(state_path, state)
 
-        # DESIGN: SearchContext carries the quoted path/remote strings needed
-        #         by build_fzf_invocation() to embed them into fzf bind strings.
         ctx = SearchContext(
-            remote,
-            safe_remote,
-            base_path,
-            safe_base,
-            target,
-            ssh_control,
-            "f",
-            "",
-            state["exclude_patterns"],
-            frozen_self,
+            remote, safe_remote, base_path, safe_base,
+            target, ssh_control, "f", "",
+            state["exclude_patterns"], frozen_self,
         )
 
         fzf_args = build_fzf_invocation(ctx, fzf_remote_dir, state_path)
 
-        # DESIGN: In name mode, fzf needs an initial item list to fuzzy-filter
-        #         against before the user types anything. We pipe the backend's
-        #         initial list command into fzf's stdin so items appear immediately.
-        #
-        #         In content mode the list IS the search result — nothing meaningful
-        #         to show before the user types. The start: reload populates it.
+        path_format  = state["path_format"]
+        file_source  = state.get("file_source", "auto")
+
         if mode == "content":
             fzf_proc = subprocess.Popen(["fzf"] + fzf_args)
             _save_state(state_path, {**_load_state(state_path), "fzf_pid": fzf_proc.pid})
             fzf_proc.wait()
         else:
-            path_format = state["path_format"]
-            path_format = state["path_format"]
-            file_source = state.get("file_source", "auto")
             list_cmd = be.initial_list_cmd(
                 frozen_self,
                 hidden=state["show_hidden"],
                 path_format=path_format,
                 file_source=file_source,
             )
-            # DESIGN: For relative local paths, or when using git ls-files,
-            #         run the list command with cwd=base_path so output paths
-            #         are relative to the search root. git ls-files always
-            #         needs cwd=base_path to find the repo root correctly.
             list_cwd = (
                 base_path
                 if (not remote and (path_format == "relative" or file_source in ("auto", "git")))
                 else None
             )
-            list_proc = subprocess.Popen(
-                list_cmd,
-                stdout=subprocess.PIPE,
-                cwd=list_cwd,
-            )
-            fzf_proc = subprocess.Popen(["fzf"] + fzf_args, stdin=list_proc.stdout)
+            list_proc = subprocess.Popen(list_cmd, stdout=subprocess.PIPE, cwd=list_cwd)
+            fzf_proc  = subprocess.Popen(["fzf"] + fzf_args, stdin=list_proc.stdout)
             assert list_proc.stdout is not None
             list_proc.stdout.close()
             _save_state(state_path, {**_load_state(state_path), "fzf_pid": fzf_proc.pid})

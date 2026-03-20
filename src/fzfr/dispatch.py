@@ -1,3 +1,9 @@
+"""fzfr.dispatch — _internal-dispatch router for preview and reload callbacks.
+
+Reconstitutes the session backend from the state file on every call and
+delegates to backend.preview() or backend.reload(). All local/remote
+branching is encapsulated in the backend implementations.
+"""
 from pathlib import Path
 
 from .state import _load_state
@@ -23,18 +29,18 @@ def cmd_dispatch(argv: list[str]) -> int:
     if not state:
         return 1
 
-    backend = backend_from_state(state)
-    mode = state.get("mode", "content")
-    ftype = state.get("ftype", "f")
-    ext = state.get("ext", "")
-    hidden = state.get("show_hidden", False)
+    backend         = backend_from_state(state)
+    mode            = state.get("mode", "content")
+    ftype           = state.get("ftype", "f")
+    ext             = state.get("ext", "")
+    hidden          = state.get("show_hidden", False)
     exclude_patterns = state.get("exclude_patterns", [])
-    path_format = state.get("path_format", "absolute")
-    file_source = state.get("file_source", "auto")
+    path_format     = state.get("path_format", "absolute")
+    file_source     = state.get("file_source", "auto")
 
     if command == "preview":
         filename = command_args[0] if command_args else ""
-        query = command_args[1] if len(command_args) > 1 else ""
+        query    = command_args[1] if len(command_args) > 1 else ""
         if filename and not Path(filename).is_absolute():
             base_path = state.get("base_path", "")
             if base_path:
