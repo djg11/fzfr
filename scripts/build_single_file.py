@@ -12,14 +12,29 @@ import re
 import sys
 from pathlib import Path
 
+
 REPO_ROOT = Path(__file__).parent.parent
 SRC = REPO_ROOT / "src" / "fzfr"
 OUT = REPO_ROOT / "fzfr"
 
 MODULE_ORDER = [
-    "_script", "utils", "workbase", "config", "tty", "ssh", "state", "cache",
-    "archive", "backends", "preview", "internal", "dispatch",
-    "open", "copy", "remote", "search",
+    "_script",
+    "utils",
+    "workbase",
+    "config",
+    "tty",
+    "ssh",
+    "state",
+    "cache",
+    "archive",
+    "backends",
+    "preview",
+    "internal",
+    "dispatch",
+    "open",
+    "copy",
+    "remote",
+    "search",
 ]
 
 # Multi-line intra-package imports (from .X import ... or from fzfr.X import ...)
@@ -57,9 +72,9 @@ def _read_module(name):
     # Imports are collected separately and placed once at the top.
     source = (SRC / f"{name}.py").read_text()
     source = _strip_docstring(source)
-    source = INTRA_IMPORT_RE.sub("", source)   # strip intra-package (multi-line safe)
+    source = INTRA_IMPORT_RE.sub("", source)  # strip intra-package (multi-line safe)
     source = STDLIB_IMPORT_RE.sub("", source)  # strip stdlib (single-line)
-    source = re.sub(r"\n{3,}", "\n\n", source) # collapse excess blank lines
+    source = re.sub(r"\n{3,}", "\n\n", source)  # collapse excess blank lines
     return source.lstrip("\n")
 
 
@@ -75,11 +90,12 @@ def _collect_imports(raw_sources):
         except SyntaxError:
             continue
         for node in ast.walk(tree):
-            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            if not isinstance(node, ast.Import | ast.ImportFrom):
                 continue
             # Skip intra-package imports
             if isinstance(node, ast.ImportFrom) and (
-                node.level and node.level > 0  # relative: from .x import y
+                node.level
+                and node.level > 0  # relative: from .x import y
                 or (node.module or "").startswith("fzfr.")  # from fzfr.x import y
             ):
                 continue
@@ -142,8 +158,8 @@ def build():
         "if _sys.version_info < (3, 10):  "
         "# type: ignore[comparison-overlap, unreachable]\n"
         "    print(  # type: ignore[unreachable]\n"
-        "        f\"Error: fzfr requires Python 3.10 or later \"\n"
-        "        f\"(found {_sys.version_info.major}.{_sys.version_info.minor}).\",\n"
+        '        f"Error: fzfr requires Python 3.10 or later "\n'
+        '        f"(found {_sys.version_info.major}.{_sys.version_info.minor}).",\n'
         "        file=_sys.stderr,\n"
         "    )\n"
         "    _sys.exit(1)\n\n"
@@ -157,13 +173,9 @@ def build():
     ]
 
     for mod_name, src in module_sources:
-        sections.append(
-            f"# {'=' * 77}\n# {mod_name}.py\n# {'=' * 77}\n\n" + src + "\n"
-        )
+        sections.append(f"# {'=' * 77}\n# {mod_name}.py\n# {'=' * 77}\n\n" + src + "\n")
 
-    sections.append(
-        f"# {'=' * 77}\n# entry point\n# {'=' * 77}\n\n" + init_src
-    )
+    sections.append(f"# {'=' * 77}\n# entry point\n# {'=' * 77}\n\n" + init_src)
 
     output = "".join(sections)
 
@@ -178,15 +190,15 @@ def build():
     #   except ImportError:
     #       Y = globals()["Y"]  # flat built file
     output = re.sub(
-        r'( *)try:\n\1    from \.[^\n]+\n\1except ImportError:\n\1    (\w+ = globals\(\)\["\w+"\])  # flat built file\n',
-        r'\1\2\n',
+        r'( *)try:\n\1    from \.[^\n]+\n\1except ImportError:\n\1    (\w+ = globals\(\)\["\w+"\])  # flat built file\n(?:\n)?',
+        r"\1\2\n",
         output,
     )
 
     # Safety pass: strip any remaining relative imports that slipped through
     # (e.g. late imports inside function bodies). In the flat file every
     # symbol is already in scope so these are never needed.
-    output = re.sub(r'^[ \t]*from \.[^\n]+\n', '', output, flags=re.MULTILINE)
+    output = re.sub(r"^[ \t]*from \.[^\n]+\n", "", output, flags=re.MULTILINE)
 
     try:
         ast.parse(output)
@@ -195,7 +207,9 @@ def build():
         sys.exit(1)
 
     OUT.write_text(output)
-    OUT.chmod(0o755)    # nosemgrep: fzfr-world-readable-chmod -- executable script, world-read intentional
+    OUT.chmod(
+        0o755
+    )  # nosemgrep: fzfr-world-readable-chmod -- executable script, world-read intentional
 
     lines = output.count("\n")
     size_kb = OUT.stat().st_size / 1024

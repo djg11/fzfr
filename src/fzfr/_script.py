@@ -1,17 +1,18 @@
-"""fzfr._script — VERSION and script-self-reference constants.
+"""fzfr._script -- VERSION and script-self-reference constants.
 
 This module has NO imports from other fzfr submodules so it can be
 safely imported by any module without creating circular dependencies.
 
 Constants exported for use by remote.py and search.py:
 
-    VERSION          — human-readable version string
-    SELF             — absolute path to the built single-file fzfr script
-    SCRIPT_BYTES     — full contents of the built script (read once at startup)
-    SCRIPT_HASH      — 16-char hex SHA-256 prefix of SCRIPT_BYTES
-    SCRIPT_BOOTSTRAP — tiny bootstrap sent to the remote on every preview call
-    _BOOTSTRAP_CACHE_MISS — sentinel exit code meaning the remote cache is cold
+    VERSION          -- human-readable version string
+    SELF             -- absolute path to the built single-file fzfr script
+    SCRIPT_BYTES     -- full contents of the built script (read once at startup)
+    SCRIPT_HASH      -- 16-char hex SHA-256 prefix of SCRIPT_BYTES
+    SCRIPT_BOOTSTRAP -- tiny bootstrap sent to the remote on every preview call
+    _BOOTSTRAP_CACHE_MISS -- sentinel exit code meaning the remote cache is cold
 """
+import sys
 
 import hashlib
 from pathlib import Path
@@ -26,7 +27,7 @@ _SHEBANG = b"#!/usr/bin/env python3"
 def _is_built_script(path: Path) -> bool:
     """Return True if path is the built single-file fzfr script.
 
-    Checks for the shebang line rather than file size — size thresholds are
+    Checks for the shebang line rather than file size -- size thresholds are
     fragile as the codebase grows or shrinks.
     """
     try:
@@ -53,10 +54,9 @@ def _find_self() -> str | None:
         return str(built)
     # Fallback: running from src/ without a built file.
     # Local search works fine; SSH remote preview will send the wrong script.
-    import sys as _sys
     print(
-        "fzfr: warning: built fzfr not found — run 'make build' for SSH remote preview.",
-        file=_sys.stderr,
+        "fzfr: warning: built fzfr not found -- run 'make build' for SSH remote preview.",
+        file=sys.stderr,
     )
     return str(here) if here.exists() else None
 
@@ -80,12 +80,12 @@ SCRIPT_HASH: str = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES
 # Checks /dev/shm/fzfr/<hash>.py first (tmpfs, RAM-backed, preferred) then
 # ~/.cache/fzfr/<hash>.py (persistent disk fallback on macOS and systems
 # without /dev/shm). On hit: runs the cached file directly as a path argument
-# — one python3 process. On miss: exits 99 so _upload_remote_script() uploads
+# -- one python3 process. On miss: exits 99 so _upload_remote_script() uploads
 # to exactly one of those locations and retries.
 #
-# PERF: Uses os.path.exists() only — no file read, no hash computation on
+# PERF: Uses os.path.exists() only -- no file read, no hash computation on
 # the hot path. The hash embedded in the filename is the integrity check:
-# _upload_remote_script writes atomically (tmp → rename) so the file at
+# _upload_remote_script writes atomically (tmp -> rename) so the file at
 # that path is always either absent or complete. Reading and hashing 60KB on
 # every preview call adds measurable latency on low-latency (LAN) links where
 # the SSH RTT is only ~1ms, so the exists() check is deliberately kept cheap.

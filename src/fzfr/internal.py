@@ -1,9 +1,15 @@
 """fzfr.internal -- fzf callback sub-commands (_internal-*)."""
 
+import fcntl
 import os
 import shlex
+import signal
+import struct
 import subprocess
 import sys
+import termios
+import termios as _t
+import tty as _tty
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
@@ -526,7 +532,6 @@ def _read_single_key(tty_fd: int) -> str:
     sequence sends 0x1b immediately followed by more bytes. Discard the
     full sequence and return "" so the menu loop treats it as a no-op.
     """
-    import fcntl
     b = os.read(tty_fd, 1)
     if not b:
         return ""
@@ -563,9 +568,6 @@ def _terminal_size(tty_fd: int) -> tuple[int, int]:
 
     Falls back to (24, 80) if the ioctl fails (e.g. in a pipe or test).
     """
-    import struct
-    import fcntl
-    import termios as _t
     try:
         packed = fcntl.ioctl(tty_fd, _t.TIOCGWINSZ, b"\x00" * 8)
         rows, cols = struct.unpack("HHHH", packed)[:2]
@@ -656,10 +658,6 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
 
     Usage: fzfr _internal-action-menu <state_path> [path ...]
     """
-    import signal
-    import termios
-    import tty as _tty
-
     # -- Step 1: freeze fzf immediately --
     # Must be the very first operation. execute-silent is asynchronous --
     # fzf continues running until we SIGSTOP it.

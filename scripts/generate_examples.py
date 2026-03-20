@@ -14,8 +14,6 @@ repository. Re-running this script is idempotent (existing files are
 overwritten).
 """
 
-import os
-import struct
 import textwrap
 import zipfile
 from pathlib import Path
@@ -27,6 +25,7 @@ ROOT = Path(__file__).parent.parent / "examples"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,8 +43,11 @@ def write_bytes(path: Path, content: bytes) -> None:
 # src/ — source files (syntax-highlighted preview, content search)
 # ---------------------------------------------------------------------------
 
+
 def make_src() -> None:
-    write(ROOT / "src" / "search_engine.py", """
+    write(
+        ROOT / "src" / "search_engine.py",
+        """
         \"\"\"A simple inverted index search engine.
 
         Keywords: search, index, query, token, document
@@ -91,9 +93,12 @@ def make_src() -> None:
             idx.add(3, "search and preview files via SSH")
             print(idx.search("search"))   # [1, 2, 3]
             print(idx.search("remote"))   # [1]
-    """)
+    """,
+    )
 
-    write(ROOT / "src" / "notes.txt", """\
+    write(
+        ROOT / "src" / "notes.txt",
+        """\
         Meeting Notes - Project Kickoff
         ================================
         Date: 2024-03-15
@@ -125,9 +130,12 @@ def make_src() -> None:
         -----
         Budget approved for additional tooling. Cloud costs to be monitored
         weekly. Any blockers should be escalated immediately to project lead.
-    """)
+    """,
+    )
 
-    write(ROOT / "src" / "app.log", """\
+    write(
+        ROOT / "src" / "app.log",
+        """\
         2024-03-15T08:01:02 INFO  service started on port 8080
         2024-03-15T08:01:03 INFO  database connection pool initialized (size=10)
         2024-03-15T08:01:03 INFO  cache backend connected at cache.internal:6379
@@ -150,15 +158,19 @@ def make_src() -> None:
         2024-03-15T14:30:55 INFO  deployment started: v1.4.2
         2024-03-15T14:31:10 INFO  deployment complete: v1.4.2 (duration=15s)
         2024-03-15T14:31:11 INFO  service restarted on port 8080
-    """)
+    """,
+    )
 
 
 # ---------------------------------------------------------------------------
 # docs/ — documentation files (Markdown + minimal PDF)
 # ---------------------------------------------------------------------------
 
+
 def make_docs() -> None:
-    write(ROOT / "docs" / "architecture.md", """
+    write(
+        ROOT / "docs" / "architecture.md",
+        """
         # Architecture Overview
 
         ## Search Pipeline
@@ -185,13 +197,14 @@ def make_docs() -> None:
         ## Keywords
 
         preview, search, index, remote, ssh, pipeline, session, state, cache
-    """)
+    """,
+    )
 
     # Minimal valid PDF — constructed entirely from printable text tokens.
     # No external tools required; no binary blobs stored in the repository.
     # The xref offsets must be exact for strict PDF readers.
     objects = [
-        b"",   # placeholder for object 0 (free)
+        b"",  # placeholder for object 0 (free)
         b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
         b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
         b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]\n"
@@ -293,8 +306,11 @@ def make_docs() -> None:
 # config/ — configuration examples
 # ---------------------------------------------------------------------------
 
+
 def make_config() -> None:
-    write(ROOT / "config" / "fzfr.toml", """
+    write(
+        ROOT / "config" / "fzfr.toml",
+        """
         # fzfr example configuration
         # Place at: ~/.config/fzfr/config (use JSON format, not TOML)
 
@@ -314,15 +330,19 @@ def make_config() -> None:
         toggle_hidden = "ctrl-h"
         filter_ext    = "ctrl-f"
         exit          = "esc"
-    """)
+    """,
+    )
 
 
 # ---------------------------------------------------------------------------
 # data/ — various data formats
 # ---------------------------------------------------------------------------
 
+
 def make_data() -> None:
-    write(ROOT / "data" / "metadata.json", """
+    write(
+        ROOT / "data" / "metadata.json",
+        """
         {
           "name": "fzfr",
           "description": "Fuzzy file search for local and remote filesystems",
@@ -333,29 +353,36 @@ def make_data() -> None:
             "optional": ["bat", "rga", "pdftotext", "tmux"]
           }
         }
-    """)
+    """,
+    )
 
     # ZIP archive — contents are plain text, created entirely in Python.
     import io
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("readme.txt",
-            "fzfr archive example\nKeywords: archive, zip, search, preview\n")
-        zf.writestr("notes.txt",
+        zf.writestr(
+            "readme.txt",
+            "fzfr archive example\nKeywords: archive, zip, search, preview\n",
+        )
+        zf.writestr(
+            "notes.txt",
             "This file is inside a zip archive.\n"
-            "fzfr can search inside archives using rga.\n")
-        zf.writestr("config.json",
-            '{"key": "value", "search": true, "remote": false}\n')
+            "fzfr can search inside archives using rga.\n",
+        )
+        zf.writestr(
+            "config.json", '{"key": "value", "search": true, "remote": false}\n'
+        )
     write_bytes(ROOT / "data" / "archive.zip", buf.getvalue())
 
     # Binary file — ELF magic bytes followed by a repeating byte pattern.
     # fzfr detects this as binary and shows a hex dump preview.
     # Constructed entirely from known byte sequences — no external binary.
     binary = (
-        b"\x7fELF"          # ELF magic number
-        + b"\x02\x01\x01"   # 64-bit, little-endian, ELF version 1
-        + b"\x00" * 9       # padding / ABI version
-        + bytes(range(256)) # all 256 byte values (0x00–0xff)
+        b"\x7fELF"  # ELF magic number
+        + b"\x02\x01\x01"  # 64-bit, little-endian, ELF version 1
+        + b"\x00" * 9  # padding / ABI version
+        + bytes(range(256))  # all 256 byte values (0x00–0xff)
         + b"\xde\xad\xbe\xef\xca\xfe\xba\xbe"  # recognisable markers
     )
     write_bytes(ROOT / "data" / "sample.bin", binary)
@@ -365,16 +392,17 @@ def make_data() -> None:
 # tricky names/ — edge-case filenames
 # ---------------------------------------------------------------------------
 
+
 def make_tricky() -> None:
     tricky_dir = ROOT / "tricky names"
     files = {
-        "spaces in name.txt":  "File with spaces.\nKeywords: spaces, filename\n",
-        "semi;colon.txt":      "File with a semicolon.\nKeywords: semicolon, special\n",
-        'quote"file.txt':      "File with a double quote.\nKeywords: quote, special\n",
-        "squote'file.txt":     "File with a single quote.\nKeywords: quote, special\n",
-        "$(echo safe).txt":    "File with shell metacharacters.\nKeywords: injection, safe\n",
-        "`echo safe`.txt":     "File with backticks.\nKeywords: backtick, safe\n",
-        "--help.txt":          "File whose name looks like a flag.\nKeywords: flag, dashes\n",
+        "spaces in name.txt": "File with spaces.\nKeywords: spaces, filename\n",
+        "semi;colon.txt": "File with a semicolon.\nKeywords: semicolon, special\n",
+        'quote"file.txt': "File with a double quote.\nKeywords: quote, special\n",
+        "squote'file.txt": "File with a single quote.\nKeywords: quote, special\n",
+        "$(echo safe).txt": "File with shell metacharacters.\nKeywords: injection, safe\n",
+        "`echo safe`.txt": "File with backticks.\nKeywords: backtick, safe\n",
+        "--help.txt": "File whose name looks like a flag.\nKeywords: flag, dashes\n",
     }
     for name, content in files.items():
         write(tricky_dir / name, content)
@@ -384,8 +412,11 @@ def make_tricky() -> None:
 # examples/README.md
 # ---------------------------------------------------------------------------
 
+
 def make_readme() -> None:
-    write(ROOT / "README.md", """
+    write(
+        ROOT / "README.md",
+        """
         # fzfr examples
 
         A sample directory tree for trying out fzfr features.
@@ -445,7 +476,8 @@ def make_readme() -> None:
         | `archive.zip` | File listing via `unzip -l` |
         | `sample.bin` | Hex dump via `xxd` or `hexdump` |
         | `tricky names/*` | All display and preview correctly |
-    """)
+    """,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -460,4 +492,4 @@ if __name__ == "__main__":
     make_data()
     make_tricky()
     make_readme()
-    print(f"\nDone. Run: fzfr local examples")
+    print("\nDone. Run: fzfr local examples")

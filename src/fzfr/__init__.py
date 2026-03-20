@@ -128,6 +128,7 @@ imports and deduplicates stdlib imports into one block at the top.
   search.py    main fzf UI entry point, session lifecycle
 """
 
+import ctypes
 import sys
 from pathlib import Path
 
@@ -184,10 +185,9 @@ def _set_process_name(name: str) -> None:
     'python3 /path/to/script.py', reducing visual noise for sysadmins.
     """
     try:
-        import ctypes
         ctypes.CDLL(None).prctl(15, name.encode()[:15] + b"\x00", 0, 0, 0)
     except Exception:
-        pass  # non-Linux or ctypes unavailable — harmless
+        pass  # non-Linux or ctypes unavailable -- harmless
 
 
 def main():

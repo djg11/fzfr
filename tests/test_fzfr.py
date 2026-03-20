@@ -19,7 +19,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
+
 
 # ---------------------------------------------------------------------------
 # Module import
@@ -35,20 +36,25 @@ src_path = here.parent / "src"
 if src_path.exists():
     sys.path.insert(0, str(src_path))
     import fzfr
-    from fzfr.utils import _parse_extensions, _validate_exclude_pattern
-    from fzfr.config import _CONFIG_DEFAULTS, _merge_config_key, load_config
+    from fzfr._script import _find_self, _is_built_script
+    from fzfr.archive import FileKind, classify
     from fzfr.backends import LocalBackend, RemoteBackend, backend_from_state
-    from fzfr.open import _dquote
-    from fzfr.remote import _build_fd_rga_args, _build_remote_cmd, _parse_remote_reload_args
-    from fzfr.search import _parse_fzf_version, _find_git_root
-    from fzfr._script import _is_built_script, _find_self
-    from fzfr.state import _save_state, _load_state, _mutate_state
-    from fzfr.workbase import _assert_not_symlink
-    from fzfr.archive import classify, FileKind
+    from fzfr.config import _CONFIG_DEFAULTS, _merge_config_key, load_config
     from fzfr.copy import _resolve_remote_path
+    from fzfr.open import _dquote
+    from fzfr.remote import (
+        _build_fd_rga_args,
+        _build_remote_cmd,
+        _parse_remote_reload_args,
+    )
+    from fzfr.search import _find_git_root, _parse_fzf_version
+    from fzfr.state import _load_state, _mutate_state, _save_state
+    from fzfr.utils import _parse_extensions, _validate_exclude_pattern
+    from fzfr.workbase import _assert_not_symlink
 else:
     import importlib.util
     from importlib.machinery import SourceFileLoader
+
     candidates = [here.parent / "fzfr", here.parent / "fzfr.py"]
     script = next((p for p in candidates if p.exists()), None)
     if script is None:
@@ -86,8 +92,8 @@ else:
 # _parse_extensions
 # ---------------------------------------------------------------------------
 
-class TestParseExtensions(unittest.TestCase):
 
+class TestParseExtensions(unittest.TestCase):
     def test_basic(self):
         self.assertEqual(_parse_extensions("py txt"), ["py", "txt"])
 
@@ -125,8 +131,8 @@ class TestParseExtensions(unittest.TestCase):
 # _parse_fzf_version
 # ---------------------------------------------------------------------------
 
-class TestParseFzfVersion(unittest.TestCase):
 
+class TestParseFzfVersion(unittest.TestCase):
     def test_standard_version(self):
         self.assertEqual(_parse_fzf_version("0.44.1"), (0, 44))
 
@@ -151,8 +157,8 @@ class TestParseFzfVersion(unittest.TestCase):
 # _dquote
 # ---------------------------------------------------------------------------
 
-class TestDquote(unittest.TestCase):
 
+class TestDquote(unittest.TestCase):
     def test_simple_path(self):
         self.assertEqual(_dquote("/home/user/file.txt"), '"/home/user/file.txt"')
 
@@ -192,8 +198,8 @@ class TestDquote(unittest.TestCase):
 # LocalBackend.is_safe_subpath
 # ---------------------------------------------------------------------------
 
-class TestLocalBackendIsSafeSubpath(unittest.TestCase):
 
+class TestLocalBackendIsSafeSubpath(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.be = LocalBackend(self.tmp)
@@ -232,8 +238,8 @@ class TestLocalBackendIsSafeSubpath(unittest.TestCase):
 # _merge_config_key
 # ---------------------------------------------------------------------------
 
-class TestMergeConfigKey(unittest.TestCase):
 
+class TestMergeConfigKey(unittest.TestCase):
     def test_user_value_overrides_default(self):
         cfg = dict(_CONFIG_DEFAULTS)
         _merge_config_key(cfg, "editor", "", "nvim")
@@ -286,8 +292,8 @@ class TestMergeConfigKey(unittest.TestCase):
 # _build_fd_rga_args
 # ---------------------------------------------------------------------------
 
-class TestBuildFdRgaArgs(unittest.TestCase):
 
+class TestBuildFdRgaArgs(unittest.TestCase):
     def test_basic_file_type(self):
         fd_args, rga_args = _build_fd_rga_args("f", "", False, [])
         self.assertIn("--type", fd_args)
@@ -322,8 +328,8 @@ class TestBuildFdRgaArgs(unittest.TestCase):
 # _build_remote_cmd
 # ---------------------------------------------------------------------------
 
-class TestBuildRemoteCmd(unittest.TestCase):
 
+class TestBuildRemoteCmd(unittest.TestCase):
     def _base_args(self, **kwargs):
         defaults = dict(
             fd_args=["fd", "-L", "--type", "f"],
@@ -361,8 +367,8 @@ class TestBuildRemoteCmd(unittest.TestCase):
 # _parse_remote_reload_args
 # ---------------------------------------------------------------------------
 
-class TestParseRemoteReloadArgs(unittest.TestCase):
 
+class TestParseRemoteReloadArgs(unittest.TestCase):
     def _base(self, extra=None):
         base = ["user@host", "/base/path", "/tmp/ssh_ctl", "f", ""]
         return base + (extra or [])
@@ -417,8 +423,8 @@ class TestParseRemoteReloadArgs(unittest.TestCase):
 # _is_built_script / _find_self
 # ---------------------------------------------------------------------------
 
-class TestIsBuiltScript(unittest.TestCase):
 
+class TestIsBuiltScript(unittest.TestCase):
     def test_file_with_shebang_is_built(self):
         with tempfile.NamedTemporaryFile(delete=False) as f:
             f.write(b"#!/usr/bin/env python3\nprint('hello')\n")
@@ -459,7 +465,6 @@ class TestIsBuiltScript(unittest.TestCase):
 
 
 class TestFindSelf(unittest.TestCase):
-
     def test_returns_string_or_none(self):
         result = _find_self()
         self.assertTrue(result is None or isinstance(result, str))
@@ -482,8 +487,8 @@ class TestFindSelf(unittest.TestCase):
 # backend_from_state
 # ---------------------------------------------------------------------------
 
-class TestBackendFromState(unittest.TestCase):
 
+class TestBackendFromState(unittest.TestCase):
     def _state(self, remote="", base_path="/tmp", ssh_control="", exclude=None):
         return {
             "remote": remote,
@@ -500,13 +505,19 @@ class TestBackendFromState(unittest.TestCase):
         # backend_from_state is ever called. State saved for local sessions
         # always has remote="" not remote="local". This test documents that
         # backend_from_state treats any non-empty string as an SSH host.
-        self.assertIsInstance(backend_from_state(self._state(remote="local")), RemoteBackend)
+        self.assertIsInstance(
+            backend_from_state(self._state(remote="local")), RemoteBackend
+        )
 
     def test_ssh_host_returns_remote(self):
-        self.assertIsInstance(backend_from_state(self._state(remote="user@host")), RemoteBackend)
+        self.assertIsInstance(
+            backend_from_state(self._state(remote="user@host")), RemoteBackend
+        )
 
     def test_hostname_only_returns_remote(self):
-        self.assertIsInstance(backend_from_state(self._state(remote="myserver")), RemoteBackend)
+        self.assertIsInstance(
+            backend_from_state(self._state(remote="myserver")), RemoteBackend
+        )
 
     def test_local_base_path_set(self):
         be = backend_from_state(self._state(base_path="/home/user"))
@@ -530,10 +541,11 @@ class TestBackendFromState(unittest.TestCase):
 # _save_state / _load_state / _mutate_state
 # ---------------------------------------------------------------------------
 
-class TestState(unittest.TestCase):
 
+class TestState(unittest.TestCase):
     def setUp(self):
         from fzfr.workbase import WORK_BASE
+
         WORK_BASE.mkdir(parents=True, exist_ok=True)
         self.tmp = tempfile.mkdtemp(dir=WORK_BASE)
         self.state_path = Path(self.tmp) / "state.json"
@@ -586,8 +598,8 @@ class TestState(unittest.TestCase):
 # _assert_not_symlink
 # ---------------------------------------------------------------------------
 
-class TestAssertNotSymlink(unittest.TestCase):
 
+class TestAssertNotSymlink(unittest.TestCase):
     def test_regular_directory_passes(self):
         with tempfile.TemporaryDirectory() as d:
             _assert_not_symlink(Path(d))  # must not raise
@@ -609,7 +621,10 @@ class TestAssertNotSymlink(unittest.TestCase):
             target.mkdir()
             link = Path(d) / "link"
             link.symlink_to(target)
-            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            with (
+                self.assertRaises(SystemExit),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
                 _assert_not_symlink(link)
 
 
@@ -617,8 +632,8 @@ class TestAssertNotSymlink(unittest.TestCase):
 # classify / FileKind
 # ---------------------------------------------------------------------------
 
-class TestClassify(unittest.TestCase):
 
+class TestClassify(unittest.TestCase):
     def test_pdf(self):
         self.assertEqual(classify("report.pdf"), FileKind.PDF)
 
@@ -644,7 +659,9 @@ class TestClassify(unittest.TestCase):
         self.assertEqual(classify("empty", mime="inode/x-empty"), FileKind.TEXT)
 
     def test_binary_mime(self):
-        self.assertEqual(classify("blob.bin", mime="application/octet-stream"), FileKind.BINARY)
+        self.assertEqual(
+            classify("blob.bin", mime="application/octet-stream"), FileKind.BINARY
+        )
 
     def test_unknown_extension_no_mime_is_text(self):
         # Unknown extensions default to TEXT (safe fallback for bat previewer)
@@ -662,8 +679,8 @@ class TestClassify(unittest.TestCase):
 # _find_git_root
 # ---------------------------------------------------------------------------
 
-class TestFindGitRoot(unittest.TestCase):
 
+class TestFindGitRoot(unittest.TestCase):
     def test_returns_string_or_none(self):
         result = _find_git_root()
         self.assertTrue(result is None or isinstance(result, str))
@@ -678,12 +695,14 @@ class TestFindGitRoot(unittest.TestCase):
 
     def test_outside_repo_returns_none(self):
         import subprocess
+
         old_cwd = os.getcwd()
         try:
             os.chdir("/tmp")
             check = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, cwd="/tmp",
+                capture_output=True,
+                cwd="/tmp",
             )
             if check.returncode == 0:
                 self.skipTest("/tmp happens to be inside a git repo")
@@ -696,8 +715,8 @@ class TestFindGitRoot(unittest.TestCase):
 # load_config
 # ---------------------------------------------------------------------------
 
-class TestLoadConfig(unittest.TestCase):
 
+class TestLoadConfig(unittest.TestCase):
     def test_returns_dict(self):
         self.assertIsInstance(load_config(), dict)
 
@@ -733,8 +752,8 @@ class TestLoadConfig(unittest.TestCase):
 # Security
 # ---------------------------------------------------------------------------
 
-class TestSecurity(unittest.TestCase):
 
+class TestSecurity(unittest.TestCase):
     def test_validate_exclude_pattern_safe(self):
         safe_patterns = ["*.py", "dist/", "node_modules", "foo?bar", "baz[0-9]"]
         for p in safe_patterns:
@@ -743,8 +762,18 @@ class TestSecurity(unittest.TestCase):
 
     def test_validate_exclude_pattern_unsafe(self):
         unsafe_patterns = [
-            "*.py;id", "foo|bar", "a&&b", "a||b", "$(id)", "`id`",
-            ">out", "<in", "foo\nbar", "(subshell)", "bg&", r"escape\\"
+            "*.py;id",
+            "foo|bar",
+            "a&&b",
+            "a||b",
+            "$(id)",
+            "`id`",
+            ">out",
+            "<in",
+            "foo\nbar",
+            "(subshell)",
+            "bg&",
+            r"escape\\",
         ]
         for p in unsafe_patterns:
             with self.subTest(pattern=p):

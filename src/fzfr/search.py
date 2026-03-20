@@ -1,4 +1,4 @@
-"""fzfr.search — Main search UI: fzf invocation, session lifecycle, dependencies.
+"""fzfr.search -- Main search UI: fzf invocation, session lifecycle, dependencies.
 
 Entry point is cmd_search(). It:
 
