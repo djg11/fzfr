@@ -1,4 +1,4 @@
-"""fzfr.config — Default configuration and user config loading."""
+"""fzfr.config — Defaults, user config loading, and validation."""
 
 import json
 import shutil
@@ -7,6 +7,13 @@ from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".config" / "fzfr" / "config"
 HISTORY_PATH = Path.home() / ".local" / "share" / "fzfr" / "history"
+
+# All supported overlay box positions — used by menu_position and output_position.
+_VALID_POSITIONS = {
+    "top-left", "top-center", "top-right",
+    "left-center", "center", "right-center",
+    "bottom-left", "bottom-center", "bottom-right",
+}
 
 _CONFIG_DEFAULTS: dict = {
     "ssh_multiplexing": False,
@@ -38,9 +45,23 @@ _CONFIG_DEFAULTS: dict = {
     "file_source": "auto",
     "custom_actions": {
         "leader": "ctrl-b",
+        "menu_position": "bottom-right",
+        "output_position": "bottom-left",
         "groups": {},
     },
 }
+
+
+def _validate_position(value: object, key: str, default: str) -> str:
+    """Validate a position string; warn and return default if invalid."""
+    if not isinstance(value, str) or value not in _VALID_POSITIONS:
+        print(
+            f"Warning: custom_actions.{key} {value!r} must be one of "
+            f"{sorted(_VALID_POSITIONS)} — using default {default!r}.",
+            file=sys.stderr,
+        )
+        return default
+    return value
 
 
 def _validate_custom_actions(value: object) -> "dict | None":
@@ -67,7 +88,7 @@ def _validate_custom_actions(value: object) -> "dict | None":
         "ctrl-g",  # fzf hardcoded exit — cannot be overridden
         "enter", "esc", "alt-j", "alt-k",
     }
-    _VALID_OUTPUTS = {"tmux", "preview", "silent"}
+    _VALID_OUTPUTS = {"tmux", "overlay", "silent"}
 
     if not isinstance(value, dict):
         print(
@@ -90,6 +111,13 @@ def _validate_custom_actions(value: object) -> "dict | None":
             file=sys.stderr,
         )
         leader = "ctrl-b"
+
+    menu_position = _validate_position(
+        value.get("menu_position", "bottom-right"), "menu_position", "bottom-right"
+    )
+    output_position = _validate_position(
+        value.get("output_position", "bottom-left"), "output_position", "bottom-left"
+    )
 
     raw_groups = value.get("groups", {})
     if not isinstance(raw_groups, dict):
@@ -157,6 +185,9 @@ def _validate_custom_actions(value: object) -> "dict | None":
             if not isinstance(action_label, str):
                 action_label = ""
             output = av.get("output", "silent")
+            # Accept "preview" as deprecated alias for "overlay"
+            if output == "preview":
+                output = "overlay"
             if output not in _VALID_OUTPUTS:
                 print(
                     f"Warning: custom_actions group {gk!r} action {ak!r} output "
@@ -165,12 +196,28 @@ def _validate_custom_actions(value: object) -> "dict | None":
                     file=sys.stderr,
                 )
                 output = "silent"
-            clean_actions[ak] = {"cmd": cmd, "label": action_label, "output": output}
+            # Per-action output_position overrides the global default
+            action_out_pos = _validate_position(
+                av["output_position"],
+                f"groups.{gk}.actions.{ak}.output_position",
+                output_position,
+            ) if "output_position" in av else output_position
+            clean_actions[ak] = {
+                "cmd": cmd,
+                "label": action_label,
+                "output": output,
+                "output_position": action_out_pos,
+            }
 
         if clean_actions:
             clean_groups[gk] = {"label": label, "actions": clean_actions}
 
-    return {"leader": leader, "groups": clean_groups}
+    return {
+        "leader": leader,
+        "menu_position": menu_position,
+        "output_position": output_position,
+        "groups": clean_groups,
+    }
 
 
 def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) -> None:
@@ -236,6 +283,8 @@ def load_config() -> dict:
     cfg["keybindings"] = dict(_CONFIG_DEFAULTS["keybindings"])
     cfg["custom_actions"] = {
         "leader": _CONFIG_DEFAULTS["custom_actions"]["leader"],
+        "menu_position": _CONFIG_DEFAULTS["custom_actions"]["menu_position"],
+        "output_position": _CONFIG_DEFAULTS["custom_actions"]["output_position"],
         "groups": {},
     }
     if not CONFIG_PATH.exists():

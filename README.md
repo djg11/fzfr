@@ -17,6 +17,7 @@ Fuzzy file search for local and remote filesystems.
 - **Configurable keybindings** — every key is remappable via `~/.config/fzfr/config`
 - **Path format** — display absolute or relative paths in the file list
 - **Extension filter** — narrow results to specific file types at runtime
+- **Custom actions** — bind shell commands to a leader key sequence; output in a terminal overlay, tmux window, or silently
 
 ---
 
@@ -106,6 +107,7 @@ fzfr [TARGET] [BASE_PATH] [MODE] [--exclude PATTERN ...]
 
 | Key | Action |
 |-----|--------|
+| `CTRL-B` | Open custom action menu (which-key) |
 | `CTRL-T` | Toggle content ↔ filename search |
 | `CTRL-D` | Toggle file ↔ directory search |
 | `CTRL-H` | Toggle hidden files |
@@ -139,25 +141,6 @@ All keys are configurable — see [Configuration](#configuration).
   "path_format": "relative",
   "exclude_patterns": [],
   "max_stream_mb": 100,
-  "custom_actions": {
-    "leader": "ctrl-b",
-    "groups": {
-      "g": {
-        "label": "git",
-        "actions": {
-          "a": { "cmd": "git add {paths}",    "label": "add",    "output": "silent" },
-          "r": { "cmd": "git restore {path}", "label": "restore","output": "silent" }
-        }
-      },
-      "f": {
-        "label": "file",
-        "actions": {
-          "d": { "cmd": "du -sh {path}",           "label": "disk usage",   "output": "preview" },
-          "c": { "cmd": "cat {path} | fzfr-copy",  "label": "copy content", "output": "silent"  }
-        }
-      }
-    }
-  },
   "keybindings": {
     "toggle_mode":            "ctrl-t",
     "toggle_ftype":           "ctrl-d",
@@ -186,7 +169,54 @@ All keys are configurable — see [Configuration](#configuration).
 - `search_history` — set to `true` to persist search queries across sessions. Disabled by default as queries may contain sensitive terms (filenames, hostnames). Use `CTRL-P`/`CTRL-N` to navigate history when enabled.
 - `exclude_patterns` — glob patterns always excluded from search, e.g. `[".git", "node_modules", "*.pyc"]`. Additional patterns can be added at runtime with `CTRL-X`.
 - `max_stream_mb` — maximum size in MB for streaming a remote binary file locally for opening. Files larger than this are refused with an error. Set to `0` to disable the limit. Default: `100`.
-- `custom_actions` — define shell commands triggered by a two-level which-key menu. `leader` sets the trigger key (default `ctrl-b`). Pressing the leader suspends fzf and shows a group menu; pressing a group key shows that group's actions; pressing an action key runs it. The sequencing is implemented in Python (fzf does not support sequential key binding natively). Each group has a single-character key, a label, and a dict of actions. Each action has a `cmd` (with `{path}`, `{paths}`, `{dir}`, `{base}`, `{q}` placeholders — all shell-quoted), a `label`, and an `output` mode: `"silent"` (suppress output), `"preview"` (show in preview pane), or `"tmux"` (open in new tmux window). The menu UX is in active development — see [Roadmap](TODO.md).
+
+---
+
+## Custom Actions
+
+Define custom shell commands bound to a leader key sequence (`CTRL-B` by default).
+Press the leader, then a group key, then an action key.
+
+```json
+{
+  "custom_actions": {
+    "leader": "ctrl-b",
+    "menu_position": "bottom-right",
+    "output_position": "bottom-left",
+    "groups": {
+      "f": {
+        "label": "file",
+        "actions": {
+          "d": { "cmd": "du -sh {path}", "label": "disk usage", "output": "overlay" },
+          "c": { "cmd": "cat {path}",    "label": "cat",        "output": "overlay" }
+        }
+      },
+      "g": {
+        "label": "git",
+        "actions": {
+          "l": { "cmd": "git log --oneline -20 {path}", "label": "log",    "output": "overlay" },
+          "a": { "cmd": "git add {path}",               "label": "add",    "output": "silent"  },
+          "d": { "cmd": "git diff {path}",              "label": "diff",   "output": "tmux"    }
+        }
+      }
+    }
+  }
+}
+```
+
+**Placeholders:** `{path}` (selected file), `{paths}` (all selected), `{dir}` (parent directory), `{base}` (search root), `{q}` (current query).
+
+**Output modes:**
+
+| Mode | Behaviour |
+|------|-----------|
+| `"silent"` | Run silently; stderr shown on non-zero exit |
+| `"overlay"` | Show stdout in a terminal box; press any key to dismiss |
+| `"tmux"` | Open a new tmux window and run there |
+
+**Positions** (`menu_position` / `output_position`): `top-left`, `top-center`, `top-right`, `left-center`, `center`, `right-center`, `bottom-left`, `bottom-center`, `bottom-right`.
+
+Per-action `output_position` overrides the global default.
 
 ---
 
@@ -232,7 +262,7 @@ Sub-commands are created as symlinks by `make install` and can also be called di
 make test       # run unit tests (no dependencies beyond python3)
 ```
 
-104 unit tests cover the pure-Python logic: quoting, path safety, config merging,
+108 unit tests cover the pure-Python logic: quoting, path safety, config merging,
 extension parsing, argument building, archive classification, state management,
 backend dispatch, and script self-location. They run without `fzf`, `fd`, `rga`,
 or SSH.

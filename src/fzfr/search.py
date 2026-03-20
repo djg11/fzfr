@@ -140,104 +140,30 @@ def _dispatch_cmd(
     return " ".join(parts)
 
 
+def _build_custom_action_binds(
+    self_cmd: str,
+    safe_state: str,
+    get_header: str,
+    custom_actions: dict,
+) -> list[str]:
+    """Generate fzf --bind strings for the custom action leader.
 
-# NOTE: _build_custom_action_binds disabled — fzf does not support
-# sequential key chaining (key1+key2+key3). Needs redesign as
-# mini-fzf picker. See TODO: Custom Action Trigger Redesign.
-# def _build_custom_action_binds(
-#     self_cmd: str,
-#     safe_state: str,
-#     get_header: str,
-#     custom_actions: dict,
-# ) -> list[str]:
-#     """Generate fzf --bind strings for the custom action which-key system.
-# 
-#     Produces three layers of chained binds per configured action:
-# 
-#       Layer 1 — leader key shows group list in header:
-#         leader → change-header([g] git  [f] file  [esc] cancel)
-# 
-#       Layer 2 — group key shows action list in header:
-#         leader+g → change-header(git ›  [a] add  [r] restore  [esc] cancel)
-# 
-#       Layer 3 — action key runs the command and restores normal header:
-#         leader+g+a → execute-silent(fzfr _internal-exec state g.a {+})
-#                    + transform-header(get_header)
-# 
-#     ESC bindings:
-#       leader+esc         → transform-header(get_header)   (cancel, restore)
-#       leader+g+esc       → change-header(<group list>)    (back to groups)
-# 
-#     Header strings for the which-key menus are baked at session start from
-#     the config — no subprocess spawned for group/action navigation. The
-#     "restore normal header" path uses transform-header so it correctly
-#     reflects the current mode/ext/hidden state even after CTRL-T toggles.
-# 
-#     fzf's native key1+key2+key3 chained bind syntax handles sequencing
-#     with no timeout or platform-specific interception.
-#     """
-#     leader = custom_actions.get("leader", "ctrl-space")
-#     groups = custom_actions.get("groups", {})
-# 
-#     if not groups:
-#         return []
-# 
-#     binds = []
-# 
-#     # Layer 1: leader → show group list
-#     group_list = "  ".join(
-#         f"[{gk}] {gv['label']}" for gk, gv in sorted(groups.items())
-#     )
-#     leader_header = f"actions ›  {group_list}  [esc] cancel"
-# 
-#     binds.append(
-#         f"--bind={leader}:change-header({leader_header})"
-#     )
-#     # ESC from leader level: restore dynamic header via transform-header
-#     binds.append(
-#         f"--bind={leader}+esc:transform-header({get_header})"
-#     )
-# 
-#     # Layers 2+3: per group
-#     for gk, gv in sorted(groups.items()):
-#         actions = gv.get("actions", {})
-#         g_label = gv.get("label", gk)
-# 
-#         # Layer 2: leader+group_key → show action list for this group
-#         action_list = "  ".join(
-#             f"[{ak}] {av['label']}" for ak, av in sorted(actions.items())
-#         )
-#         group_header = f"{g_label} ›  {action_list}  [esc] back"
-# 
-#         binds.append(
-#             f"--bind={leader}+{gk}:change-header({group_header})"
-#         )
-#         # ESC from group level: back to group list (static — no mode info needed)
-#         binds.append(
-#             f"--bind={leader}+{gk}+esc:change-header({leader_header})"
-#         )
-# 
-#         # Layer 3: leader+group_key+action_key → execute + restore header
-#         for ak, av in sorted(actions.items()):
-#             output = av.get("output", "silent")
-#             exec_cmd = (
-#                 f"{self_cmd} _internal-exec {safe_state} {gk}.{ak} {{+}}"
-#             )
-#             if output == "tmux":
-#                 fzf_action = f"execute({exec_cmd})"
-#             elif output == "preview":
-#                 fzf_action = f"execute({exec_cmd})+change-preview({exec_cmd})"
-#             else:  # silent
-#                 fzf_action = f"execute-silent({exec_cmd})"
-# 
-#             binds.append(
-#                 f"--bind={leader}+{gk}+{ak}:"
-#                 f"{fzf_action}"
-#                 f"+transform-header({get_header})"
-#             )
-# 
-#     return binds
-# 
+    The which-key chained bind approach (key1+key2+key3) is not supported
+    by fzf. The leader key fires execute() which calls _internal-action-menu,
+    which uses SIGSTOP/SIGCONT to freeze fzf and handle the menu itself.
+
+    Only generates a single leader bind — no chaining, no +esc binds.
+    """
+    leader = custom_actions.get("leader", "ctrl-b")
+    groups = custom_actions.get("groups", {})
+
+    if not groups:
+        return []
+
+    return [
+        f"--bind={leader}:execute-silent({self_cmd} _internal-action-menu {safe_state} {{+}})",
+    ]
+
 
 def build_fzf_invocation(
     ctx: SearchContext,
@@ -377,14 +303,14 @@ def build_fzf_invocation(
             )
             else []
         ),
-        # Custom action leader bind — stub pending action-menu redesign.
-        # TODO: replace execute target with _internal-action-menu once
-        # mini-fzf picker is implemented. The which-key chained bind
-        # approach (key1+key2+key3) is not supported by fzf.
-        *([
-            "--bind=" + CONFIG.get("custom_actions", {}).get("leader", "ctrl-b") + ":"
-            "execute(" + self_cmd + " _internal-action-menu " + safe_state + " {+})"
-        ] if CONFIG.get("custom_actions", {}).get("groups") else []),
+        # Custom action leader bind — single key fires _internal-action-menu
+        # which uses SIGSTOP/SIGCONT to freeze fzf and handle which-key itself.
+        *_build_custom_action_binds(
+            self_cmd=self_cmd,
+            safe_state=safe_state,
+            get_header=get_header,
+            custom_actions=CONFIG.get("custom_actions", {}),
+        ),
     ]
 
 
@@ -646,6 +572,7 @@ def cmd_search(argv: list[str]) -> int:
         #         to show before the user types. The start: reload populates it.
         if mode == "content":
             fzf_proc = subprocess.Popen(["fzf"] + fzf_args)
+            _save_state(state_path, {**_load_state(state_path), "fzf_pid": fzf_proc.pid})
             fzf_proc.wait()
         else:
             path_format = state["path_format"]
@@ -674,6 +601,7 @@ def cmd_search(argv: list[str]) -> int:
             fzf_proc = subprocess.Popen(["fzf"] + fzf_args, stdin=list_proc.stdout)
             assert list_proc.stdout is not None
             list_proc.stdout.close()
+            _save_state(state_path, {**_load_state(state_path), "fzf_pid": fzf_proc.pid})
             fzf_proc.wait()
             list_proc.wait()
 

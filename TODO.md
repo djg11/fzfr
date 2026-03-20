@@ -375,55 +375,170 @@ input switching.
 
 ---
 
-### Custom Action Trigger — Which-Key Implementation
+### ~~Custom Action Trigger — Which-Key Implementation~~ ✓ Done
 
 fzf's `key1+key2` bind syntax chains *actions* on a single keypress — it does
 not support sequential key sequences. We implement which-key ourselves.
 
-**Design:**
+**Implemented:**
 
-Leader key fires `execute(fzfr _internal-action-menu {state} {+})` which gives
-us full TTY control. We implement the key sequence ourselves in Python using a
-simple list to collect keypresses after the leader:
+Leader fires `execute-silent(fzfr _internal-action-menu {state} {+})`.
+`cmd_internal_action_menu` sends `SIGSTOP` to the fzf process (PID stored in
+state file) as its very first operation, then takes over the terminal:
 
 ```
 CTRL-B (leader)
-  → execute(fzfr _internal-action-menu {state_path} {+})
-      → write group menu to terminal:
-           actions ›  [g] git  [f] file  [q] cancel
-      → read one keypress → store in sequence list
-      → write action menu for that group:
-           git ›  [a] add  [r] restore  [q] back
-      → read one keypress → store in sequence list
-      → execute: cmd_internal_exec [group_key, action_key] paths
-  → first fzf resumes unchanged
+  → execute-silent → cmd_internal_action_menu starts
+      → SIGSTOP fzf immediately (before anything else)
+      → open /dev/tty, tty.setraw
+      → draw which-key box at bottom-right:
+           ╭─ actions ──────────────╮
+           │  [f] file              │
+           │  [g] git               │
+           │  [q] cancel            │
+           ╰────────────────────────╯
+      → read keypress → group key → redraw with action list
+      → read keypress → action key
+      → erase box, restore terminal, SIGCONT fzf
+      → cmd_internal_exec runs the action
 ```
 
-The sequence `[group_key, action_key]` is collected using single-keypress
-reads via `termios`/`tty` — no readline, no blocking input. We already have
-TTY access inside `execute()` since fzf suspends its UI for the duration.
+fzf is frozen the entire time — no redraw, no flicker, no screen clear.
+`cmd_search` saves `fzf_proc.pid` to the state file after `Popen`.
 
-**Implementation:**
-
-Add `cmd_internal_action_menu(argv)` to `internal.py`:
-- Open `/dev/tty` for both read and write
-- Set terminal to raw mode (`tty.setraw`) to read single keypresses
-- Write group menu, read one byte → group key
-- Write action menu for the selected group, read one byte → action key
-- `q` at either level cancels cleanly, restoring terminal state
-- Call `cmd_internal_exec` with the resolved action and paths
-- Restore terminal state (`termios.tcsetattr`) before exit
-
-The leader bind in `search.py` already calls `_internal-action-menu` as a
-stub — just implement the function body.
-
-**Files touched:** `internal.py` only. `search.py` bind is already correct.
-
-**Complexity:** Low. ~60 lines.
-
-**Depends on:** Nothing. Can be implemented immediately on a new branch.
+**Files touched:** `internal.py`, `search.py`
 
 ---
+
+### ~~Box Renderer — 9 Positions~~ ✓ Done
+
+The which-key box uses hardcoded `bottom-right` positioning. This needs to
+become a shared `_draw_box()` primitive supporting all 9 positions, used by
+the which-key menu, overlay output mode, and any future terminal UI.
+
+**9 positions:**
+
+```
+top-left      top-center      top-right
+left-center     center      right-center
+bottom-left  bottom-center  bottom-right
+```
+
+**API:**
+
+```python
+_draw_box(tty_fd, lines, position, title=None, footer=None)
+_erase_box(tty_fd)   # erases last drawn box (tracks own state)
+```
+
+Box width = max of content lines + padding, min 22, max 36 inner chars.
+Title rendered in the top border. Footer hint (e.g. `[any key] dismiss`)
+rendered in the bottom border.
+
+**Config additions to `custom_actions`:**
+
+```json
+{
+  "custom_actions": {
+    "leader": "ctrl-b",
+    "menu_position": "bottom-right",
+    "output_position": "bottom-left"
+  }
+}
+```
+
+`menu_position` — which-key box position (default `"bottom-right"`).
+`output_position` — global fallback for action output (default `"bottom-left"`).
+Each action can also set `"output_position"` individually to override.
+
+**Validate** both keys in `_validate_custom_actions()` against the 9 valid
+position strings.
+
+**Files touched:** `internal.py`, `config.py`
+
+**Complexity:** Medium. ~80 lines for renderer + config wiring.
+
+---
+
+### Output Modes — Full Roadmap
+
+**Currently working:**
+
+| Mode | Where | How |
+|------|-------|-----|
+| `"silent"` | nowhere | stderr surfaced on non-zero exit only |
+| `"tmux"` | new tmux window | `tmux new-window cmd` after SIGCONT |
+
+**~~Overlay output mode~~ ✓ Done:**
+
+| Mode | Where | Mechanism |
+|------|-------|-----------|
+| ~~`"overlay"`~~ | terminal overlay box | ✓ implemented — run cmd while fzf frozen, `_draw_box` at `output_position`, any key to dismiss, SIGCONT |
+
+Note: rename the existing `"preview"` output mode to `"overlay"` — the old
+name was misleading (implies fzf's preview pane). Update config validation
+and docs. Keep `"preview"` as a deprecated alias for one release.
+
+**Needs building — fzf-native (passed to fzf after SIGCONT):**
+
+These require a back-channel: run cmd while fzf is SIGSTOPed, write output
+to a temp file in the state dir, SIGCONT fzf, then fzf reads it via a
+`transform`/`reload` on resume.
+
+| Mode | Where | fzf mechanism |
+|------|-------|---------------|
+| `"fzf-preview"` | fzf's preview pane | write to temp file, `change-preview(cat {tmpfile})` |
+| `"fzf-results"` | fzf's results list | write lines to temp file, `reload(cat {tmpfile})` |
+| `"fzf-header"` | fzf's header line | write single line to state, `transform-header` reads it |
+
+Back-channel: after SIGCONT, fzf needs a trigger to apply the pending output.
+Approach: write `"pending_output": {mode, tmpfile}` to state, add a
+`--bind=focus:transform(fzfr _internal-apply-output {state})` that checks
+state on every focus event and fires `change-preview`/`reload`/`change-header`
+as appropriate, then clears the pending key.
+
+**Complexity:** Medium for `"overlay"`. High for fzf-native modes.
+Do `"overlay"` and Box Renderer first. fzf-native modes are Phase 2.
+
+---
+
+
+---
+
+## Build Warnings (pre-merge cleanup)
+
+The `make build` output currently shows several warnings and errors. These are
+**all from the test suite** — not from user-facing code — but they are noisy
+and should be addressed before merging.
+
+### Warning: AVAILABLE_TOOLS import in internal.py
+
+`internal.py` imports `AVAILABLE_TOOLS` from `.config` but the build script
+may not see it depending on concatenation order. Verify the import is present
+and correct in the built `fzfr` after `make build`.
+
+### Test output noise
+
+The following lines appear during `make test` and are expected — they are
+tests deliberately exercising error/rejection paths:
+
+```
+Error: /tmp/.../link is a symlink — refusing to use it as work directory.
+Warning: config key 'editor' has wrong type (expected str), using default.
+Warning: config key 'show_hidden' has wrong type (expected bool), using default.
+Warning: ignoring unsafe extension ';evil' ...
+Warning: ignoring unsafe extension 'py;evil' ...
+Warning: ignoring unsafe extension 'py$(cmd)' ...
+Warning: ignoring unsafe extension 'py`cmd`' ...
+Error: --exclude requires an argument.
+```
+
+These warnings are printed to stderr by the code under test. They are correct
+behaviour. To suppress them in test output, the test runner should redirect
+stderr per test or the tests should use `assertLogs` / `captured_output`.
+
+**Files touched:** `tests/test_fzfr.py`
+**Complexity:** Low — add stderr suppression to the relevant test cases.
 
 ### Phase 2 — Remote bridge
 
