@@ -3,9 +3,10 @@
 Dispatch logic:
   - Directory          → open in a new tmux window with fzfr (recursive search)
   - Text file, local   → open in $EDITOR in a new tmux window (or inline)
-  - Binary file, local → xdg-open / open
+  - Binary file, local → xdg-open (Linux) / open (macOS)
   - Text file, remote  → ssh -t <host> <editor> <file>
-  - Binary file, remote→ stream via SSH into the session directory, then xdg-open.
+  - Binary file, remote→ stream via SSH into the session directory, then
+                         xdg-open (Linux) / open (macOS).
                          The session directory is on tmpfs (/dev/shm) and is
                          removed entirely by _cleanup() on exit. A background
                          sweeper thread in cmd_search also removes individual
@@ -34,15 +35,20 @@ def _find_editor() -> str:
     """Return the editor to use.
 
     Priority: config file > $EDITOR > compiled-in fallback chain (nvim, vim,
-    nano, vi). Returns 'vi' as a last resort — present on virtually every
-    POSIX system.
+    vi). Returns 'vi' as a last resort — POSIX-required on every Unix system
+    (Linux, macOS, BSD).
+
+    DESIGN: nano is intentionally absent from the fallback chain. It is not
+    universally present and adds no reliability guarantee beyond what vi
+    already provides. Users who prefer nano should set $EDITOR or the
+    'editor' config key.
     """
     if CONFIG.get("editor"):
         return CONFIG["editor"]
     editor = os.environ.get("EDITOR", "")
     if editor:
         return editor
-    for c in ("nvim", "vim", "nano", "vi"):
+    for c in ("nvim", "vim", "vi"):
         if c in AVAILABLE_TOOLS:
             return c
     return "vi"
@@ -74,6 +80,35 @@ def _dquote(s: str) -> str:
     for ch in ("\\", '"', "$", "`", "!", "}"):
         s = s.replace(ch, "\\" + str(ch))
     return f'"{s}"'
+
+
+def _xdg_open(path: str) -> None:
+    """Open path with the platform file opener and detach immediately.
+
+    Uses xdg-open on Linux, open on macOS. Both are called via Popen so
+    the opener detaches and fzf remains interactive — run() would block
+    until the application closes.
+
+    DESIGN: sys.platform == "darwin" is the canonical Python check for
+    macOS. xdg-open is Linux-specific (part of xdg-utils); it does not
+    exist on macOS or BSD. 'open' is a macOS built-in, always present.
+    On BSD without a desktop environment neither tool is available — the
+    Popen call will fail with FileNotFoundError which is caught and
+    reported rather than crashing fzfr.
+    """
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    try:
+        subprocess.Popen(
+            [opener, path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        print(
+            f"Error: no file opener available ({opener!r} not found). "
+            f"Open the file manually: {path}",
+            file=sys.stderr,
+        )
 
 
 def _open(
@@ -219,11 +254,7 @@ def _open(
         except Exception:
             os.unlink(temp_local)
             raise
-        subprocess.Popen(
-            ["xdg-open", temp_local],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        _xdg_open(temp_local)
 
     elif _in_tmux() and _is_text_mime(mime):
         # Local text file in tmux: open in a new window.
@@ -238,14 +269,10 @@ def _open(
         )
 
     else:
-        # Local file (binary, or text without tmux): hand off to xdg-open.
-        # DESIGN: Popen (not run) so xdg-open detaches immediately and fzf
-        #         remains interactive. run() would block until the app closes.
-        subprocess.Popen(
-            ["xdg-open", full_path_str],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        # Local file (binary, or text without tmux): hand off to the
+        # platform file opener. _xdg_open() uses xdg-open on Linux and
+        # 'open' on macOS, detaching immediately so fzf stays interactive.
+        _xdg_open(full_path_str)
 
 
 def cmd_open(argv: list[str]) -> int:

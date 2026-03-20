@@ -558,12 +558,9 @@ primitive they would have used anyway. Example config once Phase 3 ships:
 
 ---
 
-## `open.py` — Platform Fixes
+## ~~`open.py` — Platform Fixes~~ ✓ Done
 
-Small but necessary fixes to `open.py` before it can be considered correct
-on non-Linux platforms. Not blocked on anything — can be done at any time.
-
-### Replace hardcoded `xdg-open` with platform-aware helper
+### ~~Replace hardcoded `xdg-open` with platform-aware helper~~ ✓ Done
 
 `xdg-open` is hardcoded in three places in `_open()`:
 - Binary local files
@@ -594,7 +591,7 @@ Replace all three `subprocess.Popen(["xdg-open", ...])` calls with
 
 **Files touched:** `open.py` only.
 
-### Remove `nano` from `_find_editor()` fallback chain
+### ~~Remove `nano` from `_find_editor()` fallback chain~~ ✓ Done
 
 `nano` is currently between `vim` and `vi` in the compiled-in fallback chain.
 It does not belong there — it is not universally present and adds nothing to

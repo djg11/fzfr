@@ -289,11 +289,9 @@ to hand off to the system default application.
 | macOS | `open` | Built-in, always present |
 | BSD | neither | No universal equivalent without a desktop environment |
 
-> **Known gap:** fzfr currently calls `xdg-open` directly on all platforms.
-> macOS users will find that binary files and directories without tmux do not
-> open correctly. Fix planned: replace `xdg-open` with a platform-aware helper
-> that falls back to `open` on macOS. Workaround: use tmux, which avoids the
-> `xdg-open` path entirely for text files.
+> **BSD note:** on BSD systems without a desktop environment, neither
+> `xdg-open` nor `open` is available. fzfr will print a clear error message
+> and the file path so you can open it manually.
 
 ### Remote host requirements
 
