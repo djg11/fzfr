@@ -49,3 +49,39 @@ py-modules = ["fzfr"]
 
 [tool.setuptools.dynamic]
 version = {attr = "fzfr.VERSION"}
+
+[tool.ruff]
+target-version = "py310"
+line-length    = 88
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes (unused imports, undefined names, etc.)
+    "I",    # isort (import ordering)
+    "UP",   # pyupgrade (modern Python syntax)
+    "B",    # flake8-bugbear (likely bugs and design issues)
+    "SIM",  # flake8-simplify (simplifiable code patterns)
+    "TID",  # flake8-tidy-imports (banned / absolute imports)
+]
+ignore = [
+    "E501",  # line too long -- handled by ruff format, not lint
+    "B006",  # mutable default argument -- used intentionally in dataclasses
+    "B007",  # loop control variable not used in body -- common in fzf callback stubs
+    "SIM102",# nested if -> combined -- sometimes less readable when conditions are long
+    "SIM108",# ternary -- sometimes less readable than if/else
+    "UP007", # X | Y union syntax -- keep Optional[X] for clarity in public APIs
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["fzfr"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.format]
+# Match the project's existing style
+quote-style            = "double"
+indent-style           = "space"
+skip-magic-trailing-comma = false
+line-ending            = "auto"

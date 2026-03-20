@@ -3,7 +3,7 @@ BINDIR  := $(PREFIX)/bin
 SCRIPT  := fzfr
 SYMLINKS := fzfr-preview fzfr-open fzfr-remote-reload fzfr-remote-preview fzfr-copy
 
-.PHONY: install uninstall check test build examples
+.PHONY: install uninstall check test build lint examples
 
 build:
 	python3 scripts/build_single_file.py
@@ -41,6 +41,18 @@ test:
 	    python3 -m unittest discover -s tests -v; \
 	fi
 
+lint:
+	@command -v ruff >/dev/null 2>&1 || { \
+	    echo "Error: ruff not found. Install with: pip install ruff"; exit 1; }
+	ruff check src/ tests/
+	ruff format --check src/ tests/
+
+format:
+	@command -v ruff >/dev/null 2>&1 || { \
+	    echo "Error: ruff not found. Install with: pip install ruff"; exit 1; }
+	ruff check --fix src/ tests/
+	ruff format src/ tests/
+
 examples:
 	python3 scripts/generate_examples.py
 
@@ -51,7 +63,7 @@ check:
 	    echo "Error: Python 3.10 or later is required."; \
 	    echo "Found: $$(python3 --version)"; exit 1; }
 	@command -v fzf >/dev/null 2>&1 || \
-	    echo "Warning: fzf not found — install it before running fzfr."
+	    echo "Warning: fzf not found -- install it before running fzfr."
 	@command -v fd >/dev/null 2>&1 || \
-	    echo "Warning: fd not found — install it before running fzfr."
+	    echo "Warning: fd not found -- install it before running fzfr."
 	@echo "Prerequisites OK"
