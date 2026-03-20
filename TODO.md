@@ -2,6 +2,109 @@
 
 ---
 
+## Design Principles
+
+### Architecture
+
+fzfr is a **wiring layer**, not a feature accumulator. Its job is exactly three things:
+
+1. **Wire core tools together** — build the fzf invocation, manage the subprocess
+   chain, own the state file, handle the fallback hierarchy between tools
+2. **Add the SSH layer** — bootstrap the remote agent, cache the script, make
+   remote search feel identical to local search
+3. **Provide the custom action escape hatch** — so anything outside the core stack
+   can be composed by the user without touching fzfr internals
+
+If a feature can be expressed as `"cmd": "tool {path}"` in the custom action
+config, it does not belong in fzfr core.
+
+If a feature requires access to fzfr's internal state — the session, the backend,
+the SSH tunnel, the state file — it belongs in core.
+
+### Graceful degradation
+
+fzfr degrades gracefully. Nothing beyond Tier 1 is hard-required. The experience
+improves as more tools are available; it never hard-fails because an optional tool
+is missing. Every Tier 3, 4, and 5 tool has a coded fallback path.
+
+### Core tool stack
+
+These are every external tool fzfr shells out to, organised by how essential they
+are to the core experience.
+
+**Tier 1 — Required** (fzfr will not function without these):
+
+| Tool | Role |
+|------|------|
+| `fzf` | The UI engine — the entire interface is fzf |
+| `python3` | Runtime for the fzfr agent (local and remote) |
+| `ssh` | Remote transport layer |
+| `fd` / `find` | File listing — `fd` preferred, `find` fallback |
+| `grep` | Content search fallback when `rga` is absent |
+
+**Tier 2 — Core experience** (expected to be present on any developer machine):
+
+| Tool | Role |
+|------|------|
+| `rga` | Content search with filetype awareness and match highlighting |
+| `bat` | Syntax-highlighted file preview |
+| `git` | `git ls-files` file source; log and diff in preview pane |
+| `tmux` | Window/pane management; TTY handoff for interactive actions |
+| `file` | MIME detection for ambiguous file types |
+| `xargs` | Argument passing in reload pipelines |
+| `tar` | Archive listing and extraction (primary archive tool) |
+| `cat` | Plain file preview fallback when `bat` is absent |
+
+**Tier 3 — Preview enhancers** (each has a fallback; absent = degraded preview):
+
+| Tool | Role | Fallback |
+|------|------|----------|
+| `pdftotext` | Extract text from PDF files | `rga` with OCR plugins |
+| `xxd` | Hex dump for binary files | `hexdump` → `od` |
+| `hexdump` | Hex dump fallback | `od` |
+| `od` | Hex dump last resort | error message |
+| `eza` | Directory listing with icons and tree view | `exa` → `tree` → `ls` |
+| `exa` | Directory listing fallback | `tree` → `ls` |
+| `tree` | Directory tree fallback | `ls` |
+
+**Tier 4 — Archive handlers** (each covers different formats; absence = that format unsupported):
+
+| Tool | Formats |
+|------|---------|
+| `7z` | `.7z`, `.zip`, `.rar`, `.iso` and many others |
+| `unrar` | `.rar` (fallback to `7z`) |
+| `unzip` | `.zip` (fallback to `7z`) |
+| `tar` | `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz` |
+| `gunzip` / `zcat` | `.gz` |
+| `bzcat` | `.bz2` |
+| `xzcat` | `.xz` |
+| `lz4` | `.lz4` |
+| `zstd` | `.zst` |
+| `cpio` | `.cpio` |
+
+**Tier 5 — Platform-specific** (OS-dependent; fzfr detects which is available):
+
+| Tool | Platform | Role |
+|------|----------|------|
+| `xclip` | Linux (X11) | Clipboard write |
+| `wl-copy` | Linux (Wayland) | Clipboard write |
+| `pbcopy` | macOS | Clipboard write |
+| `xdg-open` | Linux | Open file/directory in default application |
+| `open` | macOS | Open file/directory in default application (built-in) |
+
+### The custom action boundary
+
+A tool belongs in the **custom action config** (not in fzfr core) if:
+
+- fzfr has no fallback for it and no business knowing it exists
+- It operates on the *result* of a search rather than powering the search itself
+- Its absence does not degrade the core find/preview/open workflow
+
+Examples: `pylint`, `black`, `delta`, `scp` to a custom destination, `du`, any
+linter, formatter, or project-specific tool.
+
+---
+
 ## ~~Refactor: Split Source Into Modules + Build Script~~ ✓ Done
 
 The source has been split into `src/fzfr/` modules with `scripts/build_single_file.py`
@@ -21,8 +124,8 @@ When the feature set is stable, consider shipping the package instead:
   the full built script, not just _script.py. Likely solution: ship both the
   package and the built script, with _find_self() finding the latter.
 
-**Do not attempt until Docker backend, Git integration, and Interactive File
-Operations are implemented and stable.**
+**Do not attempt until Custom Action System Phase 1, Docker backend, and Git
+Integration Phase 2 are implemented and stable.**
 
 ---
 
@@ -46,6 +149,8 @@ fzfr web01:/var/log web02:/var/log web03:/var/log
 
 **Complexity:** High
 
+**Depends on:** Custom Action System Phase 2 — `RemoteBackend.run_command()` built there is a required primitive for routing aggregated-host actions back to the correct host.
+
 ---
 
 ## Docker Backend
@@ -62,201 +167,445 @@ Search and preview files inside running Docker containers without manual `docker
 
 **Complexity:** Medium (≈80% code reuse from `RemoteBackend`)
 
+**Depends on:** Custom Action System Phase 2 — `RemoteBackend.run_command()` built there is reused directly by `DockerBackend.run_command()`.
+
+**Interim (before this ships):** Single-container one-off commands can be approximated via custom actions:
+```json
+{ "cmd": "docker exec my-container cat {path}", "output": "tmux" }
+```
+This does not give you file listing or preview inside the container — it only runs a command against a known container name with a host-side path.
+
 ---
 
 ## Git Integration
 
-Make fzfr Git-aware for more relevant results, richer contextual previews, and
-git-specific browsing modes. Inspired by
-[forgit](https://github.com/wfxr/forgit) and
-[fzf-git.sh](https://github.com/junegunn/fzf-git.sh), but scoped to fzfr's
-identity as a file search and preview tool. All modes must work over SSH (same
-script-over-stdin architecture as file search).
+Make fzfr Git-aware for more relevant results and richer contextual previews.
 
-Implemented in three phases. Phase 1 is safe to merge immediately — no new
-modes, no actions, no keybinding changes. Phases 2 and 3 each build on the
-previous.
+### ~~Phase 1 — `git ls-files` file source + preview context~~ ✓ Done
 
----
+`git ls-files` as the file source (respects `.gitignore` exactly), `file_source`
+config key (`"auto"` / `"fd"` / `"git"`), and `git log` + `git diff HEAD` context
+appended in the preview pane. Merged to main.
 
-### Phase 1 — File source and preview enrichment
+### Phase 2 — `fzfr git-log` mode
 
-Zero-risk changes. No new modes, no actions, no new keybindings. Falls back
-gracefully when `git` is unavailable or the directory is not a repo.
+New fzfr mode where the file list is populated by commit hashes rather than
+file paths. Requires internal state changes — the selected item is a commit,
+not a file, so preview, open, and copy all need mode-aware dispatch.
 
-#### `git ls-files` as file source
+- `fzfr git-log` — search commit messages via `git log --oneline`
+- Preview pane shows full `git show <hash>` diff for the highlighted commit
+- Open action: `git show <hash>` in tmux or `$EDITOR`
+- Cannot be a custom action — the file *source* is commits, not files
 
-Use `git ls-files` as the file listing backend when inside a git repository
-instead of `fd`. Respects `.gitignore` exactly and is faster than `fd` for
-large repos with many ignored files.
+**Complexity:** Medium
 
-**Implementation notes:**
-- Detect repo root via `_find_git_root()` (already exists in `search.py`).
-- Replace `fd` in `LocalBackend.initial_list_cmd()` and `LocalBackend.reload()`
-  when a git root is found and `file_source` is `"auto"` or `"git"`.
-- Remote hosts: run `git ls-files` on the remote via the existing SSH reload
-  mechanism, same as `fd`.
-- Add a config key `"file_source": "auto" | "fd" | "git"`. `"auto"` (default)
-  uses `git ls-files` inside a repo, `fd` everywhere else.
-- Content search still uses `rga`/`grep` — `git ls-files` only affects the
-  file listing, not the search itself.
-- Hidden-file toggle (`CTRL-H`): in git mode, adds untracked files via
-  `git ls-files --others --exclude-standard`.
-- Add `git` to `_ALL_TOOLS` in `config.py` and to the optional tools table
-  in `README.md`.
+### Phase 3 — git-status staging view
 
-**Complexity:** Low
+Interactive staging: file list sourced from `git status --short`, preview shows
+`git diff` for the highlighted file, actions for stage/unstage/discard.
 
-#### Enhanced file preview (git context)
+- Cannot be a custom action — requires a different file source and mode-aware
+  keybindings for stage/unstage
 
-When previewing a file inside a git repo, append a git context block below the
-file content in the preview pane: recent commits touching the file and the
-current uncommitted diff.
+**Complexity:** Medium. Do not start until Phase 2 is merged.
 
-**Implementation notes:**
-- In `_preview_text()`: after the bat/cat output, append:
-  - A separator line
-  - `git log --oneline --color -5 -- <file>` — last 5 commits for this file
-  - `git diff HEAD --color=always -- <file>` — current uncommitted changes
-- Only appended when `git` is in `AVAILABLE_TOOLS` and the file is tracked.
-- Falls back silently (no output, no error) outside a repo.
+### Removed: open on GitHub/GitLab
 
-**Complexity:** Low
+Originally planned as Phase 3. Removed from core — too forge-specific and
+platform-dependent. Implement as a custom action instead:
 
----
-
-### Phase 2 — Read-only git modes
-
-New invocation modes. Still no destructive actions. Enter opens content in
-`$EDITOR` via a new tmux window, leaving fzfr running — same pattern as file
-open today.
-
-#### `fzfr git-log` — commit browser
-
-```sh
-fzfr git-log [base_path]
-fzfr user@server git-log /var/log   # works over SSH
+```json
+{
+  "label": "open on GitHub",
+  "cmd": "xdg-open \"$(git remote get-url origin | sed 's/git@github.com:/https:\/\/github.com\//;s/\.git$//')/blob/HEAD/{path}\"",
+  "output": "silent"
+}
 ```
 
-Lists commits via `git log --oneline --graph --color`. Preview pane shows the
-full diff via `git show <hash> --stat --patch --color`.
-
-**Implementation notes:**
-- New target type in `cmd_search()` alongside `local` and `<ssh-host>`.
-- Hash extracted from the selected line (first hex token).
-- `CTRL-T` toggles `--all` (all branches) vs current branch only.
-- Enter: opens diff in `$EDITOR` in a new tmux window
-  (`git show <hash> | $EDITOR -`), or prints the hash if tmux is absent.
-- `CTRL-Y`: copy commit hash to clipboard (reuses existing `fzfr-copy`
-  infrastructure).
-- Inspired by forgit's `glo` and fzf-git.sh's `CTRL-G CTRL-H`.
-
-**Complexity:** Medium
-
-#### `fzfr git-refs` — branch and tag picker
-
-Lists local branches, remote branches, and tags via `git for-each-ref
---sort=-committerdate --color` (requires git ≥ 2.42). Preview shows recent
-commits on the highlighted ref via `git log --oneline --color -10 <ref>`.
-
-**Implementation notes:**
-- `CTRL-T` cycles: local branches → all branches + remotes → tags only.
-- Enter: `git switch <branch>` / `git checkout <tag>` — single safe action,
-  no conflict risk.
-- Requires git ≥ 2.42 for `--color` in `for-each-ref`; degrade gracefully on
-  older versions.
-- Most useful as an entry point from the Major Mode Switcher (Phase 3).
-
-**Complexity:** Low–Medium
+---
 
 ---
 
-### Phase 3 — Git actions and mode-aware keybindings
+## Custom Action System
 
-Depends on Phase 2 being merged. Also depends on the **Mode-Aware Keybinding
-System** (see Core Features / UI) being designed first — adding actions across
-multiple git modes without that infrastructure leads to keybinding conflicts and
-an unmaintainable `build_fzf_invocation()`.
+Allow users to define arbitrary shell commands in `~/.config/fzfr/config` triggered
+via a two-level which-key leader menu. Turns fzfr into an extensible workflow engine
+without growing the core feature set.
 
-**Do not start Phase 3 until:**
-1. Phase 2 is merged and stable.
-2. The mode-aware keybinding system is designed (can be specced on a separate
-   branch before implementation).
+### Design
 
-#### `fzfr git-status` — changed files with staging
+**Leader key + group key + action key.** Pressing the leader shows all configured
+groups in the fzf header. Pressing a group key narrows to that group's actions.
+Pressing an action key runs the command and restores the normal header. At every
+level, `esc` cancels and restores the header. All three steps use fzf's native
+`key1+key2+key3` chained bind syntax — no timeouts, no interception, no platform
+differences.
 
-Lists files from `git status --short` with status prefix. Preview shows the
-diff for the highlighted file (`git diff --color` for unstaged,
-`git diff --cached --color` for staged).
+**Config schema:**
 
-**Actions (require mode-aware keybindings):**
-- `CTRL-A`: stage selected file(s) (`git add`).
-- `CTRL-U`: unstage (`git restore --staged`).
-- `CTRL-D`: discard unstaged changes (`git restore`) — requires `[y/N]`
-  confirmation via `_tty_prompt`, same guard as Interactive File Ops `rm`.
-- After any action, reload the list automatically.
-- Inspired by forgit's `ga` (staging) + `gd` (diff viewer) combined.
+```json
+{
+  "custom_actions": {
+    "leader": "ctrl-space",
+    "groups": {
+      "g": {
+        "label": "git",
+        "actions": {
+          "a": { "cmd": "git add {paths}",     "label": "add",     "output": "silent" },
+          "r": { "cmd": "git restore {path}",  "label": "restore", "output": "silent" }
+        }
+      },
+      "f": {
+        "label": "file",
+        "actions": {
+          "c": { "cmd": "cat {path} | fzfr-copy", "label": "copy content", "output": "silent" },
+          "d": { "cmd": "du -sh {path}",           "label": "disk usage",   "output": "preview"  }
+        }
+      }
+    }
+  }
+}
+```
 
-**Complexity:** Medium
+**Placeholder contract** — fzfr guarantees every placeholder is `shlex.quote()`'d
+before substitution. Users cannot break the tool with filenames containing spaces,
+quotes, or semicolons.
 
-#### Stash viewer
+| Placeholder | Value | fzf equivalent |
+|-------------|-------|----------------|
+| `{path}`    | Single highlighted file (absolute or relative per config) | `{}` |
+| `{paths}`   | All TAB-selected files; falls back to `{path}` if none selected | `{+}` |
+| `{dir}`     | Directory containing `{path}` | — |
+| `{base}`    | Search root (BASE_PATH) | — |
+| `{q}`       | Current fzf query string | `{q}` |
 
-Lists stashes via `git stash list`. Preview shows `git stash show -p <ref>
---color`.
+**`inputs` / `widgets` / `output` — what each key does:**
 
-**Actions:**
-- `CTRL-A`: apply stash (`git stash apply`).
-- `CTRL-P`: pop stash (`git stash pop`).
-- `CTRL-D`: drop stash (`git stash drop`) — `[y/N]` confirmation.
+These three keys cover two separate phases of a custom action. Keeping them
+distinct is important: `inputs` and `widgets` control what happens *before* the
+command runs (input collection); `output` controls what happens *after* it runs
+(where the command's stdout/stderr goes). They are orthogonal — every combination
+is valid.
 
-**Complexity:** Low
+```
+widgets/inputs  →  collect inputs  →  cmd runs  →  output handles result
+```
 
-#### Multi-step git actions via tmux (git-log and git-refs)
+**`output` modes** (→ README):
 
-Actions that require interactive editors or conflict resolution are handed off
-to a new tmux window, leaving fzfr running. Without tmux, prints the equivalent
-git command with a hint to run it manually.
+| Mode | Behaviour | Fallback (no tmux) |
+|------|-----------|-------------------|
+| `"tmux"` | Stream full output in a new tmux window | suspend fzf, run in current TTY |
+| `"preview"` | Pipe stdout into the fzf preview pane as a one-shot replacement | same |
+| `"silent"` | Suppress all output — fire and forget | same |
 
-**Actions on `fzfr git-log`:**
-- `CTRL-R`: interactive rebase from selected commit
-  (`git rebase -i <hash>~1` in new tmux window).
-- `CTRL-P`: cherry-pick selected commit
-  (`git cherry-pick <hash>` in new tmux window).
-- `CTRL-F`: fixup — `git commit --fixup <hash> && git rebase -i
-  --autosquash <hash>~1` in new tmux window.
-- `CTRL-V`: revert — `git revert <hash>` (non-destructive, no tmux needed).
+**Header UX (using existing fzf header — no new UI system):**
 
-**Actions on `fzfr git-refs`:**
-- `CTRL-D`: delete branch (`git branch -D <branch>`) — `[y/N]` confirmation.
+```
+# idle — leader hint baked into normal header at session start
+ CTRL-SPACE  actions
 
-**Complexity:** Medium–High
+# after leader
+ [g] git  [f] file  [esc] cancel
 
-#### Open on GitHub / GitLab / Gitea
+# after leader + g
+ git ›  [a] add  [r] restore  [esc] cancel
 
-A keybinding (default `CTRL-O`) that opens the selected file or commit on the
-remote git host in the browser. Available in all git modes.
+# after action fires — header restored to normal via change-header
+```
+
+Header strings are baked at session start from the config. No subprocess is
+spawned for header transitions — all state lives in fzf's own bind chain.
+ESC at any level chains `change-header` back to the normal header string
+(also baked at session start).
+
+**Security:**
+
+- `{path}` and all other placeholders map directly to fzf's own quoted
+  placeholders (`{}`, `{+}`) — fzf shell-quotes them before substitution.
+- The `cmd` string is user-controlled. Document clearly: fzfr does not sandbox
+  the command itself, only the placeholder values. Same threat model as
+  `~/.bashrc`.
+- Validate at startup: reject any `leader` value that conflicts with fzfr's
+  own reserved bindings. Emit a clear config error, do not silently override.
+
+**Leader default:** `ctrl-space`. Note in README: macOS users and ChromeOS users
+may need to remap to `alt-x` or `ctrl-g` if the OS intercepts `ctrl-space` for
+input switching.
+
+---
+
+### Phase 1 — Local execution
+
+**Files touched:** `config.py`, `internal.py`, `search.py`
+
+**`config.py`:**
+- Add `custom_actions` to `_DEFAULTS` with empty `groups` and `"leader": "ctrl-space"`
+- Add nested validation in `_merge_config_key`: check group keys are single chars,
+  action keys are single chars, `output` is one of the four valid modes,
+  `cmd` contains only known placeholders
+- Emit a clear `ConfigError` (not a crash) for any invalid entry so fzfr still
+  launches with the bad action skipped
+
+**`internal.py`:**
+- Add `cmd_internal_exec(argv)` entry point
+- `argv`: `[action_id, path, ...]` where `action_id` is `"group_key.action_key"`
+- Load config, look up the action, substitute placeholders, run via
+  `subprocess.run(shell=True)` on `LocalBackend`
+- `output` mode determines whether output goes to the preview pane or stdout (preview/tmux) or
+  is suppressed (silent)
+- On non-zero exit: capture stderr, print to stdout prefixed with `[fzfr error]`
+  so it surfaces in the header/preview rather than silently disappearing
+
+**`search.py` — `build_fzf_invocation()`:**
+- After the existing bind loop, iterate `custom_actions.groups`
+- Generate three layers of `--bind` strings per action:
+  1. `leader` → `change-header(group list)`
+  2. `leader+group_key` → `change-header(action list for that group)`
+  3. `leader+group_key+action_key` → `execute-silent(fzfr _internal-exec id {+})+change-header(normal header)`
+- Generate ESC bindings at each level:
+  1. After leader: `leader+esc` → `change-header(normal header)`
+  2. After group: `leader+group_key+esc` → `change-header(group list)`
+- Bake all header strings at session start — no runtime subprocess for header
+
+**Complexity:** Low–Medium. ~150 lines across three files.
+
+---
+
+### Phase 2 — Remote bridge
+
+**Files touched:** `backends.py`, `remote.py`, `internal.py`
+
+`cmd_internal_exec` reconstructs the backend from the state file (same pattern
+as all other internal commands). If the backend is `RemoteBackend`, the command
+is routed through the existing SSH tunnel — no new SSH connection is opened.
+
+```python
+# internal.py — Phase 2 addition
+backend = _backend_from_state(state)
+if isinstance(backend, RemoteBackend):
+    backend.run_command(cmd, display=action["output"])
+else:
+    subprocess.run(cmd, shell=True, ...)
+```
+
+`RemoteBackend.run_command()` wraps the substituted command as:
+```sh
+ssh <host> "cd <base> && <cmd>"
+```
+using the already-open multiplexed connection (`-o ControlMaster=auto`).
+No second handshake. No bootstrap required — the command runs in a plain shell,
+not via the fzfr agent.
+
+This makes custom actions location-aware automatically. A user's `pylint {path}`
+runs on the remote host when searching a remote path, locally when searching
+locally. The user writes the command once.
+
+**Complexity:** Medium. Requires `run_command()` on both backend classes and
+careful testing on an actual SSH session.
+
+---
+
+---
+
+### Phase 3 — Multi-step pipeline with sequential input
+
+**Depends on:** Phase 1 (local execution) + Interactive File Ops nested picker
+machinery (both share the same underlying session suspend/resume logic).
+
+**The problem Phase 1 doesn't solve:**
+
+Some actions need more than one input. The source file is already selected in
+the active fzfr session, but the destination — a directory, a remote path, a
+new filename — needs to be collected via a second interactive step before the
+command can fire.
+
+**Extended config schema:**
+
+The `inputs` and `widgets` keys are parallel sequences. Each index defines a named
+variable and the UI widget used to collect it. The collected values become
+additional placeholders in `cmd`, quoted identically to `{path}` and `{paths}`.
+
+```json
+{
+  "label": "Copy to local",
+  "inputs": ["source",  "destination"],
+  "widgets":       ["current", "directory_selector"],
+  "cmd":      "cp {source} {destination}",
+  "output":  "silent"
+}
+```
+
+```json
+{
+  "label": "Download from remote",
+  "inputs": ["source",  "destination"],
+  "widgets":       ["current", "directory_selector"],
+  "cmd":      "scp {source} {destination}",
+  "output":  "silent"
+}
+```
+
+```json
+{
+  "label": "Rename",
+  "inputs": ["source",  "new_name"],
+  "widgets":       ["current", "text_prompt"],
+  "cmd":      "mv {source} {dir}/{new_name}",
+  "output":  "silent"
+}
+```
+
+```json
+{
+  "label": "Diff against",
+  "inputs": ["source",  "target"],
+  "widgets":       ["current", "file_selector"],
+  "cmd":      "delta {source} {target}",
+  "output":  "preview"
+}
+```
+
+```json
+{
+  "label": "Upload to remote",
+  "inputs": ["source",  "destination"],
+  "widgets":       ["current", "remote_file_selector"],
+  "cmd":      "scp {source} {destination}",
+  "output":  "silent"
+}
+```
+
+**`widgets` vocabulary** (→ README):
+
+| Widget | Behaviour |
+|--------|-----------|
+| `"current"` | Use already-selected file(s) from the active fzfr session — no new picker |
+| `"file_selector"` | Suspend current session, launch nested fzfr in file mode |
+| `"directory_selector"` | Suspend current session, launch nested fzfr in directory mode |
+| `"text_prompt"` | Suspend fzf, collect a single string via `_tty_prompt` |
+| `"remote_file_selector"` | Suspend current session, launch nested fzfr against the active remote host |
+
+**Cancellation contract:**
+
+If the user hits `esc` at any step after the first, the entire pipeline is
+aborted — no partial execution. The active fzfr session resumes unchanged.
+Partial state (already-collected selector values) is discarded.
+
+**Schema validation rules (enforced at startup):**
+
+- `inputs` and `widgets` must be the same length
+- Every name in `inputs` must appear as `{name}` in `cmd`
+- `"current"` must always be at index 0 — you cannot defer the active selection
+- `"remote_file_selector"` is only valid when the active backend is `RemoteBackend`;
+  emit a clear config error at session start if used against a local path
+- Single-step actions (`inputs` and `widgets` absent) remain valid — Phase 3 is
+  additive, not a breaking change to Phase 1 configs
 
 **Implementation notes:**
-- Construct URL from `git remote get-url origin` + branch/hash + file path.
-- Support GitHub, GitLab, Gitea URL schemes. Config override for self-hosted.
-- Uses `xdg-open` / `open`.
-- Works in remote SSH mode: git config queried on the remote host.
-- Inspired by fzf-git.sh's `CTRL-O`.
 
-**Complexity:** Low
+- The sequencing engine lives in `internal.py` alongside `cmd_internal_exec`
+- Each non-`"current"` step suspends fzf via `execute(...)`, launches the
+  nested picker, collects the result to a temp state key, then resumes
+- `"directory_selector"` and `"file_selector"` reuse the nested fzfr instance
+  pattern already built for Interactive File Ops `mv`/`cp` — do not duplicate
+- `"text_prompt"` reuses `_tty_prompt` already used by `rm` confirmation
+- `"remote_file_selector"` reuses `RemoteBackend` — same SSH tunnel, no new
+  connection
 
+**What this replaces from the original TODO:**
 
-## Interactive File Operations
+Once Phase 3 ships, the following are user-configurable rather than built-in:
+- Interactive File Ops `mv` / `cp` (keep `rm` as hardcoded — safety-critical)
+- SSH download / upload
+- Side-by-side diff
+- Surgical archive extraction
+- Rename
 
-Manage files directly from the fzf interface after finding them.
+**Complexity:** High. Do not start until Phase 1 and Phase 2 are merged and
+the Interactive File Ops nested picker exists as a tested primitive.
+
+---
+
+## Interactive File Operations — `rm`
+
+The only file operation that belongs in fzfr core is deletion. `mv`, `cp`, rename,
+and transfer are handled by Custom Action System Phase 3 (`widgets`/`inputs`
+multi-step pipeline) which provides the nested picker primitive they all share.
+
+`rm` stays hardcoded because its safety guarantee — a mandatory, non-skippable
+`[y/N]` confirmation — must be owned by fzfr, not left to user config. A user
+misconfiguring a custom action that deletes files without confirmation is
+unacceptable.
 
 **Implementation notes:**
-- `rm` — `_tty_prompt` for mandatory `[y/N]` confirmation before deletion; confirmation must be non-skippable
-- `mv` / `cp` — launch a nested fzfr instance in directory mode to fuzzy-find the destination folder
-- All operations work on the current selection (`{+}` for multi-select)
-- Start with `rm` only; add `mv`/`cp` once `rm` is proven solid
+- `_tty_prompt` for mandatory `[y/N]` confirmation — non-skippable, no `--force` flag
+- Works on the current selection (`{+}` for multi-select with per-file confirmation)
+- Single keybinding, no mode switch required
 
-**Complexity:** Low (leverages existing fzf patterns and `_tty_prompt`)
+**Note:** `mv` and `cp` are not implemented here. They are covered by Custom
+Action System Phase 3 — the nested picker machinery built for Phase 3 is the
+primitive they would have used anyway. Example config once Phase 3 ships:
+
+```json
+{ "label": "move",  "inputs": ["source", "destination"], "widgets": ["current", "directory_selector"], "cmd": "mv {source} {destination}",  "output": "silent" }
+{ "label": "copy",  "inputs": ["source", "destination"], "widgets": ["current", "directory_selector"], "cmd": "cp {source} {destination}",   "output": "silent" }
+{ "label": "rename","inputs": ["source", "new_name"],    "widgets": ["current", "text_prompt"],        "cmd": "mv {source} {dir}/{new_name}", "output": "silent" }
+```
+
+**Complexity:** Low (leverages existing `_tty_prompt`)
+
+---
+
+## `open.py` — Platform Fixes
+
+Small but necessary fixes to `open.py` before it can be considered correct
+on non-Linux platforms. Not blocked on anything — can be done at any time.
+
+### Replace hardcoded `xdg-open` with platform-aware helper
+
+`xdg-open` is hardcoded in three places in `_open()`:
+- Binary local files
+- Binary remote files (after streaming to session dir)
+- Directories when tmux is absent (fall-through)
+
+None of these work on macOS, where the equivalent is `open` (built-in).
+
+**Fix:** add a `_xdg_open(path)` helper in `open.py`:
+
+```python
+def _xdg_open(path: str) -> None:
+    """Open path with the platform file opener.
+    Uses xdg-open on Linux, open on macOS. Falls back to xdg-open
+    if neither platform is detected — better an informative error
+    than silent failure.
+    """
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    subprocess.Popen(
+        [opener, path],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+```
+
+Replace all three `subprocess.Popen(["xdg-open", ...])` calls with
+`_xdg_open(...)`. No other changes needed.
+
+**Files touched:** `open.py` only.
+
+### Remove `nano` from `_find_editor()` fallback chain
+
+`nano` is currently between `vim` and `vi` in the compiled-in fallback chain.
+It does not belong there — it is not universally present and adds nothing to
+the reliability guarantee that `vi` already provides.
+
+**Fix:** change the fallback tuple from `("nvim", "vim", "nano", "vi")` to
+`("nvim", "vim", "vi")`.
+
+**Files touched:** `open.py` only.
+
+**Complexity:** Trivial. Both fixes are one-liner changes.
 
 ---
 
@@ -271,6 +620,32 @@ Manage files directly from the fzf interface after finding them.
     *   Selecting a mode from this list will cause the current `fzfr` session to exit and immediately re-launch itself in the chosen mode (e.g., `fzfr git-log`).
     *   This requires changes to the configuration structure to support mode-specific keybindings, and a way to load the appropriate keybindings when `fzfr` starts in a given mode.
 *   **Complexity:** Medium (Requires careful coordination of config, state, and relaunch logic.)
+
+---
+
+---
+
+## UI / Header Template System
+
+Allow users to customise the fzf header string per mode using a template
+language with fzfr-provided variables.
+
+**Depends on:** Custom Action System Phase 1 (the header baking infrastructure
+built there is the foundation this feature extends).
+
+**Design notes:**
+- Template variables: `{mode}`, `{base}`, `{host}`, `{branch}`, `{file_count}`,
+  `{query}`, `{action_hint}` (shows leader key hint when custom actions configured)
+- Per-mode overrides: `header.default`, `header.git`, `header.remote`,
+  `header.leader_active`, `header.leader_group`
+- ESC fallback behaviour configurable per mode
+- Header is re-baked on mode switch (already happens via `transform-header`)
+- Keep template evaluation in Python at session start and on mode switch —
+  no new subprocess
+
+**Complexity:** Medium. Do not implement until Custom Action System Phase 1
+is merged and stable — the two features share header baking infrastructure
+and should not be developed in parallel.
 
 ---
 
