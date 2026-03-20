@@ -141,10 +141,11 @@ from .remote import cmd_remote_reload, cmd_remote_preview
 from .search import cmd_search
 from .dispatch import cmd_dispatch
 from .internal import (
-    cmd_internal_get_prompt, cmd_internal_get_header,
-    cmd_internal_get_search_action, cmd_internal_toggle_mode,
-    cmd_internal_toggle_ftype, cmd_internal_toggle_hidden,
-    cmd_internal_prompt, cmd_internal_exclude,
+      cmd_internal_get_prompt, cmd_internal_get_header,
+      cmd_internal_get_search_action, cmd_internal_toggle_mode,
+      cmd_internal_toggle_ftype, cmd_internal_toggle_hidden,
+      cmd_internal_prompt, cmd_internal_exclude,
+      cmd_internal_exec,
 )
 
 # Re-exported from ._script — used by remote.py, search.py, and the built flat file.
@@ -170,6 +171,7 @@ COMMAND_MAP = {
     "_internal-prompt": cmd_internal_prompt,  # execute CTRL-F (reads /dev/tty)
     "_internal-exclude": cmd_internal_exclude,  # execute CTRL-X (reads /dev/tty)
     "_internal-dispatch": cmd_dispatch,  # preview + reload
+    "_internal-exec": cmd_internal_exec,
 }
 
 

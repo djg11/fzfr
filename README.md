@@ -26,26 +26,20 @@ Fuzzy file search for local and remote filesystems.
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| Python | ≥ 3.10 | Runtime — macOS ships Python 3.9; install via `brew install python` or `pyenv` |
+| Python | ≥ 3.10 | Runtime |
 | [fzf](https://github.com/junegunn/fzf) | ≥ 0.38 | Fuzzy finder UI |
-| [fd](https://github.com/sharkdp/fd) | any | Fast file listing — on Debian/Ubuntu install as `fd-find`; the binary is called `fdfind`, symlink it: `ln -s $(which fdfind) ~/.local/bin/fd` |
+| [fd](https://github.com/sharkdp/fd) | any | Fast file listing |
 
 **Optional — each adds a capability:**
 
-| Tool | Platform | Capability |
-|------|----------|-----------|
-| [bat](https://github.com/sharkdp/bat) | all | Syntax-highlighted preview; falls back to `cat` |
-| [rga](https://github.com/phiresky/ripgrep-all) | all | Content search inside PDFs, archives, and more; falls back to `grep` |
-| [git](https://git-scm.com/) | all | `git ls-files` as file source (respects `.gitignore`); git log + diff in preview |
-| [pdftotext](https://poppler.freedesktop.org/) | all | PDF text extraction — install `poppler-utils` (Linux) or `brew install poppler` (macOS) |
-| [tmux](https://github.com/tmux/tmux) | all | Open files in a new tmux window; falls back to `$EDITOR` in current TTY when tmux is absent |
-| [eza](https://github.com/eza-community/eza) | all | Rich directory preview with icons and tree view; falls back to `exa` → `tree` → `ls` |
-| `xclip` | Linux (X11) | Copy file path to clipboard |
-| `wl-copy` | Linux (Wayland) | Copy file path to clipboard |
-| `pbcopy` | macOS | Copy file path to clipboard |
-| `xdg-open` | Linux | Open file/directory in default application |
-| `open` | macOS | Open file/directory in default application (built-in, no install needed) |
-| `ssh` | all | Remote search and preview |
+| Tool | Capability |
+|------|-----------|
+| [bat](https://github.com/sharkdp/bat) | Syntax-highlighted preview |
+| [rga](https://github.com/phiresky/ripgrep-all) | Content search inside PDFs, archives, and more |
+| [pdftotext](https://poppler.freedesktop.org/) | PDF text extraction fallback |
+| [tmux](https://github.com/tmux/tmux) | Open files in a new window without leaving fzfr |
+| `xclip` / `wl-copy` / `pbcopy` | Copy file path to clipboard |
+| `ssh` | Remote search and preview |
 
 ---
 
@@ -63,17 +57,8 @@ This copies `fzfr` to `~/.local/bin` and creates symlinks for all sub-commands.
 Make sure `~/.local/bin` is in your `PATH`:
 
 ```sh
-# bash
 echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
-
-# zsh (macOS default since Catalina)
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
-
-# fish
-fish_add_path ~/.local/bin
 ```
-
-> **macOS note:** `~/.local/bin` may not exist by default — `make install` creates it, but if you install manually: `mkdir -p ~/.local/bin`
 
 **Via pipx or pip:**
 
@@ -154,6 +139,25 @@ All keys are configurable — see [Configuration](#configuration).
   "path_format": "relative",
   "exclude_patterns": [],
   "max_stream_mb": 100,
+  "custom_actions": {
+    "leader": "ctrl-b",
+    "groups": {
+      "g": {
+        "label": "git",
+        "actions": {
+          "a": { "cmd": "git add {paths}",    "label": "add",    "output": "silent" },
+          "r": { "cmd": "git restore {path}", "label": "restore","output": "silent" }
+        }
+      },
+      "f": {
+        "label": "file",
+        "actions": {
+          "d": { "cmd": "du -sh {path}",           "label": "disk usage",   "output": "preview" },
+          "c": { "cmd": "cat {path} | fzfr-copy",  "label": "copy content", "output": "silent"  }
+        }
+      }
+    }
+  },
   "keybindings": {
     "toggle_mode":            "ctrl-t",
     "toggle_ftype":           "ctrl-d",
@@ -182,18 +186,13 @@ All keys are configurable — see [Configuration](#configuration).
 - `search_history` — set to `true` to persist search queries across sessions. Disabled by default as queries may contain sensitive terms (filenames, hostnames). Use `CTRL-P`/`CTRL-N` to navigate history when enabled.
 - `exclude_patterns` — glob patterns always excluded from search, e.g. `[".git", "node_modules", "*.pyc"]`. Additional patterns can be added at runtime with `CTRL-X`.
 - `max_stream_mb` — maximum size in MB for streaming a remote binary file locally for opening. Files larger than this are refused with an error. Set to `0` to disable the limit. Default: `100`.
+- `custom_actions` — define shell commands triggered by a two-level which-key menu. `leader` sets the trigger key (default `ctrl-b`). Pressing the leader suspends fzf and shows a group menu; pressing a group key shows that group's actions; pressing an action key runs it. The sequencing is implemented in Python (fzf does not support sequential key binding natively). Each group has a single-character key, a label, and a dict of actions. Each action has a `cmd` (with `{path}`, `{paths}`, `{dir}`, `{base}`, `{q}` placeholders — all shell-quoted), a `label`, and an `output` mode: `"silent"` (suppress output), `"preview"` (show in preview pane), or `"tmux"` (open in new tmux window). The menu UX is in active development — see [Roadmap](TODO.md).
 
 ---
 
 ## SSH Remote Search
 
-fzfr requires no installation on the remote host — only `python3` and `fd` need to be in the remote `PATH`. The script is transferred automatically on first use.
-
-**Script cache location on the remote host:**
-- Linux: prefers `/dev/shm/fzfr/` (RAM-backed tmpfs, cleared on reboot) — falls back to `~/.cache/fzfr/` when `/dev/shm` is absent (macOS, BSD, some containers)
-- The fallback `~/.cache/fzfr/` persists across reboots; delete it manually if you want to force a re-transfer
-
-**Preview cache:** fzfr caches rendered preview output locally using the remote file's mtime (via `stat`). On minimal containers where `stat` is absent, mtime detection silently degrades and every preview re-fetches from the remote.
+fzfr requires no installation on the remote host — only `python3` and `fd` need to be in the remote `PATH`. The script is transferred automatically on first use and cached at `~/.cache/fzfr/` on the remote.
 
 ```sh
 fzfr user@server /var/log
@@ -207,7 +206,6 @@ fzfr myserver ~/projects content
 ```
 
 > **Warning:** Do not set `ssh_multiplexing: true` if your `~/.ssh/config` already has `ControlMaster`. The conflicting sockets will trigger a new authentication prompt on every cursor movement.
-
 
 ---
 
@@ -264,57 +262,7 @@ Confirm: preview works for all files, nothing executes, filenames display correc
 
 ---
 
-## Platform Notes
-
-### Editor resolution
-
-When opening a file, fzfr resolves the editor in this order:
-
-1. `editor` key in `~/.config/fzfr/config`
-2. `$EDITOR` environment variable
-3. First available in: `nvim` → `vim` → `vi`
-4. `vi` — unconditional last resort, POSIX-required on every Unix system
-
-`vi` is guaranteed to exist on Linux, macOS, and BSD. If you want a friendlier
-default, set `$EDITOR` or the `editor` config key.
-
-### Opening files and directories (xdg-open / open)
-
-For binary files and directories (when tmux is absent), fzfr calls `xdg-open`
-to hand off to the system default application.
-
-| Platform | Tool | Notes |
-|----------|------|-------|
-| Linux | `xdg-open` | Install `xdg-utils` if missing |
-| macOS | `open` | Built-in, always present |
-| BSD | neither | No universal equivalent without a desktop environment |
-
-> **BSD note:** on BSD systems without a desktop environment, neither
-> `xdg-open` nor `open` is available. fzfr will print a clear error message
-> and the file path so you can open it manually.
-
-### Remote host requirements
-
-The remote host needs only `python3 ≥ 3.10` and `fd` (or `fdfind`) in its PATH.
-No other installation is required.
-
-| Requirement | Linux | macOS | BSD |
-|-------------|-------|-------|-----|
-| `python3 ≥ 3.10` | system or package manager | `brew install python` | ports/pkgsrc |
-| `fd` | `apt install fd-find` + symlink, or `cargo install fd-find` | `brew install fd` | ports |
-| `/dev/shm` (script cache) | ✓ present | ✗ absent — falls back to `~/.cache/fzfr/` | ✗ absent — falls back to `~/.cache/fzfr/` |
-| `stat` (preview cache) | ✓ `stat -c %Y` | ✓ `stat -f %m` | ✓ `stat -f %m` |
-
-### Clipboard
-
-`fzfr-copy` detects the available tool at runtime: `pbcopy` (macOS) →
-`wl-copy` (Linux Wayland) → `xclip` (Linux X11). If none is found the copy
-action silently does nothing — no error is shown.
-
----
-
 ## Contributing
-
 
 The distributable `fzfr` script is built from the source modules in `src/fzfr/`:
 

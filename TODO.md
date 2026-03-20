@@ -336,7 +336,7 @@ input switching.
 
 ---
 
-### Phase 1 — Local execution
+### ~~Phase 1 — Local execution~~ ✓ Partially done
 
 **Files touched:** `config.py`, `internal.py`, `search.py`
 
@@ -359,17 +359,69 @@ input switching.
   so it surfaces in the header/preview rather than silently disappearing
 
 **`search.py` — `build_fzf_invocation()`:**
-- After the existing bind loop, iterate `custom_actions.groups`
-- Generate three layers of `--bind` strings per action:
-  1. `leader` → `change-header(group list)`
-  2. `leader+group_key` → `change-header(action list for that group)`
-  3. `leader+group_key+action_key` → `execute-silent(fzfr _internal-exec id {+})+change-header(normal header)`
-- Generate ESC bindings at each level:
-  1. After leader: `leader+esc` → `change-header(normal header)`
-  2. After group: `leader+group_key+esc` → `change-header(group list)`
-- Bake all header strings at session start — no runtime subprocess for header
+- Leader bind wired: `leader → execute(fzfr _internal-action-menu {state} {+})`
+- Only generated when `custom_actions.groups` is non-empty
+
+> **Blocked:** The which-key chained bind design (`key1+key2+key3`) is not
+> supported by fzf — sequential key sequences do not exist in fzf's bind system.
+> `_build_custom_action_binds` is commented out. The leader key fires a stub
+> that will be replaced by the mini-fzf picker in the Action Trigger Redesign.
+
+**`config.py` and `internal.py` are fully done and merge-ready.**
 
 **Complexity:** Low–Medium. ~150 lines across three files.
+
+---
+
+---
+
+### Custom Action Trigger — Which-Key Implementation
+
+fzf's `key1+key2` bind syntax chains *actions* on a single keypress — it does
+not support sequential key sequences. We implement which-key ourselves.
+
+**Design:**
+
+Leader key fires `execute(fzfr _internal-action-menu {state} {+})` which gives
+us full TTY control. We implement the key sequence ourselves in Python using a
+simple list to collect keypresses after the leader:
+
+```
+CTRL-B (leader)
+  → execute(fzfr _internal-action-menu {state_path} {+})
+      → write group menu to terminal:
+           actions ›  [g] git  [f] file  [q] cancel
+      → read one keypress → store in sequence list
+      → write action menu for that group:
+           git ›  [a] add  [r] restore  [q] back
+      → read one keypress → store in sequence list
+      → execute: cmd_internal_exec [group_key, action_key] paths
+  → first fzf resumes unchanged
+```
+
+The sequence `[group_key, action_key]` is collected using single-keypress
+reads via `termios`/`tty` — no readline, no blocking input. We already have
+TTY access inside `execute()` since fzf suspends its UI for the duration.
+
+**Implementation:**
+
+Add `cmd_internal_action_menu(argv)` to `internal.py`:
+- Open `/dev/tty` for both read and write
+- Set terminal to raw mode (`tty.setraw`) to read single keypresses
+- Write group menu, read one byte → group key
+- Write action menu for the selected group, read one byte → action key
+- `q` at either level cancels cleanly, restoring terminal state
+- Call `cmd_internal_exec` with the resolved action and paths
+- Restore terminal state (`termios.tcsetattr`) before exit
+
+The leader bind in `search.py` already calls `_internal-action-menu` as a
+stub — just implement the function body.
+
+**Files touched:** `internal.py` only. `search.py` bind is already correct.
+
+**Complexity:** Low. ~60 lines.
+
+**Depends on:** Nothing. Can be implemented immediately on a new branch.
 
 ---
 

@@ -140,6 +140,105 @@ def _dispatch_cmd(
     return " ".join(parts)
 
 
+
+# NOTE: _build_custom_action_binds disabled — fzf does not support
+# sequential key chaining (key1+key2+key3). Needs redesign as
+# mini-fzf picker. See TODO: Custom Action Trigger Redesign.
+# def _build_custom_action_binds(
+#     self_cmd: str,
+#     safe_state: str,
+#     get_header: str,
+#     custom_actions: dict,
+# ) -> list[str]:
+#     """Generate fzf --bind strings for the custom action which-key system.
+# 
+#     Produces three layers of chained binds per configured action:
+# 
+#       Layer 1 — leader key shows group list in header:
+#         leader → change-header([g] git  [f] file  [esc] cancel)
+# 
+#       Layer 2 — group key shows action list in header:
+#         leader+g → change-header(git ›  [a] add  [r] restore  [esc] cancel)
+# 
+#       Layer 3 — action key runs the command and restores normal header:
+#         leader+g+a → execute-silent(fzfr _internal-exec state g.a {+})
+#                    + transform-header(get_header)
+# 
+#     ESC bindings:
+#       leader+esc         → transform-header(get_header)   (cancel, restore)
+#       leader+g+esc       → change-header(<group list>)    (back to groups)
+# 
+#     Header strings for the which-key menus are baked at session start from
+#     the config — no subprocess spawned for group/action navigation. The
+#     "restore normal header" path uses transform-header so it correctly
+#     reflects the current mode/ext/hidden state even after CTRL-T toggles.
+# 
+#     fzf's native key1+key2+key3 chained bind syntax handles sequencing
+#     with no timeout or platform-specific interception.
+#     """
+#     leader = custom_actions.get("leader", "ctrl-space")
+#     groups = custom_actions.get("groups", {})
+# 
+#     if not groups:
+#         return []
+# 
+#     binds = []
+# 
+#     # Layer 1: leader → show group list
+#     group_list = "  ".join(
+#         f"[{gk}] {gv['label']}" for gk, gv in sorted(groups.items())
+#     )
+#     leader_header = f"actions ›  {group_list}  [esc] cancel"
+# 
+#     binds.append(
+#         f"--bind={leader}:change-header({leader_header})"
+#     )
+#     # ESC from leader level: restore dynamic header via transform-header
+#     binds.append(
+#         f"--bind={leader}+esc:transform-header({get_header})"
+#     )
+# 
+#     # Layers 2+3: per group
+#     for gk, gv in sorted(groups.items()):
+#         actions = gv.get("actions", {})
+#         g_label = gv.get("label", gk)
+# 
+#         # Layer 2: leader+group_key → show action list for this group
+#         action_list = "  ".join(
+#             f"[{ak}] {av['label']}" for ak, av in sorted(actions.items())
+#         )
+#         group_header = f"{g_label} ›  {action_list}  [esc] back"
+# 
+#         binds.append(
+#             f"--bind={leader}+{gk}:change-header({group_header})"
+#         )
+#         # ESC from group level: back to group list (static — no mode info needed)
+#         binds.append(
+#             f"--bind={leader}+{gk}+esc:change-header({leader_header})"
+#         )
+# 
+#         # Layer 3: leader+group_key+action_key → execute + restore header
+#         for ak, av in sorted(actions.items()):
+#             output = av.get("output", "silent")
+#             exec_cmd = (
+#                 f"{self_cmd} _internal-exec {safe_state} {gk}.{ak} {{+}}"
+#             )
+#             if output == "tmux":
+#                 fzf_action = f"execute({exec_cmd})"
+#             elif output == "preview":
+#                 fzf_action = f"execute({exec_cmd})+change-preview({exec_cmd})"
+#             else:  # silent
+#                 fzf_action = f"execute-silent({exec_cmd})"
+# 
+#             binds.append(
+#                 f"--bind={leader}+{gk}+{ak}:"
+#                 f"{fzf_action}"
+#                 f"+transform-header({get_header})"
+#             )
+# 
+#     return binds
+# 
+
 def build_fzf_invocation(
     ctx: SearchContext,
     fzf_remote_dir: Path,
@@ -278,6 +377,14 @@ def build_fzf_invocation(
             )
             else []
         ),
+        # Custom action leader bind — stub pending action-menu redesign.
+        # TODO: replace execute target with _internal-action-menu once
+        # mini-fzf picker is implemented. The which-key chained bind
+        # approach (key1+key2+key3) is not supported by fzf.
+        *([
+            "--bind=" + CONFIG.get("custom_actions", {}).get("leader", "ctrl-b") + ":"
+            "execute(" + self_cmd + " _internal-action-menu " + safe_state + " {+})"
+        ] if CONFIG.get("custom_actions", {}).get("groups") else []),
     ]
 
 
