@@ -39,7 +39,7 @@ import threading
 
 from .archive import FileKind, classify
 from .remote import _build_fd_rga_args, _build_remote_cmd
-from .session import acquire_socket, ssh_opts_for
+from .session import acquire_socket
 from .utils import _validate_exclude_pattern
 
 
@@ -165,8 +165,19 @@ def _list_remote(
     fd_args, _ = _build_fd_rga_args("f", "", hidden, safe_patterns)
     remote_cmd = _build_remote_cmd(fd_args, [], "", path or ".", relative=False)
 
+    # DESIGN: use the socket path returned by acquire_socket() directly
+    # rather than ssh_opts_for() which uses ControlMaster=auto and would
+    # create an unowned master if the daemon died between acquire and here.
+    ssh_opts = [
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        f"ControlPath={sock}",
+        "-o",
+        "ConnectTimeout=5",
+    ]
     proc = subprocess.Popen(
-        ["ssh"] + ssh_opts_for(host) + [host, remote_cmd],
+        ["ssh"] + ssh_opts + [host, remote_cmd],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
