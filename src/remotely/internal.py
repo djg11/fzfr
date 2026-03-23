@@ -409,9 +409,9 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
         # may contain pipes, redirects, or shell operators. All placeholder
         # values are shlex.quote()'d by _substitute_placeholders before here.
         def _run(extra: dict):
-            return subprocess.run(
+            return subprocess.run(  # nosemgrep: remotely-subprocess-shell-true
                 cmd, shell=True, **extra
-            )  # nosemgrep: remotely-subprocess-shell-true
+            )
 
     if output == "tmux":
         if "tmux" in AVAILABLE_TOOLS:

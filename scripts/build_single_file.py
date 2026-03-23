@@ -209,9 +209,8 @@ def build():
         sys.exit(1)
 
     OUT.write_text(output)
-    OUT.chmod(
-        0o755
-    )  # nosemgrep: remotely-world-readable-chmod -- executable script, world-read intentional
+    # executable script, world-read intentional
+    OUT.chmod(0o755)  # nosemgrep: remotely-world-readable-chmod
 
     lines = output.count("\n")
     size_kb = OUT.stat().st_size / 1024
