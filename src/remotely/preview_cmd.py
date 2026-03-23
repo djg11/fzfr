@@ -31,6 +31,7 @@ Examples:
 import sys
 from pathlib import Path
 
+from .copy import _resolve_remote_path
 from .preview import cmd_preview
 from .remote import cmd_remote_preview
 from .session import SSH_DEFERRED, acquire_socket
@@ -100,6 +101,15 @@ def cmd_preview_headless(argv: list) -> int:
     # SSH_DEFERRED means ~/.ssh/config handles multiplexing -- pass "" as
     # ssh_control so cmd_remote_preview uses no ControlPath override.
     ssh_control = sock if sock is not SSH_DEFERRED else ""
+
+    # Resolve ~ to an absolute path on the remote before use.
+    if path.startswith("~"):
+        path = _resolve_remote_path(host, path, ssh_control)
+        if not path:
+            print(
+                f"remotely preview: could not resolve path on {host}", file=sys.stderr
+            )
+            return 1
 
     # cmd_remote_preview argv: remote base_path ssh_control filename [query]
     # base_path is the directory portion of path; filename is the full path

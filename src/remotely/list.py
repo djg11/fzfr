@@ -38,6 +38,7 @@ import sys
 import threading
 
 from .archive import FileKind, classify
+from .copy import _resolve_remote_path
 from .remote import _build_fd_rga_args, _build_remote_cmd
 from .session import SSH_DEFERRED, acquire_socket
 from .utils import _validate_exclude_pattern
@@ -150,6 +151,16 @@ def _list_remote(
     Pushes None when done to signal completion to the drain loop.
     """
     sock = acquire_socket(host)
+
+    # Resolve ~ and relative paths on the remote before passing to fd.
+    # shlex.quote("~/demo") produces '~/demo' which the shell does not expand
+    # when passed as an fd argument -- must be resolved to an absolute path first.
+    if path.startswith("~") or not path.startswith("/"):
+        ssh_control = sock if sock and sock is not SSH_DEFERRED else ""
+        path = _resolve_remote_path(host, path, ssh_control)
+        if not path:
+            out_queue.put(None)
+            return
 
     for p in exclude_patterns:
         if not _validate_exclude_pattern(p):
