@@ -33,7 +33,7 @@ from pathlib import Path
 
 from .preview import cmd_preview
 from .remote import cmd_remote_preview
-from .session import acquire_socket
+from .session import SSH_DEFERRED, acquire_socket
 
 
 # ---------------------------------------------------------------------------
@@ -97,15 +97,15 @@ def cmd_preview_headless(argv: list) -> int:
 
     # Remote: ensure a session socket exists, then call cmd_remote_preview.
     sock = acquire_socket(host)
-    if not sock:
-        print(f"remotely preview: could not connect to {host}", file=sys.stderr)
-        return 1
+    # SSH_DEFERRED means ~/.ssh/config handles multiplexing -- pass "" as
+    # ssh_control so cmd_remote_preview uses no ControlPath override.
+    ssh_control = sock if sock is not SSH_DEFERRED else ""
 
     # cmd_remote_preview argv: remote base_path ssh_control filename [query]
     # base_path is the directory portion of path; filename is the full path
     # (cmd_remote_preview handles absolute paths correctly).
     base_path = str(Path(path).parent) if not path.endswith("/") else path
-    args = [host, base_path, sock, path]
+    args = [host, base_path, ssh_control, path]
     if query:
         args.append(query)
     return cmd_remote_preview(args)

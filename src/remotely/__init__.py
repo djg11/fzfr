@@ -158,6 +158,7 @@ from .internal import (
 )
 from .list import cmd_list
 from .open import cmd_open
+from .open_cmd import cmd_open_headless
 from .preview import cmd_preview
 from .preview_cmd import cmd_preview_headless
 from .remote import cmd_remote_preview, cmd_remote_reload
@@ -179,6 +180,7 @@ COMMAND_MAP = {
     "remotely-list": cmd_list,
     "list": cmd_list,
     "preview": cmd_preview_headless,
+    "open": cmd_open_headless,
     # -- Preview / open (internal fzf callbacks, unchanged) --
     "remotely-preview": cmd_preview,
     "remotely-open": cmd_open,

@@ -37,6 +37,7 @@ MODULE_ORDER = [
     "remote",
     "list",
     "preview_cmd",
+    "open_cmd",
     "search",
 ]
 

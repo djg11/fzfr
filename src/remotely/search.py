@@ -40,7 +40,7 @@ from .utils import _capture
 from .workbase import WORK_BASE
 
 
-def _self_cmd(path: Path | str | None) -> str:
+def _self_cmd(path):
     if path is None:
         return "python3"
     return f"python3 {shlex.quote(str(path))}"
@@ -49,12 +49,12 @@ def _self_cmd(path: Path | str | None) -> str:
 _FZF_MIN_VERSION = (0, 38)
 
 
-def _parse_fzf_version(version_str: str) -> tuple[int, ...]:
+def _parse_fzf_version(version_str):
     m = re.match(r"(\d+)\.(\d+)", version_str.strip())
     return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
 
 
-def check_dependencies() -> None:
+def check_dependencies():
     mandatory = ["fzf", "fd"]
     optional = ["bat", "rga", "pdftotext", "tmux", "file"]
     missing_mandatory = [t for t in mandatory if t not in AVAILABLE_TOOLS]
@@ -86,29 +86,15 @@ def check_dependencies() -> None:
         )
 
 
-def _dispatch_cmd(
-    ctx: SearchContext, state_path: Path, subcommand: str, *extra: str
-) -> str:
+def _dispatch_cmd(ctx, state_path, subcommand, *extra):
     self_cmd = _self_cmd(ctx.self_path)
     safe_state = shlex.quote(str(state_path))
     parts = [self_cmd, subcommand, safe_state] + list(extra)
     return " ".join(parts)
 
 
-def _build_custom_action_binds(
-    self_cmd: str,
-    safe_state: str,
-    custom_actions: dict,
-) -> list[str]:
-    """Generate fzf --bind strings for the custom action leader.
-
-    The which-key chained bind approach (key1+key2+key3) is not supported
-    by fzf. The leader key fires execute-silent which calls
-    _internal-action-menu, which uses SIGSTOP/SIGCONT to freeze fzf and
-    handle the menu itself.
-
-    Returns a single leader bind, or an empty list when no groups are configured.
-    """
+def _build_custom_action_binds(self_cmd, safe_state, custom_actions):
+    """Generate fzf --bind strings for the custom action leader."""
     leader = custom_actions.get("leader", "ctrl-b")
     groups = custom_actions.get("groups", {})
     if not groups:
@@ -118,11 +104,7 @@ def _build_custom_action_binds(
     ]
 
 
-def build_fzf_invocation(
-    ctx: SearchContext,
-    fzf_remote_dir: Path,
-    state_path: Path,
-) -> list[str]:
+def build_fzf_invocation(ctx, fzf_remote_dir, state_path):
     """Return the complete fzf argv list for one remotely session."""
     self_cmd = _self_cmd(ctx.self_path)
     safe_state = shlex.quote(str(state_path))
@@ -150,7 +132,7 @@ def build_fzf_invocation(
             f"'' '' '' {safe_state} {safe_self} {{q}} {{+}}"
         )
 
-    def _toggle(action_name: str, op: str) -> str:
+    def _toggle(action_name, op):
         key = keybindings.get(action_name, _CONFIG_DEFAULTS["keybindings"][action_name])
         mutate = f"{self_cmd} _internal-toggle-{op} {safe_state}"
         return (
@@ -231,7 +213,7 @@ def build_fzf_invocation(
     ]
 
 
-def _cleanup(session_dir: Path, ssh_control: str) -> None:
+def _cleanup(session_dir, ssh_control):
     """Remove temporary files and optionally close the managed SSH master."""
     if ssh_control and Path(ssh_control).exists():
         remote = os.environ.get("REMOTELY_REMOTE", "")
@@ -254,7 +236,7 @@ def _cleanup(session_dir: Path, ssh_control: str) -> None:
                 shutil.rmtree(entry.path, ignore_errors=True)
 
 
-def _find_git_root() -> str | None:
+def _find_git_root():
     """Search upwards from cwd for a .git folder."""
     curr = Path.cwd().resolve()
     for parent in [curr] + list(curr.parents):
@@ -263,14 +245,41 @@ def _find_git_root() -> str | None:
     return None
 
 
-def _parse_argv(argv: list[str]) -> tuple[str, str, str, list[str]]:
+def _split_host_path(token):
+    """Split a host:/path token into (host, path).
+
+    Returns ("", token) for local paths (starting with / . or ~).
+    Returns (host, path) for remote tokens containing host:/path or host:~/path.
+    Returns (token, "") for a bare hostname with no path component.
+
+    This mirrors the logic in preview_cmd._parse_target_path so that
+    ./remotely pi5.box:~/demo and ./remotely pi5.box /path both work.
+    """
+    if token.startswith("/") or token.startswith("~") or token.startswith("."):
+        return "", token
+    for i, ch in enumerate(token):
+        if ch == ":" and i > 0 and i + 1 < len(token) and token[i + 1] in ("/", "~"):
+            return token[:i], token[i + 1 :]
+    # Bare hostname -- no path component
+    if token != "local" and "@" in token or "." in token:
+        return token, ""
+    return "", token
+
+
+def _parse_argv(argv):
     """Parse cmd_search argv into (target, raw_base, mode, exclude_patterns).
 
-    Separates --exclude flags from positional arguments so cmd_search stays
-    focused on session setup rather than argument wrangling.
+    Accepts both the legacy form:
+        remotely user@host /path [mode]
+
+    And the new host:/path form:
+        remotely user@host:/path [mode]
+        remotely user@host:~/path [mode]
+
+    Separates --exclude flags from positional arguments.
     """
-    exclude_patterns: list[str] = []
-    positional: list[str] = []
+    exclude_patterns = []
+    positional = []
     i = 0
     while i < len(argv):
         if argv[i] == "--exclude":
@@ -284,15 +293,45 @@ def _parse_argv(argv: list[str]) -> tuple[str, str, str, list[str]]:
             positional.append(argv[i])
             i += 1
 
-    target = positional[0] if positional else "local"
-    raw_base = positional[1] if len(positional) > 1 else ""
-    mode = (
-        positional[2] if len(positional) > 2 else CONFIG.get("default_mode", "content")
-    )
+    if not positional:
+        return "local", "", CONFIG.get("default_mode", "content"), exclude_patterns
+
+    first = positional[0]
+
+    # Check if the first token is host:/path form
+    host, path = _split_host_path(first)
+
+    if host and host != "local":
+        # host:/path form -- path may be overridden by a second positional
+        target = host
+        raw_base = (
+            positional[1]
+            if len(positional) > 1 and not positional[1].startswith("-")
+            else path
+        )
+        # If second positional looks like a mode keyword, treat it as mode
+        mode_keywords = {"content", "name"}
+        if len(positional) > 1 and positional[1] in mode_keywords:
+            raw_base = path
+            mode = positional[1]
+        elif len(positional) > 2 and positional[2] in mode_keywords:
+            mode = positional[2]
+        else:
+            mode = CONFIG.get("default_mode", "content")
+    else:
+        # Legacy form: remotely [local|host] [path] [mode]
+        target = first
+        raw_base = positional[1] if len(positional) > 1 else ""
+        mode = (
+            positional[2]
+            if len(positional) > 2
+            else CONFIG.get("default_mode", "content")
+        )
+
     return target, raw_base, mode, exclude_patterns
 
 
-def cmd_search(argv: list[str]) -> int:
+def cmd_search(argv):
     """Entry point for the main remotely UI."""
     if argv and argv[0] in ("--help", "-h"):
         print((__doc__ or "").strip())
@@ -332,7 +371,7 @@ def cmd_search(argv: list[str]) -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: (_cleanup(session_dir, ssh_control), sys.exit(0)))
 
-    def _open_file_sweeper() -> None:
+    def _open_file_sweeper():
         while True:
             time.sleep(10)
             now = time.time()
@@ -356,7 +395,7 @@ def cmd_search(argv: list[str]) -> int:
 
     try:
         if target != "local":
-            be: LocalBackend | RemoteBackend = RemoteBackend(target, "", ssh_control)
+            be = RemoteBackend(target, "", ssh_control)
             base_path = be.resolve_base(raw_base)
             be.base_path = base_path
             remote = target

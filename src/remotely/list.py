@@ -39,7 +39,7 @@ import threading
 
 from .archive import FileKind, classify
 from .remote import _build_fd_rga_args, _build_remote_cmd
-from .session import acquire_socket
+from .session import SSH_DEFERRED, acquire_socket
 from .utils import _validate_exclude_pattern
 
 
@@ -150,9 +150,6 @@ def _list_remote(
     Pushes None when done to signal completion to the drain loop.
     """
     sock = acquire_socket(host)
-    if not sock:
-        out_queue.put(None)
-        return
 
     for p in exclude_patterns:
         if not _validate_exclude_pattern(p):
@@ -165,17 +162,20 @@ def _list_remote(
     fd_args, _ = _build_fd_rga_args("f", "", hidden, safe_patterns)
     remote_cmd = _build_remote_cmd(fd_args, [], "", path or ".", relative=False)
 
-    # DESIGN: use the socket path returned by acquire_socket() directly
-    # rather than ssh_opts_for() which uses ControlMaster=auto and would
-    # create an unowned master if the daemon died between acquire and here.
-    ssh_opts = [
-        "-o",
-        "ControlMaster=no",
-        "-o",
-        f"ControlPath={sock}",
-        "-o",
-        "ConnectTimeout=5",
-    ]
+    # DESIGN: sock is either a managed socket path or SSH_DEFERRED ("").
+    # SSH_DEFERRED means ~/.ssh/config handles multiplexing -- pass no
+    # extra flags and let ssh use the user's config unchanged.
+    if sock and sock is not SSH_DEFERRED:
+        ssh_opts = [
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            f"ControlPath={sock}",
+            "-o",
+            "ConnectTimeout=5",
+        ]
+    else:
+        ssh_opts = []
     proc = subprocess.Popen(
         ["ssh"] + ssh_opts + [host, remote_cmd],
         stdout=subprocess.PIPE,
