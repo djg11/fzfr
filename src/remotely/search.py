@@ -260,8 +260,8 @@ def _split_host_path(token):
     for i, ch in enumerate(token):
         if ch == ":" and i > 0 and i + 1 < len(token) and token[i + 1] in ("/", "~"):
             return token[:i], token[i + 1 :]
-    # Bare hostname -- no path component
-    if token != "local" and "@" in token or "." in token:
+    # Bare hostname: must contain @ or . but not be "local"
+    if token != "local" and ("@" in token or "." in token):
         return token, ""
     return "", token
 
