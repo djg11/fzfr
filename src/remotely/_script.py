@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 
-VERSION = "0.9.4"
+VERSION = "0.9.5"
 
 
 _SHEBANG = b"#!/usr/bin/env python3"
