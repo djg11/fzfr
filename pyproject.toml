@@ -3,14 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fzfr"
-# To release: update VERSION in src/fzfr/_script.py only.
+name = "remotely-ssh"
+# To release: update VERSION in src/remotely/_script.py only.
 dynamic = ["version"]
 description = "Fuzzy file search for local and remote filesystems"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
-keywords = ["fzf", "fuzzy", "search", "ssh", "remote", "terminal", "cli"]
+keywords = ["fzf", "fuzzy", "search", "ssh", "remote", "terminal", "cli", "television"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -35,29 +35,29 @@ dev = [
 ]
 
 [project.scripts]
-fzfr                = "fzfr:main"
-fzfr-preview        = "fzfr:main"
-fzfr-open           = "fzfr:main"
-fzfr-remote-reload  = "fzfr:main"
-fzfr-remote-preview = "fzfr:main"
-fzfr-copy           = "fzfr:main"
+remotely                = "remotely:main"
+remotely-preview        = "remotely:main"
+remotely-open           = "remotely:main"
+remotely-remote-reload  = "remotely:main"
+remotely-remote-preview = "remotely:main"
+remotely-copy           = "remotely:main"
 
 [project.urls]
-Homepage   = "https://github.com/djg11/fzfr"
-Repository = "https://github.com/djg11/fzfr"
-Issues     = "https://github.com/djg11/fzfr/issues"
+Homepage   = "https://github.com/djg11/remotely"
+Repository = "https://github.com/djg11/remotely"
+Issues     = "https://github.com/djg11/remotely/issues"
 
 [tool.setuptools]
-# py-modules is used for PyPI packaging (cp fzfr fzfr.py before python -m build).
+# py-modules is used for PyPI packaging (cp remotely remotely.py before python -m build).
 # For editable dev installs (pip install -e .[dev]), setuptools finds
-# the src/fzfr/ package via package-dir below.
-py-modules = ["fzfr"]
+# the src/remotely/ package via package-dir below.
+py-modules = ["remotely"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.dynamic]
-version = {attr = "fzfr._script.VERSION"}
+version = {attr = "remotely._script.VERSION"}
 
 # -- Ruff: linter + formatter --------------------------------------------------
 # Ruff replaces flake8, isort, pyupgrade, and black in one tool.
@@ -96,7 +96,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.isort]
-known-first-party = ["fzfr"]
+known-first-party = ["remotely"]
 force-single-line = false
 lines-after-imports = 2
 

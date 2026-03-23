@@ -1,4 +1,4 @@
-"""fzfr.utils — Low-level subprocess and MIME helpers.
+"""remotely.utils — Low-level subprocess and MIME helpers.
 
 _capture()         run a command and return (stdout, returncode), bounded
                    by max_bytes to prevent memory exhaustion on large output

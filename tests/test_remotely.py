@@ -1,12 +1,12 @@
 """
-test_fzfr.py — Unit tests for fzfr.
+test_remotely.py — Unit tests for remotely.
 
 Covers the highest-risk functions: quoting, path safety, extension parsing,
 config merging, remote arg building, fzf version parsing, state management,
 archive classification, backend dispatch, and script self-location.
 
 Run with:
-    python3 -m pytest tests/test_fzfr.py -v
+    python3 -m pytest tests/test_remotely.py -v
     python3 -m unittest discover -s tests -v   # no pytest required
     make test
 """
@@ -26,7 +26,7 @@ from unittest.mock import MagicMock, patch
 # Module import
 #
 # Prefer the src/ package (clean imports, works during development).
-# Fall back to the built single-file fzfr script (works after make build,
+# Fall back to the built single-file remotely script (works after make build,
 # and in CI where src/ may not be on the path).
 # ---------------------------------------------------------------------------
 
@@ -35,57 +35,57 @@ src_path = here.parent / "src"
 
 if src_path.exists():
     sys.path.insert(0, str(src_path))
-    import fzfr
-    from fzfr._script import _find_self, _is_built_script
-    from fzfr.archive import FileKind, classify
-    from fzfr.backends import LocalBackend, RemoteBackend, backend_from_state
-    from fzfr.config import _CONFIG_DEFAULTS, _merge_config_key, load_config
-    from fzfr.copy import _resolve_remote_path
-    from fzfr.open import _dquote
-    from fzfr.remote import (
+    import remotely
+    from remotely._script import _find_self, _is_built_script
+    from remotely.archive import FileKind, classify
+    from remotely.backends import LocalBackend, RemoteBackend, backend_from_state
+    from remotely.config import _CONFIG_DEFAULTS, _merge_config_key, load_config
+    from remotely.copy import _resolve_remote_path
+    from remotely.open import _dquote
+    from remotely.remote import (
         _build_fd_rga_args,
         _build_remote_cmd,
         _parse_remote_reload_args,
     )
-    from fzfr.search import _find_git_root, _parse_fzf_version
-    from fzfr.state import _load_state, _mutate_state, _save_state
-    from fzfr.utils import _parse_extensions, _validate_exclude_pattern
-    from fzfr.workbase import _assert_not_symlink
+    from remotely.search import _find_git_root, _parse_fzf_version
+    from remotely.state import _load_state, _mutate_state, _save_state
+    from remotely.utils import _parse_extensions, _validate_exclude_pattern
+    from remotely.workbase import _assert_not_symlink
 else:
     import importlib.util
     from importlib.machinery import SourceFileLoader
 
-    candidates = [here.parent / "fzfr", here.parent / "fzfr.py"]
+    candidates = [here.parent / "remotely", here.parent / "remotely.py"]
     script = next((p for p in candidates if p.exists()), None)
     if script is None:
-        raise FileNotFoundError(f"fzfr not found. Searched: {candidates}")
-    loader = SourceFileLoader("fzfr", str(script))
-    spec = importlib.util.spec_from_loader("fzfr", loader)
-    fzfr = importlib.util.module_from_spec(spec)
-    loader.exec_module(fzfr)
-    _parse_extensions = fzfr._parse_extensions
-    _CONFIG_DEFAULTS = fzfr._CONFIG_DEFAULTS
-    _merge_config_key = fzfr._merge_config_key
-    load_config = fzfr.load_config
-    LocalBackend = fzfr.LocalBackend
-    RemoteBackend = fzfr.RemoteBackend
-    backend_from_state = fzfr.backend_from_state
-    _dquote = fzfr._dquote
-    _build_fd_rga_args = fzfr._build_fd_rga_args
-    _build_remote_cmd = fzfr._build_remote_cmd
-    _parse_remote_reload_args = fzfr._parse_remote_reload_args
-    _parse_fzf_version = fzfr._parse_fzf_version
-    _find_git_root = fzfr._find_git_root
-    _is_built_script = fzfr._is_built_script
-    _find_self = fzfr._find_self
-    _save_state = fzfr._save_state
-    _load_state = fzfr._load_state
-    _mutate_state = fzfr._mutate_state
-    _assert_not_symlink = fzfr._assert_not_symlink
-    classify = fzfr.classify
-    FileKind = fzfr.FileKind
-    _resolve_remote_path = fzfr._resolve_remote_path
-    _validate_exclude_pattern = fzfr._validate_exclude_pattern
+        raise FileNotFoundError(f"remotely not found. Searched: {candidates}")
+    loader = SourceFileLoader("remotely", str(script))
+    spec = importlib.util.spec_from_loader("remotely", loader)
+    remotely = importlib.util.module_from_spec(spec)
+    loader.exec_module(remotely)
+    _parse_extensions = remotely._parse_extensions
+    _CONFIG_DEFAULTS = remotely._CONFIG_DEFAULTS
+    _merge_config_key = remotely._merge_config_key
+    load_config = remotely.load_config
+    LocalBackend = remotely.LocalBackend
+    RemoteBackend = remotely.RemoteBackend
+    backend_from_state = remotely.backend_from_state
+    _dquote = remotely._dquote
+    _build_fd_rga_args = remotely._build_fd_rga_args
+    _build_remote_cmd = remotely._build_remote_cmd
+    _parse_remote_reload_args = remotely._parse_remote_reload_args
+    _parse_fzf_version = remotely._parse_fzf_version
+    _find_git_root = remotely._find_git_root
+    _is_built_script = remotely._is_built_script
+    _find_self = remotely._find_self
+    _save_state = remotely._save_state
+    _load_state = remotely._load_state
+    _mutate_state = remotely._mutate_state
+    _assert_not_symlink = remotely._assert_not_symlink
+    classify = remotely.classify
+    FileKind = remotely.FileKind
+    _resolve_remote_path = remotely._resolve_remote_path
+    _validate_exclude_pattern = remotely._validate_exclude_pattern
 
 
 # ---------------------------------------------------------------------------
@@ -452,7 +452,7 @@ class TestIsBuiltScript(unittest.TestCase):
             path.unlink()
 
     def test_nonexistent_path_returns_false(self):
-        self.assertFalse(_is_built_script(Path("/nonexistent/path/fzfr")))
+        self.assertFalse(_is_built_script(Path("/nonexistent/path/remotely")))
 
     def test_partial_shebang_is_not_built(self):
         with tempfile.NamedTemporaryFile(delete=False) as f:
@@ -544,7 +544,7 @@ class TestBackendFromState(unittest.TestCase):
 
 class TestState(unittest.TestCase):
     def setUp(self):
-        from fzfr.workbase import WORK_BASE
+        from remotely.workbase import WORK_BASE
 
         WORK_BASE.mkdir(parents=True, exist_ok=True)
         self.tmp = tempfile.mkdtemp(dir=WORK_BASE)
@@ -589,7 +589,7 @@ class TestState(unittest.TestCase):
         # SECURITY: _load_state rejects paths outside WORK_BASE — state paths
         # arrive as argv elements from fzf callbacks and must not be attacker-
         # controlled paths outside the session directory.
-        outside = Path("/tmp/fzfr_test_outside_workbase_xyz.json")
+        outside = Path("/tmp/remotely_test_outside_workbase_xyz.json")
         result = _load_state(outside)
         self.assertEqual(result, {})
 
@@ -613,7 +613,7 @@ class TestAssertNotSymlink(unittest.TestCase):
             path.unlink()
 
     def test_nonexistent_path_passes(self):
-        _assert_not_symlink(Path("/nonexistent/xyz_fzfr_test"))  # must not raise
+        _assert_not_symlink(Path("/nonexistent/xyz_remotely_test"))  # must not raise
 
     def test_symlink_exits(self):
         with tempfile.TemporaryDirectory() as d:

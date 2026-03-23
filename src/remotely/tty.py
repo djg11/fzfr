@@ -1,4 +1,4 @@
-"""fzfr.tty — TTY prompt helper.
+"""remotely.tty — TTY prompt helper.
 
 Opens /dev/tty directly so interactive prompts work even when fzf has
 redirected both stdin and stdout for its own UI.

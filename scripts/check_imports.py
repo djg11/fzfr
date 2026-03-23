@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Scan src/fzfr/ for late imports (imports inside function/class bodies).
+"""Scan src/remotely/ for late imports (imports inside function/class bodies).
 
 Late imports are stripped by the build script and leave undefined names
 in the flat built file. Run this before committing.
@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 
-SRC = Path(__file__).parent.parent / "src" / "fzfr"
+SRC = Path(__file__).parent.parent / "src" / "remotely"
 
 
 def check_file(path: Path) -> list[tuple[int, str]]:

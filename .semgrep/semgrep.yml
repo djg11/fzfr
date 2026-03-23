@@ -7,15 +7,15 @@ rules:
 
   # ---------------------------------------------------------------------------
   #  subprocess with shell=True
-  #  Any subprocess call with shell=True is dangerous in fzfr because user-
+  #  Any subprocess call with shell=True is dangerous in remotely because user-
   #  controlled values (paths, queries, extensions) flow into these calls.
   #  All legitimate subprocess usage in the codebase uses list-form args.
   # ---------------------------------------------------------------------------
-  - id: fzfr-subprocess-shell-true
+  - id: remotely-subprocess-shell-true
     patterns:
       - pattern: subprocess.$FUNC(..., shell=True, ...)
     message: >
-      subprocess called with shell=True. fzfr's quoting discipline requires
+      subprocess called with shell=True. remotely's quoting discipline requires
       list-form subprocess calls for local commands. shell=True is only
       acceptable for pre-quoted SSH remote command fragments, and must be
       explicitly documented.
@@ -28,7 +28,7 @@ rules:
   # ---------------------------------------------------------------------------
   # os.system() — always runs through a shell
   # ---------------------------------------------------------------------------
-  - id: fzfr-no-os-system
+  - id: remotely-no-os-system
     patterns:
       - pattern: os.system(...)
     message: >
@@ -45,7 +45,7 @@ rules:
   # Catches common patterns like token = "...", password = "..." with a
   # non-empty string literal value.
   # ---------------------------------------------------------------------------
-  - id: fzfr-hardcoded-secret
+  - id: remotely-hardcoded-secret
     patterns:
       - pattern: $KEY = "$VALUE"
       - metavariable-regex:
@@ -65,10 +65,10 @@ rules:
 
   # ---------------------------------------------------------------------------
   # Unsafe tempfile creation — using tempfile.mktemp() (TOCTOU)
-  # fzfr correctly uses mkstemp/mkdtemp everywhere, but guard against
+  # remotely correctly uses mkstemp/mkdtemp everywhere, but guard against
   # a regression to the insecure mktemp().
   # ---------------------------------------------------------------------------
-  - id: fzfr-no-mktemp
+  - id: remotely-no-mktemp
     patterns:
       - pattern: tempfile.mktemp(...)
     message: >
@@ -86,7 +86,7 @@ rules:
   # shell command string MUST go through shlex.quote or shlex.join.
   # Flag f-strings that embed variables directly into ssh command strings.
   # ---------------------------------------------------------------------------
-  - id: fzfr-ssh-unquoted-fstring
+  - id: remotely-ssh-unquoted-fstring
     patterns:
       - pattern: |
           subprocess.$FUNC(["ssh", ..., f"...{$VAR}..."], ...)
@@ -108,7 +108,7 @@ rules:
   # Catches places where a user-supplied string is joined with Path() and
   # used directly in a file operation without going through is_safe_subpath.
   # ---------------------------------------------------------------------------
-  - id: fzfr-path-traversal-open
+  - id: remotely-path-traversal-open
     patterns:
       - pattern: open(str(Path($BASE) / $USER_INPUT), ...)
       - pattern-not-inside: |
@@ -130,7 +130,7 @@ rules:
   # checks must use explicit if/raise or sys.exit().
   # (proc.stdout asserts are fine; flag assert on path/permission checks.)
   # ---------------------------------------------------------------------------
-  - id: fzfr-assert-security-check
+  - id: remotely-assert-security-check
     patterns:
       - pattern: assert $X.is_relative_to(...)
       - pattern: assert $X.is_symlink() == False
@@ -149,7 +149,7 @@ rules:
   # Session dirs, known_hosts, frozen scripts must all be 0o700 or 0o600.
   # Flag any chmod that sets world-readable bits (o+r = 0o004).
   # ---------------------------------------------------------------------------
-  - id: fzfr-world-readable-chmod
+  - id: remotely-world-readable-chmod
     patterns:
       - pattern: $PATH.chmod($MODE)
       - metavariable-regex:
@@ -170,7 +170,7 @@ rules:
   # bare `except: pass` or `except Exception: pass` in security-sensitive
   # code silently swallows failures that should surface to the caller.
   # ---------------------------------------------------------------------------
-  - id: fzfr-silent-exception-security
+  - id: remotely-silent-exception-security
     patterns:
       - pattern: |
           try:
@@ -203,7 +203,7 @@ rules:
   # on the remote host. Any variable interpolated without shlex.quote is
   # potential RCE on the remote machine.
   # ---------------------------------------------------------------------------
-  - id: fzfr-remote-cmd-unquoted-var
+  - id: remotely-remote-cmd-unquoted-var
     patterns:
       - pattern: f"...{$VAR}..."
       - pattern-not: f"...{shlex.quote($VAR)}..."
@@ -221,7 +221,7 @@ rules:
       category: security
       cwe: CWE-78
 
-  - id: fzfr-upload-cmd-unquoted-var
+  - id: remotely-upload-cmd-unquoted-var
     patterns:
       - pattern: f"...{$VAR}..."
       - pattern-not: f"...{shlex.quote($VAR)}..."
@@ -245,7 +245,7 @@ rules:
   # alphanumeric-only. exclude_patterns from config/CLI do not — they flow
   # directly into fd -E and rga --exclude args.
   # ---------------------------------------------------------------------------
-  - id: fzfr-exclude-pattern-no-validation
+  - id: remotely-exclude-pattern-no-validation
     patterns:
       - pattern: |
           for $P in $PATTERNS:
@@ -268,7 +268,7 @@ rules:
   # State file bypass — _load_state enforces the WORK_BASE boundary.
   # Direct json.loads(Path(...).read_text()) calls skip that check entirely.
   # ---------------------------------------------------------------------------
-  - id: fzfr-state-read-bypass
+  - id: remotely-state-read-bypass
     patterns:
       - pattern: json.loads(Path($P).read_text())
       - pattern-not-inside: |
@@ -290,7 +290,7 @@ rules:
   # causes double-escaping and breaks filenames with spaces or special chars.
   # This is the most common mistake when editing fzf --bind strings.
   # ---------------------------------------------------------------------------
-  - id: fzfr-fzf-placeholder-quoted
+  - id: remotely-fzf-placeholder-quoted
     patterns:
       - pattern: $X + "'{q}'" + $Y
       - pattern: $X + "'{}'" + $Y
@@ -308,7 +308,7 @@ rules:
   # A hung SSH connection blocks the fzf preview pane indefinitely.
   # Flag ssh calls in run() (blocking) but not Popen() (non-blocking).
   # ---------------------------------------------------------------------------
-  - id: fzfr-ssh-call-no-timeout
+  - id: remotely-ssh-call-no-timeout
     patterns:
       - pattern: subprocess.run(["ssh", ...], ...)
       - pattern-not: subprocess.run(["ssh", ...], ..., timeout=..., ...)
@@ -327,7 +327,7 @@ rules:
   # New subdirectories created under it re-open the TOCTOU window unless
   # _assert_not_symlink is called on the new path too.
   # ---------------------------------------------------------------------------
-  - id: fzfr-workbase-mkdir-no-symlink-check
+  - id: remotely-workbase-mkdir-no-symlink-check
     patterns:
       - pattern: |
           $PATH = WORK_BASE / $NAME

@@ -1,4 +1,4 @@
-"""fzfr.dispatch — _internal-dispatch router for preview and reload callbacks.
+"""remotely.dispatch — _internal-dispatch router for preview and reload callbacks.
 
 Reconstitutes the session backend from the state file on every call and
 delegates to backend.preview() or backend.reload(). All local/remote

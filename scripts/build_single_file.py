@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# build_single_file.py - Concatenate src/fzfr/ modules into a single fzfr script.
+# build_single_file.py - Concatenate src/remotely/ modules into a single remotely script.
 #
 # Run from the repository root:
 #     python3 scripts/build_single_file.py
 #
-# The output file (fzfr) is the sole distributable artefact. Never edit it
-# directly -- always edit the source modules in src/fzfr/ and rebuild.
+# The output file (remotely) is the sole distributable artefact. Never edit it
+# directly -- always edit the source modules in src/remotely/ and rebuild.
 
 import ast
 import re
@@ -14,8 +14,8 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).parent.parent
-SRC = REPO_ROOT / "src" / "fzfr"
-OUT = REPO_ROOT / "fzfr"
+SRC = REPO_ROOT / "src" / "remotely"
+OUT = REPO_ROOT / "remotely"
 
 MODULE_ORDER = [
     "_script",
@@ -37,9 +37,9 @@ MODULE_ORDER = [
     "search",
 ]
 
-# Multi-line intra-package imports (from .X import ... or from fzfr.X import ...)
+# Multi-line intra-package imports (from .X import ... or from remotely.X import ...)
 INTRA_IMPORT_RE = re.compile(
-    r"^from \.([\w]+) import \(.*?\)|^from \.([\w]+) import [^\n]+|^from fzfr\.[\w]+ import [^\n]+",
+    r"^from \.([\w]+) import \(.*?\)|^from \.([\w]+) import [^\n]+|^from remotely\.[\w]+ import [^\n]+",
     re.MULTILINE | re.DOTALL,
 )
 
@@ -96,7 +96,9 @@ def _collect_imports(raw_sources):
             if isinstance(node, ast.ImportFrom) and (
                 node.level
                 and node.level > 0  # relative: from .x import y
-                or (node.module or "").startswith("fzfr.")  # from fzfr.x import y
+                or (node.module or "").startswith(
+                    "remotely."
+                )  # from remotely.x import y
             ):
                 continue
             # Reconstruct the import line
@@ -118,7 +120,7 @@ def _collect_imports(raw_sources):
 
 
 def _get_module_doc():
-    # Read the module docstring from src/fzfr/__init__.py using ast.
+    # Read the module docstring from src/remotely/__init__.py using ast.
     # This is the single source of truth -- no circular dependency on the built file.
     src = (SRC / "__init__.py").read_text()
     try:
@@ -130,7 +132,7 @@ def _get_module_doc():
     except SyntaxError:
         pass
     tq = chr(34) * 3
-    return tq + "fzfr - Fuzzy file search for local and remote filesystems." + tq
+    return tq + "remotely - Fuzzy file search for local and remote filesystems." + tq
 
 
 def build():
@@ -158,7 +160,7 @@ def build():
         "if _sys.version_info < (3, 10):  "
         "# type: ignore[comparison-overlap, unreachable]\n"
         "    print(  # type: ignore[unreachable]\n"
-        '        f"Error: fzfr requires Python 3.10 or later "\n'
+        '        f"Error: remotely requires Python 3.10 or later "\n'
         '        f"(found {_sys.version_info.major}.{_sys.version_info.minor}).",\n'
         "        file=_sys.stderr,\n"
         "    )\n"
@@ -209,7 +211,7 @@ def build():
     OUT.write_text(output)
     OUT.chmod(
         0o755
-    )  # nosemgrep: fzfr-world-readable-chmod -- executable script, world-read intentional
+    )  # nosemgrep: remotely-world-readable-chmod -- executable script, world-read intentional
 
     lines = output.count("\n")
     size_kb = OUT.stat().st_size / 1024

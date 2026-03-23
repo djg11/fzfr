@@ -1,4 +1,4 @@
-"""fzfr.search -- Main search UI: fzf invocation, session lifecycle, dependencies.
+"""remotely.search -- Main search UI: fzf invocation, session lifecycle, dependencies.
 
 Entry point is cmd_search(). It:
 
@@ -10,11 +10,11 @@ Entry point is cmd_search(). It:
      via build_fzf_invocation()
   5. Runs fd | fzf (local) or launches fzf and streams remote fd output to it
   6. Cleans up the session directory and SSH socket on exit via _cleanup().
-     A background daemon thread also sweeps fzfr-open-* temp files from the
+     A background daemon thread also sweeps remotely-open-* temp files from the
      session directory after 30 seconds during long sessions. Remote agents
      leverage /dev/shm for transience where available.
 
-The session directory lives under WORK_BASE (usually /dev/shm/fzfr/) for
+The session directory lives under WORK_BASE (usually /dev/shm/remotely/) for
 low-latency I/O. Each session gets a uuid-named subdirectory that is removed
 on clean exit or swept by the next session if the previous one crashed.
 """
@@ -123,7 +123,7 @@ def build_fzf_invocation(
     fzf_remote_dir: Path,
     state_path: Path,
 ) -> list[str]:
-    """Return the complete fzf argv list for one fzfr session."""
+    """Return the complete fzf argv list for one remotely session."""
     self_cmd = _self_cmd(ctx.self_path)
     safe_state = shlex.quote(str(state_path))
     safe_self = shlex.quote(str(ctx.self_path))
@@ -140,13 +140,13 @@ def build_fzf_invocation(
 
     if ctx.remote:
         open_cmd = (
-            f"{self_cmd} fzfr-open {ctx.safe_remote} {ctx.safe_base} "
+            f"{self_cmd} remotely-open {ctx.safe_remote} {ctx.safe_base} "
             f"{ctx.safe_remote} {shlex.quote(str(fzf_remote_dir))} "
             f"{safe_ctrl} {safe_state} {safe_self} {{q}} {{+}}"
         )
     else:
         open_cmd = (
-            f"{self_cmd} fzfr-open local {ctx.safe_base} "
+            f"{self_cmd} remotely-open local {ctx.safe_base} "
             f"'' '' '' {safe_state} {safe_self} {{q}} {{+}}"
         )
 
@@ -213,9 +213,9 @@ def build_fzf_invocation(
         *(
             [
                 (
-                    f"--bind={keybindings.get('copy_path', _CONFIG_DEFAULTS['keybindings']['copy_path'])}:execute-silent({self_cmd} fzfr-copy {ctx.safe_remote} {ctx.safe_base} {ctx.safe_remote} {safe_ctrl} {{}})"
+                    f"--bind={keybindings.get('copy_path', _CONFIG_DEFAULTS['keybindings']['copy_path'])}:execute-silent({self_cmd} remotely-copy {ctx.safe_remote} {ctx.safe_base} {ctx.safe_remote} {safe_ctrl} {{}})"
                     if ctx.remote
-                    else f"--bind={keybindings.get('copy_path', _CONFIG_DEFAULTS['keybindings']['copy_path'])}:execute-silent({self_cmd} fzfr-copy local {ctx.safe_base} '' '' {{}})"
+                    else f"--bind={keybindings.get('copy_path', _CONFIG_DEFAULTS['keybindings']['copy_path'])}:execute-silent({self_cmd} remotely-copy local {ctx.safe_base} '' '' {{}})"
                 )
             ]
             if "xclip" in AVAILABLE_TOOLS
@@ -234,7 +234,7 @@ def build_fzf_invocation(
 def _cleanup(session_dir: Path, ssh_control: str) -> None:
     """Remove temporary files and optionally close the managed SSH master."""
     if ssh_control and Path(ssh_control).exists():
-        remote = os.environ.get("FZFR_REMOTE", "")
+        remote = os.environ.get("REMOTELY_REMOTE", "")
         if remote:
             subprocess.run(
                 ["ssh", "-O", "exit", "-S", ssh_control, remote],
@@ -248,7 +248,7 @@ def _cleanup(session_dir: Path, ssh_control: str) -> None:
         for entry in os.scandir(str(WORK_BASE)):
             if (
                 entry.is_dir()
-                and entry.name.startswith("fzfr-session-")
+                and entry.name.startswith("remotely-session-")
                 and now - entry.stat().st_mtime > 300
             ):
                 shutil.rmtree(entry.path, ignore_errors=True)
@@ -293,12 +293,12 @@ def _parse_argv(argv: list[str]) -> tuple[str, str, str, list[str]]:
 
 
 def cmd_search(argv: list[str]) -> int:
-    """Entry point for the main fzfr UI."""
+    """Entry point for the main remotely UI."""
     if argv and argv[0] in ("--help", "-h"):
         print((__doc__ or "").strip())
         return 0
     if argv and argv[0] in ("--version", "-v"):
-        print(f"fzfr {VERSION}")
+        print(f"remotely {VERSION}")
         return 0
 
     target, raw_base, mode, exclude_patterns_cli = _parse_argv(argv)
@@ -313,16 +313,16 @@ def cmd_search(argv: list[str]) -> int:
             )
             sys.exit(1)
 
-    session_dir = Path(tempfile.mkdtemp(prefix="fzfr-session-", dir=str(WORK_BASE)))
+    session_dir = Path(tempfile.mkdtemp(prefix="remotely-session-", dir=str(WORK_BASE)))
 
-    frozen_self = session_dir / "fzfr-frozen.py"
+    frozen_self = session_dir / "remotely-frozen.py"
     frozen_self.write_bytes(SCRIPT_BYTES)
     frozen_self.chmod(0o700)
 
     ssh_control = ""
     if target != "local" and CONFIG.get("ssh_multiplexing"):
         ssh_control = str(session_dir / "ssh.sock")
-        os.environ["FZFR_REMOTE"] = target
+        os.environ["REMOTELY_REMOTE"] = target
 
     state_path = session_dir / "state.json"
     fzf_remote_dir = session_dir / "remote-bin"
@@ -340,7 +340,7 @@ def cmd_search(argv: list[str]) -> int:
                 for entry in os.scandir(str(session_dir)):
                     if (
                         entry.is_file()
-                        and entry.name.startswith("fzfr-open-")
+                        and entry.name.startswith("remotely-open-")
                         and now - entry.stat().st_mtime > 30
                     ):
                         try:
@@ -351,7 +351,7 @@ def cmd_search(argv: list[str]) -> int:
                 pass
 
     threading.Thread(
-        target=_open_file_sweeper, daemon=True, name="fzfr-open-sweeper"
+        target=_open_file_sweeper, daemon=True, name="remotely-open-sweeper"
     ).start()
 
     try:

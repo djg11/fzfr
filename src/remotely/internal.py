@@ -1,4 +1,4 @@
-"""fzfr.internal -- fzf callback sub-commands (_internal-*)."""
+"""remotely.internal -- fzf callback sub-commands (_internal-*)."""
 
 import fcntl
 import os
@@ -34,7 +34,7 @@ from .utils import _parse_extensions
 def cmd_internal_prompt(argv: list[str]) -> int:
     """Prompt for input on the terminal and update one key in the state file.
 
-    Usage: fzfr _internal-prompt <state_path> <key> <prompt_text>
+    Usage: remotely _internal-prompt <state_path> <key> <prompt_text>
 
     LIMITATION: /dev/tty is unavailable in some environments (Docker containers
                 without a TTY, certain CI runners). When _tty_prompt returns
@@ -58,7 +58,7 @@ def cmd_internal_exclude(argv: list[str]) -> int:
 
     An empty input resets the list to the config-level defaults.
 
-    Usage: fzfr _internal-exclude <state_path>
+    Usage: remotely _internal-exclude <state_path>
     """
     if not argv:
         return 1
@@ -154,7 +154,7 @@ def _header_str(state: dict) -> str:
 def cmd_internal_get_prompt(argv: list[str]) -> int:
     """Print the current prompt string to stdout (used by transform-prompt).
 
-    Usage: fzfr _internal-get-prompt <state_path>
+    Usage: remotely _internal-get-prompt <state_path>
     """
     if not argv:
         return 1
@@ -168,7 +168,7 @@ def cmd_internal_get_prompt(argv: list[str]) -> int:
 def cmd_internal_get_header(argv: list[str]) -> int:
     """Print the current header string to stdout (used by transform-header).
 
-    Usage: fzfr _internal-get-header <state_path>
+    Usage: remotely _internal-get-header <state_path>
     """
     if not argv:
         return 1
@@ -185,7 +185,7 @@ def cmd_internal_get_search_action(argv: list[str]) -> int:
     Content mode: fzf must not re-filter the result list -- the items ARE the
     search results. Name mode: fzf fuzzy-filters the list itself.
 
-    Usage: fzfr _internal-get-search-action <state_path>
+    Usage: remotely _internal-get-search-action <state_path>
     """
     if not argv:
         return 1
@@ -193,9 +193,11 @@ def cmd_internal_get_search_action(argv: list[str]) -> int:
     if not state:
         return 1
     print(
-        "disable-search"
-        if state.get("mode", "content") == "content"
-        else "enable-search",
+        (
+            "disable-search"
+            if state.get("mode", "content") == "content"
+            else "enable-search"
+        ),
         end="",
     )
     return 0
@@ -204,7 +206,7 @@ def cmd_internal_get_search_action(argv: list[str]) -> int:
 def cmd_internal_toggle_mode(argv: list[str]) -> int:
     """Toggle search mode between 'name' and 'content' in the state file.
 
-    Usage: fzfr _internal-toggle-mode <state_path>
+    Usage: remotely _internal-toggle-mode <state_path>
     """
     if not argv:
         return 1
@@ -223,7 +225,7 @@ def cmd_internal_toggle_ftype(argv: list[str]) -> int:
             f -> d: save current mode and ext, force mode="name", clear ext.
             d -> f: restore mode and ext from saved values.
 
-    Usage: fzfr _internal-toggle-ftype <state_path>
+    Usage: remotely _internal-toggle-ftype <state_path>
     """
     if not argv:
         return 1
@@ -246,7 +248,7 @@ def cmd_internal_toggle_ftype(argv: list[str]) -> int:
 def cmd_internal_toggle_hidden(argv: list[str]) -> int:
     """Toggle 'show_hidden' boolean in the state file.
 
-    Usage: fzfr _internal-toggle-hidden <state_path>
+    Usage: remotely _internal-toggle-hidden <state_path>
     """
     if not argv:
         return 1
@@ -259,7 +261,7 @@ def cmd_internal_toggle_hidden(argv: list[str]) -> int:
 def _substitute_placeholders(
     cmd: str, path: str, paths: list[str], base: str, q: str
 ) -> str:
-    """Substitute fzfr placeholders in a custom action cmd string.
+    """Substitute remotely placeholders in a custom action cmd string.
 
     All path values are shell-quoted with shlex.quote() before substitution
     so filenames containing spaces, quotes, or semicolons cannot inject shell
@@ -324,7 +326,7 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
     Looks up the action in CONFIG["custom_actions"], resolves file paths to
     absolute, substitutes placeholders, and runs the command.
 
-    Usage: fzfr _internal-exec <state_path> <action_id> [path ...]
+    Usage: remotely _internal-exec <state_path> <action_id> [path ...]
       state_path  -- session state file (provides base_path, query, remote info)
       action_id   -- "group_key.action_key" e.g. "f.d"
       path ...    -- selected file paths from fzf {+} (one or more)
@@ -343,7 +345,7 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
     """
     if len(argv) < 3:
         print(
-            "Usage: fzfr _internal-exec <state_path> <action_id> [path ...]",
+            "Usage: remotely _internal-exec <state_path> <action_id> [path ...]",
             file=sys.stderr,
         )
         return 1
@@ -354,7 +356,7 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
     parts = action_id.split(".", 1)
     if len(parts) != 2:
         print(
-            f"[fzfr] invalid action_id {action_id!r} -- expected 'group.action'",
+            f"[remotely] invalid action_id {action_id!r} -- expected 'group.action'",
             file=sys.stderr,
         )
         return 1
@@ -370,12 +372,13 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
     groups = custom_actions.get("groups", {})
     group = groups.get(group_key)
     if not group:
-        print(f"[fzfr] no action group {group_key!r}", file=sys.stderr)
+        print(f"[remotely] no action group {group_key!r}", file=sys.stderr)
         return 1
     action = group.get("actions", {}).get(action_key)
     if not action:
         print(
-            f"[fzfr] no action {action_key!r} in group {group_key!r}", file=sys.stderr
+            f"[remotely] no action {action_key!r} in group {group_key!r}",
+            file=sys.stderr,
         )
         return 1
 
@@ -400,6 +403,7 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
 
         def _run(extra: dict):
             return subprocess.run(ssh_base + [cmd], **extra)
+
     else:
         # shell=True is intentional: cmd is a user-defined shell string that
         # may contain pipes, redirects, or shell operators. All placeholder
@@ -407,7 +411,7 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
         def _run(extra: dict):
             return subprocess.run(
                 cmd, shell=True, **extra
-            )  # nosemgrep: fzfr-subprocess-shell-true
+            )  # nosemgrep: remotely-subprocess-shell-true
 
     if output == "tmux":
         if "tmux" in AVAILABLE_TOOLS:
@@ -445,7 +449,7 @@ def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int
         if r.returncode != 0:
             err = r.stderr.decode("utf-8", errors="replace").strip()
             if err:
-                print(f"[fzfr] {err}", file=sys.stderr)
+                print(f"[remotely] {err}", file=sys.stderr)
         return r.returncode
 
 
@@ -710,7 +714,7 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
       5. For overlay output: draw result box, wait for any key, erase box
       6. Show cursor, restore terminal, SIGCONT fzf, SIGWINCH fzf
 
-    Usage: fzfr _internal-action-menu <state_path> [path ...]
+    Usage: remotely _internal-action-menu <state_path> [path ...]
     """
     # -- Step 1: freeze fzf immediately --
     # Must be the very first operation. execute-silent is asynchronous --

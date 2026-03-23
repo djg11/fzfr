@@ -1,70 +1,70 @@
 """
-fzfr - Fuzzy file search for local and remote filesystems.
+remotely - Fuzzy file search for local and remote filesystems.
 
 Architecture overview
 ---------------------
 Single-file, multi-command tool modelled after busybox: one script contains
 every sub-command. It can be invoked in two ways:
 
-  1. Sub-command mode:   fzfr fzfr-preview <file>
-  2. Symlink mode:       fzfr-preview <file>
-                         (symlink named "fzfr-preview" pointing at this file)
+  1. Sub-command mode:   remotely remotely-preview <file>
+  2. Symlink mode:       remotely-preview <file>
+                         (symlink named "remotely-preview" pointing at this file)
 
-The main command (fzfr) launches fzf with --bind and --preview strings that
+The main command (remotely) launches fzf with --bind and --preview strings that
 call back into this same script. All callbacks embed the absolute path of this
 file (SELF) so they work regardless of what is in PATH when fzf spawns a
 sub-shell.
 
 Call graph (local search)
 --------------------------
-  fzfr
+  remotely
     └─ fzf  (--preview, --bind, --transform each call back into:)
-         ├─ fzfr _internal-get-prompt   <state>           (transform-prompt)
-         ├─ fzfr _internal-get-header   <state>           (transform-header)
-         ├─ fzfr _internal-get-search-action <state>      (transform)
-         ├─ fzfr _internal-toggle-mode  <state>           (CTRL-T)
-         ├─ fzfr _internal-toggle-ftype <state>           (CTRL-D)
-         ├─ fzfr _internal-toggle-hidden <state>          (CTRL-H)
-         ├─ fzfr _internal-prompt       <state> ext ...   (CTRL-F)
-         ├─ fzfr _internal-exclude      <state>           (CTRL-X)
-         ├─ fzfr _internal-dispatch     <state> preview {} {q}
-         │    └─ fzfr-preview {} [q]
-         ├─ fzfr _internal-dispatch     <state> reload {q}
+         ├─ remotely _internal-get-prompt   <state>           (transform-prompt)
+         ├─ remotely _internal-get-header   <state>           (transform-header)
+         ├─ remotely _internal-get-search-action <state>      (transform)
+         ├─ remotely _internal-toggle-mode  <state>           (CTRL-T)
+         ├─ remotely _internal-toggle-ftype <state>           (CTRL-D)
+         ├─ remotely _internal-toggle-hidden <state>          (CTRL-H)
+         ├─ remotely _internal-prompt       <state> ext ...   (CTRL-F)
+         ├─ remotely _internal-exclude      <state>           (CTRL-X)
+         ├─ remotely _internal-dispatch     <state> preview {} {q}
+         │    └─ remotely-preview {} [q]
+         ├─ remotely _internal-dispatch     <state> reload {q}
          │    └─ rga ... or fd | grep ...
-         └─ fzfr fzfr-open local <base> '' '' {}          (Enter)
+         └─ remotely remotely-open local <base> '' '' {}          (Enter)
 
 Call graph (remote search)
 ---------------------------
-  fzfr user@host /path
+  remotely user@host /path
     └─ fzf
-         ├─ fzfr _internal-dispatch <state> preview {} {q}
-         │    └─ fzfr-remote-preview host /path <ssh_ctl> {} {q}
-         │         └─ ssh host "python3 - fzfr-preview <file> [q]"
-         ├─ fzfr _internal-dispatch <state> reload {q}
-         │    └─ fzfr-remote-reload host /path <ssh_ctl> {q}
+         ├─ remotely _internal-dispatch <state> preview {} {q}
+         │    └─ remotely-remote-preview host /path <ssh_ctl> {} {q}
+         │         └─ ssh host "python3 - remotely-preview <file> [q]"
+         ├─ remotely _internal-dispatch <state> reload {q}
+         │    └─ remotely-remote-reload host /path <ssh_ctl> {q}
          │         └─ ssh host "cd /path && rga ... || fd | xargs grep ..."
-         └─ fzfr fzfr-open host /path host <WORK_BASE>/... <ssh_ctl> {}
+         └─ remotely remotely-open host /path host <WORK_BASE>/... <ssh_ctl> {}
               └─ ssh host -t "nvim <file>"   (text)
                  or: ssh host "cat <file>" → local temp → xdg-open   (binary)
 
 SSH connection multiplexing
 ---------------------------
-By default, fzfr passes NO extra flags to ssh, deferring entirely to
+By default, remotely passes NO extra flags to ssh, deferring entirely to
 ~/.ssh/config. If that config already has ControlMaster/ControlPath, all fzf
 callbacks reuse the existing master connection — no key prompts, no latency.
 
 If you do NOT have multiplexing in your ssh config, enable it here:
 
-  ~/.config/fzfr/config:
+  ~/.config/remotely/config:
     {
       "ssh_multiplexing": true
     }
 
-fzfr will then create a per-session socket in WORK_BASE and tear it down on
+remotely will then create a per-session socket in WORK_BASE and tear it down on
 exit.
 
 WARNING: do NOT set ssh_multiplexing = true if your ~/.ssh/config already
-has ControlMaster/ControlPath. The two sockets would conflict and fzfr would
+has ControlMaster/ControlPath. The two sockets would conflict and remotely would
 open a new master connection instead of reusing the existing one — triggering
 spurious key prompts (e.g. YubiKey touch) on every cursor move.
 
@@ -104,7 +104,7 @@ would cause double-escaping and break filenames with spaces or special chars.
 
 Source layout
 -------------
-The distributable fzfr script is built from src/fzfr/ by
+The distributable remotely script is built from src/remotely/ by
 scripts/build_single_file.py. Each module is self-contained with correct
 imports so linters work per-file. The build script strips intra-package
 imports and deduplicates stdlib imports into one block at the top.
@@ -171,12 +171,12 @@ __all__ = [
 ]
 
 COMMAND_MAP = {
-    "fzfr-preview": cmd_preview,
-    "fzfr-open": cmd_open,
-    "fzfr-remote-reload": cmd_remote_reload,
-    "fzfr-remote-preview": cmd_remote_preview,
-    "fzfr-copy": cmd_copy,
-    "fzfr": cmd_search,
+    "remotely-preview": cmd_preview,
+    "remotely-open": cmd_open,
+    "remotely-remote-reload": cmd_remote_reload,
+    "remotely-remote-preview": cmd_remote_preview,
+    "remotely-copy": cmd_copy,
+    "remotely": cmd_search,
     # Internal callbacks invoked by fzf bindings:
     "_internal-get-prompt": cmd_internal_get_prompt,  # transform-prompt
     "_internal-get-header": cmd_internal_get_header,  # transform-header
@@ -196,7 +196,7 @@ def _set_process_name(name: str) -> None:
     """Set the process name visible in ps/top via prctl(PR_SET_NAME).
 
     Linux only — silently ignored on other platforms. Makes the remote
-    agent appear as 'python3 fzfr' rather than 'python3 -' or
+    agent appear as 'python3 remotely' rather than 'python3 -' or
     'python3 /path/to/script.py', reducing visual noise for sysadmins.
     """
     try:
@@ -207,10 +207,10 @@ def _set_process_name(name: str) -> None:
 
 def main():
     """Resolve which sub-command to run and execute it."""
-    _set_process_name("python3 fzfr")
+    _set_process_name("python3 remotely")
     invoked_as = Path(sys.argv[0]).name
 
-    if invoked_as in COMMAND_MAP and invoked_as != "fzfr":
+    if invoked_as in COMMAND_MAP and invoked_as != "remotely":
         fn, args = COMMAND_MAP[invoked_as], sys.argv[1:]
     elif len(sys.argv) > 1 and sys.argv[1] in COMMAND_MAP:
         fn, args = COMMAND_MAP[sys.argv[1]], sys.argv[2:]

@@ -1,4 +1,4 @@
-"""fzfr.copy -- fzfr-copy sub-command: copy a selected file path to the clipboard.
+"""remotely.copy -- remotely-copy sub-command: copy a selected file path to the clipboard.
 
 Also provides _resolve_remote_path() for expanding tilde and relative paths
 on a remote host without touching the local filesystem.
@@ -14,15 +14,15 @@ from .ssh import _ssh_opts
 
 
 def cmd_copy(argv: list[str]) -> int:
-    """Entry point for the fzfr-copy sub-command.
+    """Entry point for the remotely-copy sub-command.
 
     Copies the selected file path to the local clipboard.
 
-    Usage: fzfr-copy <target> <base_path> <remote> <ssh_control> <choice>
+    Usage: remotely-copy <target> <base_path> <remote> <ssh_control> <choice>
     """
     if len(argv) < 5:
         print(
-            "Usage: fzfr-copy <target> <base_path> <remote> <ssh_control> <choice>",
+            "Usage: remotely-copy <target> <base_path> <remote> <ssh_control> <choice>",
             file=sys.stderr,
         )
         return 1
@@ -85,7 +85,7 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
 
     DESIGN: Both SSH branches sys.exit() on failure. Without this, a network
     or auth failure would return an empty string and fzf would silently search
-    causing fzfr to silently search from the remote filesystem root (/).
+    causing remotely to silently search from the remote filesystem root (/).
     """
     if not raw or raw == ".":
         r = subprocess.run(

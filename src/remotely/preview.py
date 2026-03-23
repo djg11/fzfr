@@ -1,4 +1,4 @@
-"""fzfr.preview -- fzfr-preview sub-command: render file content for fzf.
+"""remotely.preview -- remotely-preview sub-command: render file content for fzf.
 
 fzf calls this once per cursor movement. Dispatch order:
 
@@ -216,7 +216,7 @@ def _preview_stdin(hint: str, query: str) -> None:
     Archive and PDF tools require a seekable file descriptor; stdin is a
     pipe and is not seekable. We buffer to RAM-backed tmpfs in WORK_BASE.
     """
-    fd, tmpfile = tempfile.mkstemp(prefix="fzfr-preview-", dir=str(WORK_BASE))
+    fd, tmpfile = tempfile.mkstemp(prefix="remotely-preview-", dir=str(WORK_BASE))
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(sys.stdin.buffer.read())
@@ -249,7 +249,7 @@ def _preview_file(filepath: str, query: str) -> None:
 
 
 def cmd_preview(argv: list[str]) -> int:
-    """Entry point for the fzfr-preview sub-command.
+    """Entry point for the remotely-preview sub-command.
 
     Called by fzf once per cursor movement with the path of the highlighted
     file. Dispatches to the correct renderer based on MIME type and extension.
@@ -268,7 +268,7 @@ def cmd_preview(argv: list[str]) -> int:
                 that does not exist -- we catch that here and show a clear message.
     """
     if not argv:
-        print("Usage: fzfr-preview <file> [query] [hint]", file=sys.stderr)
+        print("Usage: remotely-preview <file> [query] [hint]", file=sys.stderr)
         return 1
 
     file_arg = argv[0]

@@ -1,7 +1,7 @@
-"""fzfr.open — fzfr-open sub-command: open a selected file or directory.
+"""remotely.open — remotely-open sub-command: open a selected file or directory.
 
 Dispatch logic:
-  - Directory          → open in a new tmux window with fzfr (recursive search)
+  - Directory          → open in a new tmux window with remotely (recursive search)
   - Text file, local   → open in $EDITOR in a new tmux window (or inline)
   - Binary file, local → xdg-open (Linux) / open (macOS)
   - Text file, remote  → ssh -t <host> <editor> <file>
@@ -228,7 +228,7 @@ def _open_remote_binary(
     session_dir = self_path.parent if self_path is not None else WORK_BASE
     suffix = Path(full_path_str).suffix or ""
     fd, temp_local = tempfile.mkstemp(
-        prefix="fzfr-open-", suffix=suffix, dir=session_dir
+        prefix="remotely-open-", suffix=suffix, dir=session_dir
     )
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -245,7 +245,7 @@ def _open_remote_binary(
 
 
 def cmd_open(argv: list[str]) -> int:
-    """Entry point for the fzfr-open sub-command.
+    """Entry point for the remotely-open sub-command.
 
     Called by fzf when the user presses Enter.
 
@@ -261,7 +261,7 @@ def cmd_open(argv: list[str]) -> int:
     """
     if len(argv) < 9:
         print(
-            "Usage: fzfr-open <target> <base_path> <remote> <remote_dir> "
+            "Usage: remotely-open <target> <base_path> <remote> <remote_dir> "
             "<ssh_control> <state_path> <self_path> <query> <choice> [choice ...]",
             file=sys.stderr,
         )

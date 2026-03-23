@@ -1,8 +1,8 @@
-"""fzfr.ssh — SSH option construction for multiplexed connections.
+"""remotely.ssh — SSH option construction for multiplexed connections.
 
 Provides _ssh_opts() and _ssh_opts_str() which return the ControlMaster flags
 needed when config["ssh_multiplexing"] is True, or an empty list/string when
-fzfr defers to the user's ~/.ssh/config.
+remotely defers to the user's ~/.ssh/config.
 """
 
 import shlex
@@ -20,7 +20,7 @@ def _ssh_opts(ssh_control: str) -> list[str]:
     don't want a second master connection (e.g. YubiKey users).
 
     Non-empty ssh_control → inject ControlMaster=auto + the given socket
-    path so fzfr manages its own dedicated multiplexed connection.
+    path so remotely manages its own dedicated multiplexed connection.
     Activated only when config["ssh_multiplexing"] is True.
     """
     if not ssh_control:

@@ -1,8 +1,8 @@
-# fzfr
+# remotely
 
 Fuzzy file search for local and remote filesystems.
 
-![fzfr demo](https://github.com/user-attachments/assets/00000000-0000-0000-0000-000000000000)
+![remotely demo](https://github.com/user-attachments/assets/00000000-0000-0000-0000-000000000000)
 
 ---
 
@@ -13,8 +13,8 @@ Fuzzy file search for local and remote filesystems.
 - **Directory search** — browse and navigate directory trees
 - **SSH remote search** — search and preview files on remote hosts with zero remote installation
 - **Rich preview pane** — syntax-highlighted text, PDF text extraction, archive listings, hex for binaries
-- **tmux integration** — opens files in a new tmux window, leaving fzfr running
-- **Configurable keybindings** — every key is remappable via `~/.config/fzfr/config`
+- **tmux integration** — opens files in a new tmux window, leaving remotely running
+- **Configurable keybindings** — every key is remappable via `~/.config/remotely/config`
 - **Path format** — display absolute or relative paths in the file list
 - **Extension filter** — narrow results to specific file types at runtime
 
@@ -37,7 +37,7 @@ Fuzzy file search for local and remote filesystems.
 | [bat](https://github.com/sharkdp/bat) | Syntax-highlighted preview |
 | [rga](https://github.com/phiresky/ripgrep-all) | Content search inside PDFs, archives, and more |
 | [pdftotext](https://poppler.freedesktop.org/) | PDF text extraction fallback |
-| [tmux](https://github.com/tmux/tmux) | Open files in a new window without leaving fzfr |
+| [tmux](https://github.com/tmux/tmux) | Open files in a new window without leaving remotely |
 | `xclip` / `wl-copy` / `pbcopy` | Copy file path to clipboard |
 | `ssh` | Remote search and preview |
 
@@ -48,12 +48,12 @@ Fuzzy file search for local and remote filesystems.
 **From source (recommended):**
 
 ```sh
-git clone https://github.com/djg11/fzfr
-cd fzfr
+git clone https://github.com/djg11/remotely
+cd remotely
 make install
 ```
 
-This copies `fzfr` to `~/.local/bin` and creates symlinks for all sub-commands.
+This copies `remotely` to `~/.local/bin` and creates symlinks for all sub-commands.
 Make sure `~/.local/bin` is in your `PATH`:
 
 ```sh
@@ -63,18 +63,18 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 **Via pipx or pip:**
 
 ```sh
-pipx install fzfr
+pipx install remotely
 ```
 ```sh
-pip install fzfr
+pip install remotely
 ```
 
 **Uninstall:**
 
 ```sh
 make uninstall        # if installed via make
-pipx uninstall fzfr   # if installed via pipx
-pip uninstall fzfr    # if installed via pip
+pipx uninstall remotely   # if installed via pipx
+pip uninstall remotely    # if installed via pip
 ```
 
 ---
@@ -82,17 +82,17 @@ pip uninstall fzfr    # if installed via pip
 ## Usage
 
 ```sh
-fzfr                                    # search current git root (or cwd)
-fzfr local ~/projects name              # filename search in ~/projects
-fzfr user@server ~/documents            # remote content search
-fzfr myserver /var/log content          # remote content search, explicit mode
-fzfr local . content --exclude '*.pyc'  # exclude patterns
+remotely                                    # search current git root (or cwd)
+remotely local ~/projects name              # filename search in ~/projects
+remotely user@server ~/documents            # remote content search
+remotely myserver /var/log content          # remote content search, explicit mode
+remotely local . content --exclude '*.pyc'  # exclude patterns
 ```
 
 **Arguments:**
 
 ```
-fzfr [TARGET] [BASE_PATH] [MODE] [--exclude PATTERN ...]
+remotely [TARGET] [BASE_PATH] [MODE] [--exclude PATTERN ...]
 
   TARGET      local (default) | <ssh-host>
   BASE_PATH   directory to search (default: nearest git root or cwd)
@@ -125,7 +125,7 @@ All keys are configurable — see [Configuration](#configuration).
 
 ## Configuration
 
-`~/.config/fzfr/config` — JSON, all keys optional.
+`~/.config/remotely/config` — JSON, all keys optional.
 
 ```json
 {
@@ -172,14 +172,14 @@ All keys are configurable — see [Configuration](#configuration).
 
 ## SSH Remote Search
 
-fzfr requires no installation on the remote host — only `python3` and `fd` need to be in the remote `PATH`. The script is transferred automatically on first use and cached at `~/.cache/fzfr/` on the remote.
+remotely requires no installation on the remote host — only `python3` and `fd` need to be in the remote `PATH`. The script is transferred automatically on first use and cached at `~/.cache/remotely/` on the remote.
 
 ```sh
-fzfr user@server /var/log
-fzfr myserver ~/projects content
+remotely user@server /var/log
+remotely myserver ~/projects content
 ```
 
-**SSH multiplexing:** By default fzfr defers entirely to your `~/.ssh/config`. If you do not have `ControlMaster` configured there, enable fzfr's built-in multiplexing for faster previews:
+**SSH multiplexing:** By default remotely defers entirely to your `~/.ssh/config`. If you do not have `ControlMaster` configured there, enable remotely's built-in multiplexing for faster previews:
 
 ```json
 { "ssh_multiplexing": true }
@@ -191,16 +191,16 @@ fzfr myserver ~/projects content
 
 ## Sub-commands
 
-fzfr follows the busybox pattern — one file, multiple commands via symlinks:
+remotely follows the busybox pattern — one file, multiple commands via symlinks:
 
 | Command | Purpose |
 |---------|---------|
-| `fzfr` | Main search UI |
-| `fzfr-preview` | Preview a file (used by fzf internally) |
-| `fzfr-open` | Open a selected file (used by fzf internally) |
-| `fzfr-remote-reload` | List/search files on a remote host |
-| `fzfr-remote-preview` | Preview a file on a remote host |
-| `fzfr-copy` | Copy selected path to clipboard |
+| `remotely` | Main search UI |
+| `remotely-preview` | Preview a file (used by fzf internally) |
+| `remotely-open` | Open a selected file (used by fzf internally) |
+| `remotely-remote-reload` | List/search files on a remote host |
+| `remotely-remote-preview` | Preview a file on a remote host |
+| `remotely-copy` | Copy selected path to clipboard |
 
 Sub-commands are created as symlinks by `make install` and can also be called directly or used in scripts.
 
@@ -221,7 +221,7 @@ The subprocess, SSH, and fzf integration paths require live tools. Use this
 manual battery to verify those:
 
 ```sh
-mkdir /tmp/fzfr-test && cd /tmp/fzfr-test
+mkdir /tmp/remotely-test && cd /tmp/remotely-test
 touch 'normal.txt'
 touch 'spaces in name.txt'
 touch 'semi;colon.txt'
@@ -231,7 +231,7 @@ touch '$(touch injected).txt'
 touch '`touch injected2`.txt'
 touch $'newline\nfile.txt'
 touch -- '--help.txt'
-fzfr local . name
+remotely local . name
 ```
 
 Confirm: preview works for all files, nothing executes, filenames display correctly.
@@ -244,10 +244,10 @@ Confirm: preview works for all files, nothing executes, filenames display correc
 
 ## Contributing
 
-The distributable `fzfr` script is built from the source modules in `src/fzfr/`:
+The distributable `remotely` script is built from the source modules in `src/remotely/`:
 
 ```
-src/fzfr/
+src/remotely/
   _script.py    VERSION, SELF, SCRIPT_BYTES and bootstrap constants
   utils.py      subprocess helpers, MIME detection
   workbase.py   session working directory (prefers /dev/shm)
@@ -266,14 +266,14 @@ src/fzfr/
   remote.py     SSH remote search and preview
   search.py     main fzf UI entry point
 scripts/
-  build_single_file.py   concatenates src/ → fzfr
+  build_single_file.py   concatenates src/ → remotely
 ```
 
 **Workflow:**
 
 ```sh
 # Edit a source module, then:
-make build      # rebuild fzfr + run tests
+make build      # rebuild remotely + run tests
 make install    # install to ~/.local/bin
 
 # Run tests without rebuilding:
@@ -281,11 +281,11 @@ make test
 
 # Run directly from source (local search only — SSH remote preview
 # requires the built file):
-PYTHONPATH=src python3 -m fzfr
+PYTHONPATH=src python3 -m remotely
 ```
 
-The built `fzfr` is generated by `make build` and gitignored — never edit it
-directly. Always edit `src/fzfr/` and run `make build`.
+The built `remotely` is generated by `make build` and gitignored — never edit it
+directly. Always edit `src/remotely/` and run `make build`.
 
 ---
 

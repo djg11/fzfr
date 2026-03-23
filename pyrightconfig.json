@@ -1,5 +1,5 @@
 {
-  "include": ["src/fzfr", "tests"],
+  "include": ["src/remotely", "tests"],
   "pythonVersion": "3.10",
   "pythonPlatform": "Linux",
   "typeCheckingMode": "basic",
@@ -15,7 +15,7 @@
 
   "executionEnvironments": [
     {
-      "root": "src/fzfr",
+      "root": "src/remotely",
       "extraPaths": ["src"]
     }
   ]

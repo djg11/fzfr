@@ -1,4 +1,4 @@
-"""fzfr.config — Defaults, user config loading, and validation."""
+"""remotely.config — Defaults, user config loading, and validation."""
 
 import json
 import shutil
@@ -6,8 +6,8 @@ import sys
 from pathlib import Path
 
 
-CONFIG_PATH = Path.home() / ".config" / "fzfr" / "config"
-HISTORY_PATH = Path.home() / ".local" / "share" / "fzfr" / "history"
+CONFIG_PATH = Path.home() / ".config" / "remotely" / "config"
+HISTORY_PATH = Path.home() / ".local" / "share" / "remotely" / "history"
 
 # All supported overlay box positions — used by menu_position and output_position.
 _VALID_POSITIONS = {
@@ -201,7 +201,7 @@ def _validate_custom_actions(value: object) -> "dict | None":
 
     Returns a cleaned dict on success, or None if the top-level structure is
     invalid. Individual bad groups or actions are skipped with a warning so
-    a single misconfigured action never prevents fzfr from launching.
+    a single misconfigured action never prevents remotely from launching.
 
     Rules:
       - value must be a dict
@@ -231,7 +231,7 @@ def _validate_custom_actions(value: object) -> "dict | None":
     if leader in _RESERVED_KEYS:
         print(
             f"Warning: custom_actions.leader {leader!r} conflicts with a reserved "
-            f"fzfr keybinding. Choose a different key.",
+            f"remotely keybinding. Choose a different key.",
             file=sys.stderr,
         )
         leader = "ctrl-b"
@@ -318,7 +318,7 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
 
 
 def load_config() -> dict:
-    """Load ~/.config/fzfr/config (JSON) and merge with defaults."""
+    """Load ~/.config/remotely/config (JSON) and merge with defaults."""
     cfg = dict(_CONFIG_DEFAULTS)
     cfg["keybindings"] = dict(_CONFIG_DEFAULTS["keybindings"])
     cfg["custom_actions"] = {

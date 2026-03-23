@@ -1,4 +1,4 @@
-# Pre-commit hooks for fzfr.
+# Pre-commit hooks for remotely.
 # Install: pip install pre-commit && pre-commit install
 # Run manually: pre-commit run --all-files
 #

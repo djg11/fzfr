@@ -1,4 +1,4 @@
-"""fzfr.cache — Preview output cache keyed on (path, mtime, query).
+"""remotely.cache — Preview output cache keyed on (path, mtime, query).
 
 _PreviewCache stores the rendered bytes that would be written to stdout by
 the preview renderer (bat, cat, rga, or the remote SSH preview). On a hit the
@@ -104,7 +104,7 @@ class _PreviewCache:
     def from_state(cls, state: dict) -> "_PreviewCache | None":
         """Construct a cache from the persisted state dict, or None if unavailable.
 
-        Derives the session dir from self_path (session_dir/fzfr-frozen.py).
+        Derives the session dir from self_path (session_dir/remotely-frozen.py).
         Returns None when self_path is absent (e.g. stdin-mode invocations) so
         callers can treat None as "cache disabled" without special-casing.
         """

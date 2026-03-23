@@ -1,4 +1,4 @@
-"""fzfr.backends — Backend protocol and implementations for local and remote search.
+"""remotely.backends — Backend protocol and implementations for local and remote search.
 
 The Backend protocol abstracts the difference between searching a local filesystem
 and an SSH-remote one. All fzf callbacks (preview, reload, open) go through the
@@ -87,14 +87,14 @@ def _git_ls_files_cmd(
 
 @dataclass
 class SearchContext:
-    """Consolidates path and connection state for a fzfr session."""
+    """Consolidates path and connection state for a remotely session."""
 
     remote: str  # SSH host string, e.g. "user@host", or "" for local
     safe_remote: str  # shlex.quote(remote)
     base_path: str  # absolute base directory to search
     safe_base: str  # shlex.quote(base_path)
     target: str = "local"
-    # ControlPath socket managed by fzfr, or "" to rely on ~/.ssh/config.
+    # ControlPath socket managed by remotely, or "" to rely on ~/.ssh/config.
     # Non-empty only when config["ssh_multiplexing"] is True.
     ssh_control: str = field(default="")
     ftype: str = "f"  # "f" for files, "d" for directories
@@ -180,7 +180,8 @@ class LocalBackend:
 
         if cache is not None and mtime is not None and self._frozen_self is not None:
             r = subprocess.run(
-                [sys.executable, str(self._frozen_self), "fzfr-preview"] + preview_args,
+                [sys.executable, str(self._frozen_self), "remotely-preview"]
+                + preview_args,
                 capture_output=True,
             )
             data = r.stdout
@@ -488,7 +489,7 @@ class RemoteBackend:
         args = [
             sys.executable,
             str(frozen_self),
-            "fzfr-remote-reload",
+            "remotely-remote-reload",
             self.remote,
             self.base_path,
             self.ssh_control,

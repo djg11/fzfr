@@ -31,12 +31,12 @@ jobs:
       - name: Build single-file script
         run: python3 scripts/build_single_file.py
 
-      - name: Rename fzfr → fzfr.py for packaging
+      - name: Rename remotely → remotely.py for packaging
         # setuptools requires a .py extension to import the module and read
         # VERSION via the dynamic version attr directive in pyproject.toml.
-        # The installed binary at ~/.local/bin/fzfr has no extension regardless
+        # The installed binary at ~/.local/bin/remotely has no extension regardless
         # — pip names it after the [project.scripts] key, not the source file.
-        run: cp fzfr fzfr.py
+        run: cp remotely remotely.py
 
       - name: Build package
         run: python -m build

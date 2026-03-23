@@ -1,7 +1,7 @@
 PREFIX  ?= $(HOME)/.local
 BINDIR  := $(PREFIX)/bin
-SCRIPT  := fzfr
-SYMLINKS := fzfr-preview fzfr-open fzfr-remote-reload fzfr-remote-preview fzfr-copy
+SCRIPT  := remotely
+SYMLINKS := remotely-preview remotely-open remotely-remote-reload remotely-remote-preview remotely-copy
 
 .PHONY: install uninstall check test build lint format pre-commit install-hooks dev-install check-imports examples
 
@@ -70,7 +70,7 @@ dev-install:
 	pre-commit install
 	@echo ""
 	@echo "Dev environment ready. Available commands:"
-	@echo "  make build       -- rebuild fzfr + run tests"
+	@echo "  make build       -- rebuild remotely + run tests"
 	@echo "  make test        -- run tests only"
 	@echo "  make lint        -- ruff check + format check"
 	@echo "  make format      -- ruff check --fix + ruff format"
@@ -95,7 +95,7 @@ check:
 	    echo "Error: Python 3.10 or later is required."; \
 	    echo "Found: $$(python3 --version)"; exit 1; }
 	@command -v fzf >/dev/null 2>&1 || \
-	    echo "Warning: fzf not found -- install it before running fzfr."
+	    echo "Warning: fzf not found -- install it before running remotely."
 	@command -v fd >/dev/null 2>&1 || \
-	    echo "Warning: fd not found -- install it before running fzfr."
+	    echo "Warning: fd not found -- install it before running remotely."
 	@echo "Prerequisites OK"

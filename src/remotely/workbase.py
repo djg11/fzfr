@@ -1,4 +1,4 @@
-"""fzfr.workbase — Session working directory setup and security checks."""
+"""remotely.workbase — Session working directory setup and security checks."""
 
 import os
 import sys
@@ -14,8 +14,8 @@ def _get_work_base() -> Path:
     """
     shm = Path("/dev/shm")
     if shm.is_dir() and os.access(shm, os.W_OK):
-        return shm / "fzfr"
-    return Path(tempfile.gettempdir()) / "fzfr"
+        return shm / "remotely"
+    return Path(tempfile.gettempdir()) / "remotely"
 
 
 WORK_BASE = _get_work_base()

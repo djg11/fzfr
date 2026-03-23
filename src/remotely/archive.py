@@ -1,4 +1,4 @@
-"""fzfr.archive — Archive format detection, classification, and content listing.
+"""remotely.archive — Archive format detection, classification, and content listing.
 
 Provides:
   classify()       — determine FileKind for a file given name hint and MIME type

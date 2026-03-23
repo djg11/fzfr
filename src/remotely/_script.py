@@ -1,12 +1,12 @@
-"""fzfr._script -- VERSION and script-self-reference constants.
+"""remotely._script -- VERSION and script-self-reference constants.
 
-This module has NO imports from other fzfr submodules so it can be
+This module has NO imports from other remotely submodules so it can be
 safely imported by any module without creating circular dependencies.
 
 Constants exported for use by remote.py and search.py:
 
     VERSION          -- human-readable version string
-    SELF             -- absolute path to the built single-file fzfr script
+    SELF             -- absolute path to the built single-file remotely script
     SCRIPT_BYTES     -- full contents of the built script (read once at startup)
     SCRIPT_HASH      -- 16-char hex SHA-256 prefix of SCRIPT_BYTES
     SCRIPT_BOOTSTRAP -- tiny bootstrap sent to the remote on every preview call
@@ -18,14 +18,14 @@ import sys
 from pathlib import Path
 
 
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 
 
 _SHEBANG = b"#!/usr/bin/env python3"
 
 
 def _is_built_script(path: Path) -> bool:
-    """Return True if path is the built single-file fzfr script.
+    """Return True if path is the built single-file remotely script.
 
     Checks for the shebang line rather than file size -- size thresholds are
     fragile as the codebase grows or shrinks.
@@ -38,24 +38,24 @@ def _is_built_script(path: Path) -> bool:
 
 
 def _find_self() -> str | None:
-    """Locate the built single-file fzfr script.
+    """Locate the built single-file remotely script.
 
     When running from the built file: returns __file__ (the script itself).
     When running from the src/ package: walks up to the repo root to find
-    the built fzfr, so SCRIPT_BYTES contains the full script for SSH remote
+    the built remotely, so SCRIPT_BYTES contains the full script for SSH remote
     preview. Falls back to __file__ if the built file is absent.
     """
     here = Path(__file__).resolve()
     if _is_built_script(here):
         return str(here)
-    # Package: look for the built fzfr two levels up (src/fzfr/ -> repo root)
-    built = here.parent.parent.parent / "fzfr"
+    # Package: look for the built remotely two levels up (src/remotely/ -> repo root)
+    built = here.parent.parent.parent / "remotely"
     if _is_built_script(built):
         return str(built)
     # Fallback: running from src/ without a built file.
     # Local search works fine; SSH remote preview will send the wrong script.
     print(
-        "fzfr: warning: built fzfr not found -- run 'make build' for SSH remote preview.",
+        "remotely: warning: built remotely not found -- run 'make build' for SSH remote preview.",
         file=sys.stderr,
     )
     return str(here) if here.exists() else None
@@ -63,7 +63,7 @@ def _find_self() -> str | None:
 
 SELF = _find_self()
 
-# PERF:     Read once at import time and reused for every fzfr-remote-preview
+# PERF:     Read once at import time and reused for every remotely-remote-preview
 #           call. Without caching, each cursor movement would read ~60 KB from
 #           disk at fzf's typical 50-100 ms preview latency budget.
 # SECURITY: Snapshot is taken at process start. Replacing the source file on
@@ -77,8 +77,8 @@ SCRIPT_HASH: str = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES
 
 # Bootstrap script sent to the remote on every preview call (~250 bytes).
 #
-# Checks /dev/shm/fzfr/<hash>.py first (tmpfs, RAM-backed, preferred) then
-# ~/.cache/fzfr/<hash>.py (persistent disk fallback on macOS and systems
+# Checks /dev/shm/remotely/<hash>.py first (tmpfs, RAM-backed, preferred) then
+# ~/.cache/remotely/<hash>.py (persistent disk fallback on macOS and systems
 # without /dev/shm). On hit: runs the cached file directly as a path argument
 # -- one python3 process. On miss: exits 99 so _upload_remote_script() uploads
 # to exactly one of those locations and retries.
@@ -92,8 +92,8 @@ SCRIPT_HASH: str = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES
 SCRIPT_BOOTSTRAP: bytes = (
     (
         f"import sys,os,subprocess\n"
-        f'for p in[f"/dev/shm/fzfr/{SCRIPT_HASH}.py",'
-        f'os.path.expanduser("~/.cache/fzfr/{SCRIPT_HASH}.py")]:\n'
+        f'for p in[f"/dev/shm/remotely/{SCRIPT_HASH}.py",'
+        f'os.path.expanduser("~/.cache/remotely/{SCRIPT_HASH}.py")]:\n'
         f"    if os.path.exists(p):\n"
         f"        sys.exit(subprocess.run([sys.executable,p]+sys.argv[1:]).returncode)\n"
         f"sys.exit(99)\n"
@@ -102,6 +102,6 @@ SCRIPT_BOOTSTRAP: bytes = (
     else b""
 )
 
-# Sentinel exit code: remote cache miss. Must not clash with fzfr-preview's
+# Sentinel exit code: remote cache miss. Must not clash with remotely-preview's
 # own exit codes (0, 1, 127).
 _BOOTSTRAP_CACHE_MISS = 99

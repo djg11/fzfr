@@ -1,4 +1,4 @@
-"""fzfr.state — Session state file load/save/mutate."""
+"""remotely.state — Session state file load/save/mutate."""
 
 import json
 from collections.abc import Callable
@@ -20,7 +20,7 @@ def _load_state(path: Path) -> dict:
     SECURITY: Validates that the path is inside WORK_BASE before reading.
               State paths arrive as argv elements from fzf bind callbacks;
               rejecting paths outside our session directory prevents an
-              attacker from pointing fzfr at an arbitrary file on disk.
+              attacker from pointing remotely at an arbitrary file on disk.
     """
     try:
         if not path.resolve().is_relative_to(WORK_BASE.resolve()):

@@ -1,4 +1,4 @@
-"""fzfr.remote — SSH remote search and preview sub-commands.
+"""remotely.remote — SSH remote search and preview sub-commands.
 
 Two public entry points:
 
@@ -10,7 +10,7 @@ Two public entry points:
                           bootstrap to avoid sending the full ~60 KB script on
                           every cursor movement:
                             1. Send SCRIPT_BOOTSTRAP (~250 bytes) which checks
-                               /dev/shm/fzfr/<hash>.py then ~/.cache/fzfr/<hash>.py.
+                               /dev/shm/remotely/<hash>.py then ~/.cache/remotely/<hash>.py.
                             2. On cache miss (exit 99), upload the full script
                                once via _upload_remote_script(), then retry.
                           After the first preview call, all subsequent calls
@@ -137,7 +137,7 @@ def _parse_remote_reload_args(argv: list[str]) -> "_RemoteReloadArgs | None":
     """Parse argv for cmd_remote_reload. Returns None on error."""
     if len(argv) < 5:
         print(
-            "Usage: fzfr-remote-reload <remote> <base_path> <ssh_control> <type> <ext> "
+            "Usage: remotely-remote-reload <remote> <base_path> <ssh_control> <type> <ext> "
             "[query] [--hidden] [--relative] [--exclude <pattern> ...] [--file-source=git]",
             file=sys.stderr,
         )
@@ -191,12 +191,12 @@ def _build_fd_rga_args(
 
 
 def cmd_remote_reload(argv: list[str]) -> int:
-    """Entry point for the fzfr-remote-reload sub-command.
+    """Entry point for the remotely-remote-reload sub-command.
 
     Unified remote reload handler: git ls-files for name-mode listing when
     file_source="git", otherwise fd with rga/grep fallback for content search.
 
-    Usage: fzfr fzfr-remote-reload <remote> <base_path> <ssh_control>
+    Usage: remotely remotely-remote-reload <remote> <base_path> <ssh_control>
                                     <type> <ext> [query] [--hidden]
                                     [--relative] [--exclude <pattern> ...]
                                     [--file-source=git]
@@ -226,8 +226,8 @@ def cmd_remote_reload(argv: list[str]) -> int:
 def _upload_remote_script(ssh_prefix: list[str]) -> bool:
     """Upload SCRIPT_BYTES to the remote script cache in one SSH call.
 
-    Prefers /dev/shm/fzfr/ (tmpfs, RAM-backed) and falls back to
-    ~/.cache/fzfr/. Uses atomic tmp-then-rename to avoid partial reads.
+    Prefers /dev/shm/remotely/ (tmpfs, RAM-backed) and falls back to
+    ~/.cache/remotely/. Uses atomic tmp-then-rename to avoid partial reads.
     Returns True on success, False if both locations failed.
 
     SECURITY: SCRIPT_HASH is asserted hex-only before interpolation.
@@ -238,16 +238,16 @@ def _upload_remote_script(ssh_prefix: list[str]) -> bool:
         f"Unexpected SCRIPT_HASH format: {SCRIPT_HASH!r}"
     )
 
-    script_name = f"{SCRIPT_HASH}.py"  # nosemgrep: fzfr-upload-cmd-unquoted-var
-    script_tmp = f"{SCRIPT_HASH}.py.tmp"  # nosemgrep: fzfr-upload-cmd-unquoted-var
+    script_name = f"{SCRIPT_HASH}.py"  # nosemgrep: remotely-upload-cmd-unquoted-var
+    script_tmp = f"{SCRIPT_HASH}.py.tmp"  # nosemgrep: remotely-upload-cmd-unquoted-var
 
     install_cmd = (
-        f"if [ -d /dev/shm ] && [ -w /dev/shm ]; then D=/dev/shm/fzfr; "
-        f"else D=~/.cache/fzfr; fi && "
+        f"if [ -d /dev/shm ] && [ -w /dev/shm ]; then D=/dev/shm/remotely; "
+        f"else D=~/.cache/remotely; fi && "
         f'mkdir -p "$D" && '
-        f'cat > "$D/{script_tmp}" && '  # nosemgrep: fzfr-upload-cmd-unquoted-var
-        f'mv "$D/{script_tmp}" "$D/{script_name}" && '  # nosemgrep: fzfr-upload-cmd-unquoted-var
-        f'chmod 700 "$D/{script_name}"'  # nosemgrep: fzfr-upload-cmd-unquoted-var
+        f'cat > "$D/{script_tmp}" && '  # nosemgrep: remotely-upload-cmd-unquoted-var
+        f'mv "$D/{script_tmp}" "$D/{script_name}" && '  # nosemgrep: remotely-upload-cmd-unquoted-var
+        f'chmod 700 "$D/{script_name}"'  # nosemgrep: remotely-upload-cmd-unquoted-var
     )
     r = subprocess.run(ssh_prefix + [install_cmd], input=SCRIPT_BYTES)
     return r.returncode == 0
@@ -311,7 +311,7 @@ def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
         filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
     )
     ssh_prefix = ["ssh"] + _ssh_opts(ssh_control) + [remote]
-    args = ["fzfr-preview", full_path] + ([query] if query else [])
+    args = ["remotely-preview", full_path] + ([query] if query else [])
     remote_cmd = shlex.join(["python3", "-"] + args)
 
     result = _remote_preview_run(ssh_prefix, remote_cmd, capture=True)
@@ -320,14 +320,14 @@ def _cmd_remote_preview_capture(argv: list[str]) -> tuple[int, bytes]:
 
 
 def cmd_remote_preview(argv: list[str]) -> int:
-    """Entry point for the fzfr-remote-preview sub-command.
+    """Entry point for the remotely-remote-preview sub-command.
 
     Generates a preview of a file on a remote host using hash-based remote
     script caching to avoid piping the full ~60 KB script on every call.
     """
     if len(argv) < 4:
         print(
-            "Usage: fzfr-remote-preview <remote> <base_path> <ssh_control> <filename> [query]",
+            "Usage: remotely-remote-preview <remote> <base_path> <ssh_control> <filename> [query]",
             file=sys.stderr,
         )
         return 1
@@ -338,7 +338,7 @@ def cmd_remote_preview(argv: list[str]) -> int:
         filename if Path(filename).is_absolute() else str(Path(base_path) / filename)
     )
     ssh_prefix = ["ssh"] + _ssh_opts(ssh_control) + [remote]
-    args = ["fzfr-preview", full_path] + ([query] if query else [])
+    args = ["remotely-preview", full_path] + ([query] if query else [])
     remote_cmd = shlex.join(["python3", "-"] + args)
 
     result = _remote_preview_run(ssh_prefix, remote_cmd, capture=False)
