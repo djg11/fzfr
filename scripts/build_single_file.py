@@ -24,6 +24,7 @@ MODULE_ORDER = [
     "config",
     "tty",
     "ssh",
+    "session",
     "state",
     "cache",
     "archive",
@@ -34,6 +35,7 @@ MODULE_ORDER = [
     "open",
     "copy",
     "remote",
+    "list",
     "search",
 ]
 
@@ -185,12 +187,6 @@ def build():
     # already in the global scope. Replace the try/except ImportError pattern
     # used in backends.py for circular-import resolution with a direct
     # globals() lookup, which is what the except branch already does.
-    #
-    # Pattern being replaced (indentation varies):
-    #   try:
-    #       from .X import Y
-    #   except ImportError:
-    #       Y = globals()["Y"]  # flat built file
     output = re.sub(
         r'( *)try:\n\1    from \.[^\n]+\n\1except ImportError:\n\1    (\w+ = globals\(\)\["\w+"\])  # flat built file\n(?:\n)?',
         r"\1\2\n",
@@ -198,8 +194,6 @@ def build():
     )
 
     # Safety pass: strip any remaining relative imports that slipped through
-    # (e.g. late imports inside function bodies). In the flat file every
-    # symbol is already in scope so these are never needed.
     output = re.sub(r"^[ \t]*from \.[^\n]+\n", "", output, flags=re.MULTILINE)
 
     try:

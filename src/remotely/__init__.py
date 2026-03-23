@@ -65,32 +65,32 @@ exit.
 
 WARNING: do NOT set ssh_multiplexing = true if your ~/.ssh/config already
 has ControlMaster/ControlPath. The two sockets would conflict and remotely would
-open a new master connection instead of reusing the existing one — triggering
+open a new master connection instead of reusing the existing one -- triggering
 spurious key prompts (e.g. YubiKey touch) on every cursor move.
 
 Quoting discipline
 ------------------
 Three quoting strategies are used deliberately:
 
-  list-form subprocess  →  ["cmd", "--flag", path]
+  list-form subprocess  ->  ["cmd", "--flag", path]
                             Zero quoting needed for LOCAL calls. The OS passes
-                            each element directly as an argv token — no shell
+                            each element directly as an argv token -- no shell
                             sees it. Used for all local subprocess calls (fd,
                             bat, fzf, tmux, xdg-open, etc.).
 
-  shlex.join()          →  shlex.join(["realpath", "-e", "--", path])
+  shlex.join()          ->  shlex.join(["realpath", "-e", "--", path])
                             Produces a properly shell-quoted string from a list.
-                            REQUIRED for all SSH remote commands — SSH
+                            REQUIRED for all SSH remote commands -- SSH
                             concatenates all arguments after the hostname into a
                             single string which the remote shell word-splits.
                             Also used for fzf --bind strings that fzf evaluates
                             via a shell, and for SSH commands with shell
                             operators (pipes, &&, redirects).
 
-  _dquote()             →  double-quoted: "path with spaces"
+  _dquote()             ->  double-quoted: "path with spaces"
                             Safe for TWO shell levels. Used only for the editor
                             command in _open() when it travels through:
-                              local shell (tmux new-window) → ssh → remote shell
+                              local shell (tmux new-window) -> ssh -> remote shell
                             Single-quoted paths break at the first level because
                             a single quote cannot appear inside a single-quoted
                             string.
@@ -109,12 +109,13 @@ scripts/build_single_file.py. Each module is self-contained with correct
 imports so linters work per-file. The build script strips intra-package
 imports and deduplicates stdlib imports into one block at the top.
 
-  _script.py   VERSION, SELF, SCRIPT_BYTES — no intra-package imports
+  _script.py   VERSION, SELF, SCRIPT_BYTES -- no intra-package imports
   utils.py     subprocess helpers, MIME detection, extension parsing
   workbase.py  session working directory (prefers /dev/shm)
   config.py    defaults and user config loading
   tty.py       /dev/tty prompt helper
   ssh.py       SSH option construction
+  session.py   host-keyed SSH session manager (socket lifecycle + locking)
   state.py     session state load/save/mutate
   cache.py     preview output cache
   archive.py   archive format detection and listing
@@ -125,6 +126,7 @@ imports and deduplicates stdlib imports into one block at the top.
   open.py      file open logic (editor, xdg-open, remote streaming)
   copy.py      clipboard copy sub-command
   remote.py    SSH remote search and preview
+  list.py      remotely list headless sub-command
   search.py    main fzf UI entry point, session lifecycle
 """
 
@@ -154,13 +156,14 @@ from .internal import (
     cmd_internal_toggle_hidden,
     cmd_internal_toggle_mode,
 )
+from .list import cmd_list
 from .open import cmd_open
 from .preview import cmd_preview
 from .remote import cmd_remote_preview, cmd_remote_reload
 from .search import cmd_search
 
 
-# Re-exported from ._script — used by remote.py, search.py, and the built flat file.
+# Re-exported from ._script -- used by remote.py, search.py, and the built flat file.
 __all__ = [
     "VERSION",
     "SELF",
@@ -171,22 +174,29 @@ __all__ = [
 ]
 
 COMMAND_MAP = {
+    # -- Headless transport API --
+    "remotely-list": cmd_list,
+    "list": cmd_list,
+    # -- Preview / open --
     "remotely-preview": cmd_preview,
     "remotely-open": cmd_open,
+    # -- Remote sub-commands (called by fzf callbacks and headless API) --
     "remotely-remote-reload": cmd_remote_reload,
     "remotely-remote-preview": cmd_remote_preview,
+    # -- Clipboard --
     "remotely-copy": cmd_copy,
+    # -- Main fzf TUI (legacy) --
     "remotely": cmd_search,
-    # Internal callbacks invoked by fzf bindings:
-    "_internal-get-prompt": cmd_internal_get_prompt,  # transform-prompt
-    "_internal-get-header": cmd_internal_get_header,  # transform-header
-    "_internal-get-search-action": cmd_internal_get_search_action,  # transform (disable/enable-search)
-    "_internal-toggle-mode": cmd_internal_toggle_mode,  # execute-silent CTRL-T
-    "_internal-toggle-ftype": cmd_internal_toggle_ftype,  # execute-silent CTRL-D
-    "_internal-toggle-hidden": cmd_internal_toggle_hidden,  # execute-silent CTRL-H
-    "_internal-prompt": cmd_internal_prompt,  # execute CTRL-F (reads /dev/tty)
-    "_internal-exclude": cmd_internal_exclude,  # execute CTRL-X (reads /dev/tty)
-    "_internal-dispatch": cmd_dispatch,  # preview + reload
+    # -- Internal callbacks invoked by fzf bindings --
+    "_internal-get-prompt": cmd_internal_get_prompt,
+    "_internal-get-header": cmd_internal_get_header,
+    "_internal-get-search-action": cmd_internal_get_search_action,
+    "_internal-toggle-mode": cmd_internal_toggle_mode,
+    "_internal-toggle-ftype": cmd_internal_toggle_ftype,
+    "_internal-toggle-hidden": cmd_internal_toggle_hidden,
+    "_internal-prompt": cmd_internal_prompt,
+    "_internal-exclude": cmd_internal_exclude,
+    "_internal-dispatch": cmd_dispatch,
     "_internal-exec": cmd_internal_exec,
     "_internal-action-menu": cmd_internal_action_menu,
 }
@@ -195,7 +205,7 @@ COMMAND_MAP = {
 def _set_process_name(name: str) -> None:
     """Set the process name visible in ps/top via prctl(PR_SET_NAME).
 
-    Linux only — silently ignored on other platforms. Makes the remote
+    Linux only -- silently ignored on other platforms. Makes the remote
     agent appear as 'python3 remotely' rather than 'python3 -' or
     'python3 /path/to/script.py', reducing visual noise for sysadmins.
     """
