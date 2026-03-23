@@ -33,11 +33,13 @@ Examples:
 
 import json
 import queue
+import subprocess
 import sys
 import threading
 
 from .archive import FileKind, classify
-from .session import acquire_socket
+from .remote import _build_fd_rga_args, _build_remote_cmd
+from .session import acquire_socket, ssh_opts_for
 from .utils import _validate_exclude_pattern
 
 
@@ -152,30 +154,15 @@ def _list_remote(
         out_queue.put(None)
         return
 
-    # Build argv for the existing cmd_remote_reload, capture its stdout.
-    import subprocess
-
-    reload_argv = [host, path or ".", sock, "f", ""]
-
-    if hidden:
-        reload_argv.append("--hidden")
     for p in exclude_patterns:
-        if _validate_exclude_pattern(p):
-            reload_argv += ["--exclude", p]
-        else:
+        if not _validate_exclude_pattern(p):
             print(
                 f"remotely list: ignoring unsafe exclude pattern {p!r}",
                 file=sys.stderr,
             )
 
-    # Run cmd_remote_reload with stdout captured via a pipe.
-    # We re-implement the SSH call directly here so we can stream lines
-    # as they arrive rather than buffering the whole result.
-
-    from .remote import _build_fd_rga_args, _build_remote_cmd
-    from .session import ssh_opts_for
-
-    fd_args, _ = _build_fd_rga_args("f", "", hidden, exclude_patterns)
+    safe_patterns = [p for p in exclude_patterns if _validate_exclude_pattern(p)]
+    fd_args, _ = _build_fd_rga_args("f", "", hidden, safe_patterns)
     remote_cmd = _build_remote_cmd(fd_args, [], "", path or ".", relative=False)
 
     proc = subprocess.Popen(
@@ -208,8 +195,6 @@ def _list_local(
     fmt: str,
 ) -> None:
     """Worker: list files on the local filesystem and push lines to out_queue."""
-    import subprocess
-
     fd_args = ["fd", "-L", "--type", "f"]
     if hidden:
         fd_args.append("--hidden")

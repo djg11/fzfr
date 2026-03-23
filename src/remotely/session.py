@@ -25,6 +25,7 @@ Public API:
 
 import fcntl
 import hashlib
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -159,8 +160,6 @@ def release_session(host: str) -> None:
 
     d = session_dir(host)
     if d.exists():
-        import shutil
-
         shutil.rmtree(str(d), ignore_errors=True)
 
 
