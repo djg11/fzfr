@@ -1,500 +1,323 @@
-# remotely — TODO / Roadmap
+# remotely — Roadmap
 
----
-
-## ~~Refactor: Split Source Into Modules + Build Script~~ ✓ Done
-
-The source has been split into `src/remotely/` modules with `scripts/build_single_file.py`
-producing the distributable `remotely` file. See the repo structure for details.
-
----
-
-## Ship src/remotely/ Package on PyPI (Low Priority)
-
-Currently PyPI and GitHub both ship the built monolithic `remotely` script.
-This works correctly for all users including SSH remote preview (SCRIPT_BYTES
-contains the full script). The `src/remotely/` package is development-only.
-
-When the feature set is stable, consider shipping the package instead:
-- Pros: clean Python package structure, individual modules importable
-- Cons: SSH remote preview needs rethinking — SCRIPT_BYTES must still contain
-  the full built script, not just _script.py. Likely solution: ship both the
-  package and the built script, with _find_self() finding the latter.
-
-**Do not attempt until Docker backend, Git integration, and Interactive File
-Operations are implemented and stable.**
-
----
-
-## Multi-Host Search
-
-Search across multiple remote machines simultaneously, aggregating results into a single fzf session.
-
-**Command-line syntax:**
-```sh
-remotely remote1:/path1 remote2:/path2
-remotely web01:/var/log web02:/var/log web03:/var/log
-```
-
-**Implementation notes:**
-- Each `host:path` pair maps to a `RemoteBackend` instance
-- Run N searches in parallel using `threading` (not asyncio — subprocess is the bottleneck)
-- Prefix each result with its source host: `web01:/var/log/app.log`
-- Strip the host prefix when passing the selected path to preview/open
-- Reload path: every keystroke re-queries all hosts in parallel and merges stdout into fzf stdin
-- Config: allow defining named host groups for frequently used combinations
-
-**Complexity:** High
-
----
-
-## Docker Backend
-
-Search and preview files inside running Docker containers without manual `docker exec` commands.
-
-**Implementation notes:**
-- New `DockerBackend` class modelled on `RemoteBackend`
-- Replace `ssh <host>` with `docker exec <container>` throughout
-- Use the same script-over-stdin technique for remote preview
-- Container discovery via `docker ps` for tab-completion or a container picker
-- No multiplexing equivalent for docker exec (each call is independent)
-- Requirement: container must have `python3.10+` and `fd` in its PATH, same as SSH
-
-**Complexity:** Medium (≈80% code reuse from `RemoteBackend`)
-
----
-
-## Git Integration
-
-Make remotely Git-aware for more relevant results and richer contextual previews.
-
-**Implementation notes (incremental):**
-
-1. **`git ls-files` mode** — use `git ls-files` as the file source instead of `fd`; faster and respects `.gitignore` exactly. Lowest effort, highest immediate value.
-2. **Enhanced preview** — show `git log --oneline -5` and `git status` for the selected file alongside the content preview.
-3. **Commit history search** — new mode `remotely git-log` to search commit messages; preview shows the full diff for the highlighted commit.
-4. **Open on remote** — keybinding to open the selected file on GitHub/GitLab in the browser.
-
-**Complexity:** Medium (implement incrementally, start with `git ls-files`)
-
----
-
-## Interactive File Operations
-
-Manage files directly from the fzf interface after finding them.
-
-**Implementation notes:**
-- `rm` — `_tty_prompt` for mandatory `[y/N]` confirmation before deletion; confirmation must be non-skippable
-- `mv` / `cp` — launch a nested remotely instance in directory mode to fuzzy-find the destination folder
-- All operations work on the current selection (`{+}` for multi-select)
-- Start with `rm` only; add `mv`/`cp` once `rm` is proven solid
-
-**Complexity:** Low (leverages existing fzf patterns and `_tty_prompt`)
-
----
-
-## Channels (Major Mode Redesign)
-
-Inspired by Television's channel concept but adapted to remotely's architecture:
-remotely stays a wiring layer, channels are named search presets, and the SSH
-remote layer applies transparently to any channel.
-
----
-
-### Config Layout
-
-remotely configuration is split across two locations:
-
-```
-~/.config/remotely/
-  config          # core settings (stable, rarely changed)
-  conf.d/
-    files.json    # built-in channel definitions (auto-generated on first run)
-    git.json
-    dirs.json
-    content.json
-    *.json        # user-defined channels
-```
-
-**`~/.config/remotely/config`** -- core settings only. No channels here.
-
-```json
-{
-  "ssh_multiplexing": false,
-  "ssh_control_persist": 60,
-  "ssh_strict_host_key_checking": true,
-  "editor": "",
-  "search_history": false,
-  "path_format": "relative",
-  "max_stream_mb": 100,
-  "default_channel": "files",
-  "switch_channel_key": "ctrl-m",
-  "keybindings": {
-    "toggle_hidden":  "ctrl-h",
-    "filter_ext":     "ctrl-f",
-    "add_exclude":    "ctrl-x",
-    "refresh_list":   "ctrl-r",
-    "sort_list":      "ctrl-s",
-    "copy_path":      "ctrl-c",
-    "open_file":      "enter",
-    "exit":           "esc"
-  }
-}
-```
-
-Note: `toggle_mode` (CTRL-T) and `toggle_ftype` (CTRL-D) are removed from
-the top-level keybindings -- these concepts move into channel definitions
-and source cycling respectively.
-
-**`~/.config/remotely/conf.d/*.json`** -- one file per channel.
-
-Each file defines exactly one channel. The filename is the channel name
-(without `.json`). Files are loaded in lexicographic order; later files
-override keys of earlier ones with the same channel name.
-
----
-
-### Channel Schema
-
-```json
-{
-  "description": "All files, fuzzy filename search",
-  "key": "f",
-  "sources": [
-    {
-      "label": "tracked",
-      "command": "fd",
-      "args": { "type": "f", "hidden": false }
-    },
-    {
-      "label": "hidden",
-      "command": "fd",
-      "args": { "type": "f", "hidden": true }
-    }
-  ],
-  "mode": "name",
-  "exclude_patterns": [],
-  "include_extensions": [],
-  "preview": "auto",
-  "cycle_sources_key": "ctrl-h",
-  "actions": {
-    "leader": "ctrl-b",
-    "groups": {}
-  }
-}
-```
-
-**Fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `description` | string | Shown in the channel picker overlay |
-| `key` | char | Single key for the channel picker (e.g. `"f"`) |
-| `sources` | array | One or more source definitions (see below) |
-| `mode` | `"name"` / `"content"` | fzf search mode |
-| `exclude_patterns` | array | Glob patterns to exclude |
-| `include_extensions` | array | Extension filter (empty = all) |
-| `preview` | `"auto"` / `"none"` / shell string | Preview command override |
-| `cycle_sources_key` | string | Key to cycle between sources (optional) |
-| `actions` | object | Channel-scoped custom actions (same schema as global) |
-
-**Source definition:**
-
-```json
-{
-  "label": "tracked",
-  "command": "fd",
-  "args": { "type": "f", "hidden": false, "file_source": "auto" }
-}
-```
-
-`command` is either `"fd"`, `"git"`, or a raw shell string. When a raw
-shell string is given, remotely pipes its stdout directly to fzf -- no fd/git
-logic applied, `args` is ignored.
-
-```json
-{
-  "label": "docker containers",
-  "command": "docker ps --format '{{.Names}}'"
-}
-```
-
----
-
-### Built-in Channel Files
-
-remotely ships these channel definitions. They are written to `conf.d/` on first
-run if the directory is empty, so users can override individual files:
-
-**`conf.d/files.json`**
-```json
-{
-  "description": "All files, fuzzy filename search",
-  "key": "f",
-  "sources": [
-    { "label": "normal",  "command": "fd", "args": { "type": "f", "hidden": false } },
-    { "label": "hidden",  "command": "fd", "args": { "type": "f", "hidden": true  } }
-  ],
-  "mode": "name",
-  "cycle_sources_key": "ctrl-h"
-}
-```
-
-**`conf.d/content.json`**
-```json
-{
-  "description": "Full-text search across file contents",
-  "key": "c",
-  "sources": [
-    { "label": "normal",  "command": "fd", "args": { "type": "f", "hidden": false } },
-    { "label": "hidden",  "command": "fd", "args": { "type": "f", "hidden": true  } }
-  ],
-  "mode": "content",
-  "cycle_sources_key": "ctrl-h"
-}
-```
-
-**`conf.d/git.json`**
-```json
-{
-  "description": "Git-tracked files only",
-  "key": "g",
-  "sources": [
-    { "label": "tracked",          "command": "git", "args": { "hidden": false } },
-    { "label": "tracked + others", "command": "git", "args": { "hidden": true  } }
-  ],
-  "mode": "name",
-  "cycle_sources_key": "ctrl-h"
-}
-```
-
-**`conf.d/dirs.json`**
-```json
-{
-  "description": "Directories only",
-  "key": "d",
-  "sources": [
-    { "label": "normal", "command": "fd", "args": { "type": "d", "hidden": false } },
-    { "label": "hidden", "command": "fd", "args": { "type": "d", "hidden": true  } }
-  ],
-  "mode": "name",
-  "cycle_sources_key": "ctrl-h"
-}
-```
-
----
-
-### User-Defined Channel Example
-
-**`~/.config/remotely/conf.d/logs.json`**
-```json
-{
-  "description": "Application log files",
-  "key": "l",
-  "sources": [
-    { "label": "all logs", "command": "fd", "args": {
-        "type": "f", "hidden": false,
-        "extensions": ["log", "txt"]
-    }}
-  ],
-  "mode": "content",
-  "actions": {
-    "leader": "ctrl-b",
-    "groups": {
-      "g": {
-        "label": "grep",
-        "actions": {
-          "e": { "cmd": "grep -n '{q}' {path}", "label": "grep query", "output": "overlay" }
-        }
-      }
-    }
-  }
-}
-```
-
----
-
-### CLI
+The goal is narrow and specific: be a **zero-install SSH transport** that
+any fuzzy-finder (fzf, Television, etc.) can call as shell commands:
 
 ```sh
-remotely                          # default_channel from config
-remotely git                      # built-in git channel
-remotely logs                     # user-defined channel
-remotely user@host /path git      # remote + channel
-remotely --channel content        # explicit flag
+remotely list    user@host /path          # → newline-delimited file paths on stdout
+remotely preview user@host /path          # → rendered file content on stdout
+remotely list    host1:/path host2:/path  # → merged results from multiple hosts
 ```
 
-Argv layout:
-```
-remotely [TARGET] [BASE_PATH] [CHANNEL] [--exclude PATTERN ...]
-```
-
-Backward compatible: `name` and `content` as CHANNEL map to the `files`
-and `content` built-in channels. `remotely local ~/projects name` still works.
+The UI (Television, fzf) owns everything else: fuzzy matching, keybindings,
+git channels, docker, history, syntax highlighting. remotely is the pipe that
+makes remote files visible to those UIs — including across multiple hosts
+simultaneously, because the host prefix on each output line is transport
+metadata that only remotely understands. A UI cannot invent that prefix.
 
 ---
 
-### Runtime Channel Switching
+## What is done
 
-`CTRL-M` (configurable via `switch_channel_key`) opens a channel picker
-using the existing SIGSTOP/overlay system:
-
-```
-CTRL-M ->
-  ╭─ channels ──────────────────╮
-  │  [f] files    - all files   │
-  │  [c] content  - full-text   │
-  │  [g] git      - tracked     │
-  │  [d] dirs     - directories │
-  │  [l] logs     - app logs    │
-  │  [q] cancel                 │
-  ╰─────────────────────────────╯
-```
-
-Reuses `_run_which_key_menu()` -- flat single-level menu, key from each
-channel's `key` field. After selection remotely reloads the source and updates
-fzf prompt/header via `transform` actions. No process restart needed for
-channels with the same fzf invocation structure; `become` (fzf >= 0.45)
-used when the fzf args need to change fundamentally.
+- **Remote search and preview** over SSH with hash-based agent caching —
+  bootstrap is ~250 bytes; full upload only on cold cache.
+- **Session management** — ControlMaster multiplexing, per-session directories
+  under `/dev/shm/remotely/`, atomic state files, cleanup on exit.
+- **Preview cache** — LRU cache keyed on `(path, mtime, query)` to avoid
+  repeated SSH round-trips for unchanged files.
+- **Remote agent caching** — cached at `/dev/shm/remotely/<hash>.py` (RAM)
+  or `~/.cache/remotely/<hash>.py` (disk fallback).
+- **Security hardening** — `shlex.quote`/`shlex.join` throughout, Semgrep
+  rules, path boundary checks, symlink-safety on `/dev/shm`.
+- **Single-file build** — `scripts/build_single_file.py` produces the
+  distributable `remotely` script; CI publishes to PyPI on release.
+- **fzf TUI** — the original standalone fzf UI still works; it is now a
+  legacy consumer of the same internal backend.
 
 ---
 
-### Source Cycling
+## Phase 1 — Clean Headless API (top priority)
 
-Within a channel, `cycle_sources_key` cycles through the `sources` array.
-Source index stored in state. On cycle:
-- update `source_index` in state
-- fzf fires a `reload` with the new source command
-- prompt and header update via `transform-prompt` / `transform-header`
-- label shown in prompt: `[files: hidden]`
+The internal plumbing (`cmd_remote_reload`, `cmd_remote_preview`) already does
+the right thing. This phase exposes it behind a stable, UI-agnostic interface.
 
-This replaces the current CTRL-H toggle and CTRL-T mode toggle with a
-unified, channel-aware mechanism.
+### 1.1 `remotely list <target> <path> [options]`
+
+Stream file paths from a remote (or local) host to stdout and exit.
+
+```sh
+remotely list user@host ~/projects
+remotely list user@host ~/projects --relative
+remotely list user@host ~/projects --hidden
+remotely list user@host ~/projects --exclude '*.pyc'
+remotely list local ~/projects
+```
+
+- Establishes (or reuses) a ControlMaster socket, bootstraps the remote agent
+  if not cached, runs `fd` on the remote, streams results, exits.
+- No state file, no session directory, no TUI.
+- `--format=json` emits `{"path": "...", "kind": "text|binary|archive|pdf"}` per
+  line for UIs that want metadata.
+- `target=local` runs `fd` directly — no SSH.
+
+### 1.2 `remotely preview <target> <path> [query]`
+
+Render a single file to stdout and exit.
+
+```sh
+remotely preview user@host /var/log/app.log
+remotely preview user@host /var/log/app.log "error"
+remotely preview local ~/projects/main.py
+```
+
+- Reuses the existing bootstrap/cache logic from `cmd_remote_preview`.
+- `target=local` calls `cmd_preview` directly — no SSH.
+- Output is raw bytes with ANSI colour codes (bat, rga, xxd as available).
+- The `<target>` prefix in the path argument is parsed back out here so the
+  UI can pass a multi-host result line directly:
+  `remotely preview user@host:/var/log/app.log`.
+
+### 1.3 `remotely open <target> <path>`
+
+Open a remote file in `$EDITOR` and sync back on save.
+
+```sh
+remotely open user@host /etc/nginx/nginx.conf
+```
+
+- Streams file to a local temp path in `/dev/shm`, launches `$EDITOR`, watches
+  for save, syncs back via `scp`/`cat`.
+- Already implemented in `open.py`; needs extraction as a standalone headless
+  entry point independent of the fzf session.
+
+### 1.4 Backward compatibility
+
+If no sub-command is given and argv matches the old `remotely [target] [path]`
+pattern, fall through to `cmd_search` (the fzf TUI). Print a one-line
+deprecation hint to stderr pointing at the new sub-commands.
 
 ---
 
-### State Changes
+## Phase 2 — Multi-Host Support
+
+Television and fzf have a single `source_command` field — they run one command
+and read its stdout. They cannot natively aggregate multiple SSH hosts. Because
+the host prefix on each output line is transport metadata that only remotely
+understands, multi-host merging belongs here.
+
+### 2.1 `remotely list` with multiple targets
+
+Accept multiple `host:/path` arguments. Run all SSH sessions in parallel via
+`threading`, prefix each result line with its source host, and stream the
+merged output to stdout.
+
+```sh
+remotely list host1:/var/log host2:/var/log host3:/var/log
+remotely list host1:~/projects host2:~/projects --hidden
+```
+
+**Output format** (newline-delimited, host-prefixed):
+```
+host1:/var/log/app.log
+host1:/var/log/nginx/access.log
+host2:/var/log/app.log
+...
+```
+
+With `--format=json`:
+```json
+{"host": "host1", "path": "/var/log/app.log", "kind": "text"}
+```
+
+**Implementation notes:**
+- Each `host:/path` pair maps to one `RemoteBackend` instance.
+- `threading.Thread` per host (not asyncio — `subprocess` is the bottleneck,
+  not the event loop).
+- A shared `queue.Queue` collects lines from all threads; the main thread drains
+  it to stdout in arrival order.
+- Each host gets its own ControlMaster socket under `/dev/shm/remotely/` so
+  connections are independent and failures on one host do not block others.
+- A failed host prints a single error line to stderr and the thread exits; the
+  remaining hosts continue streaming.
+
+### 2.2 `remotely preview` with host-prefixed paths
+
+Once `remotely list` emits `host:/path` lines, the UI passes them verbatim to
+`remotely preview`. Parse the prefix to route to the correct host:
+
+```sh
+remotely preview host1:/var/log/app.log
+remotely preview host1:/var/log/app.log "error"
+```
+
+- Split on the first `:` that is followed by `/` to extract host and path.
+- Fall back to treating the whole argument as a local path if no valid host
+  prefix is found (backward compatible with single-host usage).
+
+### 2.3 Named host groups (config)
+
+For frequently used combinations, allow naming groups in
+`~/.config/remotely/config`:
 
 ```json
 {
-  "channel": "files",
-  "source_index": 0,
-  "mode": "name"
+  "host_groups": {
+    "web": ["web01", "web02", "web03"],
+    "db":  ["db-primary", "db-replica"]
+  }
 }
 ```
 
-`toggle_mode`, `toggle_ftype`, `show_hidden` state keys are deprecated in
-favour of `channel` + `source_index`. Kept for one release as aliases.
-
----
-
-### Config Loading
-
-```
-load_config()
-  1. read ~/.config/remotely/config  ->  core settings
-  2. glob ~/.config/remotely/conf.d/*.json in lexicographic order
-  3. for each file: parse as channel definition, register by filename stem
-  4. merge: user conf.d channels override built-in channels of same name
-  5. validate all channels: check keys unique, sources non-empty, etc.
-  6. if conf.d/ empty or missing: seed with built-in channel defaults
+Then:
+```sh
+remotely list @web /var/log
+remotely list @db ~/data
 ```
 
-The core config and channel files are loaded separately. A syntax error in
-one channel file skips that channel with a warning -- it does not prevent
-remotely from launching.
-
-On remote SSH sessions, `SCRIPT_BYTES` already contains the full remotely
-script. Channel files from the local `conf.d/` are serialized into the
-session state at launch and passed to remote callbacks via state -- no
-remote filesystem access needed.
+`@name` expands to the configured list of hosts. The `@` sigil is unambiguous
+with SSH host strings.
 
 ---
 
-### Backward Compatibility
+## Phase 3 — Connection Reliability
 
-- `remotely local /path name` -- `name` maps to `files` channel, mode=name
-- `remotely local /path content` -- `content` maps to `content` channel
-- Top-level `default_mode`, `file_source`, `show_hidden` in config -- if
-  present and no `default_channel` set, synthesize an implicit `files`
-  channel with those values applied. Emit a deprecation warning.
-- Global `custom_actions` at top level -- still valid, treated as the
-  global action set applied to all channels that don't define their own.
+### 3.1 Locking on socket creation
+
+Multiple preview calls fire in parallel (Television's async previewer, fzf's
+preview window). Two processes racing to create the ControlMaster socket cause
+one to fail. Add `fcntl.flock` on a `.lock` file alongside the socket so only
+one process runs `ssh -M`; others wait and reuse the socket.
+
+This is especially important for multi-host sessions where N sockets are created
+simultaneously.
+
+### 3.2 `ssh` timeout
+
+`subprocess.run(["ssh", ...])` with no `timeout=` hangs forever on a broken
+connection. Add `ConnectTimeout=5` to `_ssh_opts()` unconditionally (no effect
+when the socket already exists). The Semgrep rule `remotely-ssh-call-no-timeout`
+already flags this.
+
+### 3.3 Stale socket detection
+
+If a remote host reboots mid-session, the ControlMaster socket exists locally
+but is dead. Detect `ssh -O check` failure and recreate the socket rather than
+returning an error to the UI.
 
 ---
 
-### Complexity: High
+## Phase 4 — Agent Size & Execution
 
-Do not start until Git Integration Phase 2 is merged.
+### 4.1 Minification
 
-**Phase 1** -- conf.d loader, built-in channels, CLI channel arg, no UI.
-  Files: `config.py`, `search.py`, `backends.py`
+Add `--minify` to `build_single_file.py`: strip comments and docstrings from
+the built monolith. Target: ~60 KB → <30 KB. Required before `memfd_create`
+because without a persistent remote cache, script size equals preview latency
+on every cold call.
 
-**Phase 2** -- CTRL-M channel switcher overlay, source cycling.
-  Files: `internal.py`, `search.py`, `state.py`
+### 4.2 In-memory execution (`memfd_create`)
 
-**Phase 3** -- channel-scoped actions, user-defined channels in conf.d,
-  remote channel serialization into state.
-  Files: `config.py`, `internal.py`, `remote.py`, `search.py`
-
----
-
-## ~~Remote Agent: Transience Improvements — Phase 1~~ ✓ Done
-
-### ~~Process rename~~ ✓ Done
-
-The remote agent now renames itself via `prctl(PR_SET_NAME)` so it appears
-as `python3 remotely` in `ps`/`top` rather than `python3 -`.
-
-### ~~/dev/shm bootstrap cache~~ ✓ Done
-
-The remote script cache now prefers `/dev/shm/remotely/` (tmpfs, RAM-backed,
-nothing persists on disk after reboot) and falls back to `~/.cache/remotely/`
-on systems where `/dev/shm` is absent or not writable (macOS, some containers).
-Exactly one location is written — never both. The bootstrap checks `/dev/shm`
-first, then `~/.cache`, matching the upload priority.
----
-
-## Remote Agent: Transience Improvements — Phase 2
-
-The remaining transience work. Requires Phase 1 to be merged first.
-
-### In-Memory Execution via `memfd_create`
-
-Replace the `/dev/shm` file with a truly anonymous RAM fd that leaves no
-trace on disk even within a session:
+Replace the on-disk remote cache with a truly anonymous RAM fd on Linux:
 
 ```python
-import ctypes, os, sys
 fd = ctypes.CDLL(None).memfd_create(b"remotely", 0)
 os.write(fd, script_bytes)
 os.execve(f"/proc/self/fd/{fd}", [sys.executable] + sys.argv, os.environ)
 ```
 
-Priority order on the remote:
-1. `memfd_create` — Linux only, truly anonymous
-2. `/dev/shm` via `mkstemp` + immediate unlink — Linux/BSD, RAM-backed
-3. `tempfile.gettempdir()` via `mkstemp` + immediate unlink — universal fallback
+Priority on the remote: `memfd_create` → `/dev/shm` mkstemp+unlink → `tmpdir`
+mkstemp+unlink. Bypasses `noexec` mounts on `/tmp` common on hardened servers.
 
-**Performance note:** once `memfd_create` is implemented without a persistent
-file cache, every preview call that misses the local output cache pays the
-full ~60KB transfer cost. Minification (see below) is therefore required
-alongside this change.
+**Dependency**: minification (4.1) must land first.
 
-### Minification
+### 4.3 Python 3.6 compatibility
 
-Strip comments and collapse whitespace in `scripts/build_single_file.py`.
-Target: 20–30 KB from the current ~60 KB. Required alongside `memfd_create`
-because without a persistent remote cache, script size directly determines
-preview latency on every local output cache miss.
+The remote agent must run on CentOS 7 / RHEL 7 (Python 3.6). The built
+monolith currently uses `str | None` union syntax (3.10+).
 
-### Session-scoped in-memory script cache
+- Add `--remote-python 3.6` flag to `build_single_file.py` that rewrites
+  `X | Y` → `Optional[X]`, etc., or fails loudly on violations.
+- Add a CI step that runs the built monolith under a `python:3.6-slim` Docker
+  image and asserts exit code 0.
 
-Once `memfd_create` is in place, add a session-scoped in-memory dict so
-repeated previews within one remotely session avoid re-transferring the script.
-The local output cache (`_PreviewCache`) already avoids re-running previews
-for files seen this session; this is the complementary cache for the script
-transfer itself.
+---
 
-**Complexity:** Medium. Do not attempt until `memfd_create` and minification
-are complete and stable.
+## Phase 5 — Reference Channel Configs
+
+Once the headless and multi-host APIs are stable, provide copy-paste configs
+for the two target UIs in `docs/`.
+
+**`docs/television-cable.toml`** (single host):
+```toml
+[metadata]
+name = "ssh-files"
+
+[source]
+command = "remotely list user@host ~/projects"
+
+[preview]
+command = "remotely preview {}"
+```
+
+**`docs/television-multihost.toml`**:
+```toml
+[metadata]
+name = "ssh-fleet"
+
+[source]
+command = "remotely list host1:~/projects host2:~/projects host3:~/projects"
+
+[preview]
+command = "remotely preview {}"
+```
+
+**`docs/fzf-example.sh`**:
+```sh
+# single host
+remotely list user@host ~/projects \
+  | fzf --preview 'remotely preview {}'
+
+# multiple hosts
+remotely list host1:/var/log host2:/var/log \
+  | fzf --preview 'remotely preview {}'
+```
+
+Note that `remotely preview {}` works for both single and multi-host because
+`{}` expands to the full `host:/path` line from `remotely list`.
+
+---
+
+## What remotely will NOT implement
+
+The following are explicitly out of scope because fzf and Television handle
+them natively:
+
+- Fuzzy matching and ranking
+- Keybindings and UI actions
+- Git channels (`git ls-files` piped into fzf)
+- Docker / Kubernetes channels
+- Search history
+- Syntax highlighting in the list pane
+- Channel switching UI
+- Interactive file operations (rename, delete)
+
+The fzf TUI (`cmd_search`, `build_fzf_invocation`, custom actions) will not
+receive new features. It remains as a legacy consumer and integration test
+harness but is no longer the primary interface.
+
+---
+
+## Recommended implementation order
+
+1. `remotely list` single-host (Phase 1.1)
+2. `remotely preview` single-host with `host:/path` parsing (Phase 1.2)
+3. `remotely list` multi-host (Phase 2.1)
+4. `remotely preview` multi-host routing (Phase 2.2)
+5. Connection locking + timeout (Phase 3.1, 3.2)
+6. Named host groups (Phase 2.3)
+7. Minification (Phase 4.1)
+8. `memfd_create` (Phase 4.2)
+9. Reference channel configs (Phase 5)
+10. Python 3.6 compat (Phase 4.3) — only if CentOS 7 support is needed
+11. `remotely open` headless (Phase 1.3) — low priority; most UIs handle
+    open via their own action config
