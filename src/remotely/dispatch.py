@@ -6,12 +6,14 @@ branching is encapsulated in the backend implementations.
 """
 
 from pathlib import Path
+from typing import List
 
 from .backends import backend_from_state
 from .state import _load_state
+from .utils import _removeprefix
 
 
-def cmd_dispatch(argv: list[str]) -> int:
+def cmd_dispatch(argv: List[str]) -> int:
     """Internal: dispatch preview and reload actions using the session backend.
 
     Reconstructs the appropriate backend (LocalBackend or RemoteBackend) from
@@ -45,7 +47,7 @@ def cmd_dispatch(argv: list[str]) -> int:
         if filename and not Path(filename).is_absolute():
             base_path = state.get("base_path", "")
             if base_path:
-                filename = str(Path(base_path) / filename.removeprefix("./"))
+                filename = str(Path(base_path) / _removeprefix(filename, "./"))
         return backend.preview(filename, query, mode)
 
     if command == "reload":

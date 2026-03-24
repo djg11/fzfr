@@ -1,38 +1,32 @@
 # Pre-commit hooks for remotely.
-# Install: pip install pre-commit && pre-commit install
-# Run manually: pre-commit run --all-files
-#
-# IMPORTANT: ruff is run via the local venv (language: system) so it uses
-# the same version as `make lint` and `make format`. This prevents version
-# skew between pre-commit and the developer's installed ruff.
+# Optimized for Gentoo Musl / Python 3.6 compatibility.
+# Note: ruff is disabled here as it requires Python 3.7+ to run.
 
 repos:
   - repo: local
     hooks:
-      - id: ruff-check
-        name: ruff (lint + fix)
-        entry: ruff check --fix
-        language: system
-        types: [python]
-        pass_filenames: true
-
-      - id: ruff-format
-        name: ruff (format)
-        entry: ruff format
-        language: system
-        types: [python]
-        pass_filenames: true
-
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
-    hooks:
       - id: trailing-whitespace
+        name: trailing whitespace
+        entry: python3 -c 'import sys; [open(f, "rb+").write(open(f, "rb").read().rstrip() + b"\n") for f in sys.argv[1:]]'
+        language: system
+        types: [text]
         exclude: '\.md$'
-      - id: end-of-file-fixer
+
       - id: check-json
+        name: check json
+        entry: python3 -m json.tool
+        language: system
+        types: [json]
         files: '^(src/|tests/|\.config/)'
+
       - id: check-toml
+        name: check toml
+        entry: python3 -c 'import sys, toml; [toml.load(open(f)) for f in sys.argv[1:]]'
+        language: system
+        types: [toml]
+
       - id: check-yaml
-      - id: check-merge-conflict
-      - id: check-added-large-files
-        args: [--maxkb=500]
+        name: check yaml
+        entry: python3 -c 'import sys, yaml; [yaml.safe_load(open(f)) for f in sys.argv[1:]]'
+        language: system
+        types: [yaml]

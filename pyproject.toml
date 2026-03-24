@@ -9,7 +9,7 @@ dynamic = ["version"]
 description = "Fuzzy file search for local and remote filesystems"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.6"
 keywords = ["fzf", "fuzzy", "search", "ssh", "remote", "terminal", "cli", "television"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -20,18 +20,26 @@ classifiers = [
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.6",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Utilities",
 ]
+# dataclasses is stdlib in 3.7+; needed for 3.6 only
+dependencies = [
+    "dataclasses; python_version < '3.7'",
+]
 
 [project.optional-dependencies]
 dev = [
-    "ruff>=0.15.0",          # linter + formatter (replaces flake8, isort, black)
-    "pre-commit>=3.0.0",    # git hook runner
-    "pyright>=1.1.0",       # type checker (optional, used by VS Code Pylance)
-    "pytest>=7.0.0",        # test runner (unittest also works, pytest gives better output)
+    "ruff>=0.15.0",
+    "pre-commit>=3.0.0",
+    "pyright>=1.1.0",
+    "pytest>=7.0.0",
 ]
 
 [project.scripts]
@@ -48,9 +56,6 @@ Repository = "https://github.com/djg11/remotely"
 Issues     = "https://github.com/djg11/remotely/issues"
 
 [tool.setuptools]
-# py-modules is used for PyPI packaging (cp remotely remotely.py before python -m build).
-# For editable dev installs (pip install -e .[dev]), setuptools finds
-# the src/remotely/ package via package-dir below.
 py-modules = ["remotely"]
 
 [tool.setuptools.packages.find]
@@ -60,14 +65,11 @@ where = ["src"]
 version = {attr = "remotely._script.VERSION"}
 
 # -- Ruff: linter + formatter --------------------------------------------------
-# Ruff replaces flake8, isort, pyupgrade, and black in one tool.
-# Run:  ruff check src/ tests/     (lint)
-#       ruff format src/ tests/    (format)
-#       ruff check --fix src/      (auto-fix safe issues)
-# Or:   make lint / make format
+# NOTE: ruff itself requires Python 3.7+ to RUN (as a dev tool on the local
+# machine), but the code it lints targets Python 3.6.
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py36"
 line-length    = 88
 
 [tool.ruff.lint]
@@ -76,7 +78,6 @@ select = [
     "W",    # pycodestyle warnings
     "F",    # pyflakes (unused imports, undefined names, etc.)
     "I",    # isort (import ordering)
-    "UP",   # pyupgrade (modern Python syntax)
     "B",    # flake8-bugbear (likely bugs and design issues)
     "SIM",  # flake8-simplify (simplifiable code patterns)
     "TID",  # flake8-tidy-imports (banned / absolute imports)
@@ -86,13 +87,12 @@ ignore = [
     "B006",   # mutable default argument -- used intentionally in dataclasses
     "B007",   # loop control variable not used -- common in fzf callback stubs
     "SIM102", # nested if -> combined -- sometimes less readable
-    "SIM105", # contextlib.suppress -- requires top-level import; late imports
-              # are forbidden in this codebase (build script strips them).
-              # Keep explicit try/except/pass instead.
+    "SIM105", # contextlib.suppress -- requires top-level import
     "SIM108", # ternary -- sometimes less readable than if/else
-    "SIM110", # any() instead of for loop -- ruff marks this as unsafe fix;
-              # the for-loop form is clearer when the loop body has a return.
-    "UP007",  # X | Y union syntax -- keep Optional[X] for clarity
+    "SIM110", # any() instead of for loop
+    "UP007",  # X | Y union syntax -- keep Optional[X] for 3.6 compat
+    "UP006",  # use list instead of List -- keep List for 3.6 compat
+    "UP035",  # typing imports deprecated -- keep for 3.6 compat
 ]
 
 [tool.ruff.lint.isort]

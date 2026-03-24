@@ -12,15 +12,17 @@ jobs:
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
-      # Required for trusted publishing (OIDC) — no API token needed
+      # Required for trusted publishing (OIDC) -- no API token needed
       id-token: write
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python (build toolchain)
         uses: actions/setup-python@v5
         with:
+          # Build toolchain runs on 3.10 (ruff, build, setuptools all require 3.7+)
+          # The built remotely script itself targets Python 3.6 on the remote.
           python-version: "3.10"
 
       - name: Install build tools
@@ -31,11 +33,20 @@ jobs:
       - name: Build single-file script
         run: python3 scripts/build_single_file.py
 
-      - name: Rename remotely → remotely.py for packaging
+      - name: Verify script runs under Python 3.6
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.6"
+      - run: python3.6 remotely --version
+
+      - name: Switch back to 3.10 for packaging
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Rename remotely -> remotely.py for packaging
         # setuptools requires a .py extension to import the module and read
         # VERSION via the dynamic version attr directive in pyproject.toml.
-        # The installed binary at ~/.local/bin/remotely has no extension regardless
-        # — pip names it after the [project.scripts] key, not the source file.
         run: cp remotely remotely.py
 
       - name: Build package

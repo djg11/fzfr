@@ -24,7 +24,8 @@ VERSION = "0.9.5"
 _SHEBANG = b"#!/usr/bin/env python3"
 
 
-def _is_built_script(path: Path) -> bool:
+def _is_built_script(path):
+    # type: (Path) -> bool
     """Return True if path is the built single-file remotely script.
 
     Checks for the shebang line rather than file size -- size thresholds are
@@ -37,7 +38,8 @@ def _is_built_script(path: Path) -> bool:
         return False
 
 
-def _find_self() -> str | None:
+def _find_self():
+    # type: () -> Optional[str]
     """Locate the built single-file remotely script.
 
     When running from the built file: returns __file__ (the script itself).
@@ -73,7 +75,7 @@ SELF = _find_self()
 #             pipe and will silently produce no preview output.
 SCRIPT_BYTES = Path(SELF).read_bytes() if SELF else b""
 
-SCRIPT_HASH: str = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES else ""
+SCRIPT_HASH = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES else ""  # type: str
 
 # Bootstrap script sent to the remote on every preview call (~250 bytes).
 #
@@ -89,18 +91,18 @@ SCRIPT_HASH: str = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES
 # that path is always either absent or complete. Reading and hashing 60KB on
 # every preview call adds measurable latency on low-latency (LAN) links where
 # the SSH RTT is only ~1ms, so the exists() check is deliberately kept cheap.
-SCRIPT_BOOTSTRAP: bytes = (
+SCRIPT_BOOTSTRAP = (
     (
-        f"import sys,os,subprocess\n"
-        f'for p in[f"/dev/shm/remotely/{SCRIPT_HASH}.py",'
-        f'os.path.expanduser("~/.cache/remotely/{SCRIPT_HASH}.py")]:\n'
-        f"    if os.path.exists(p):\n"
-        f"        sys.exit(subprocess.run([sys.executable,p]+sys.argv[1:]).returncode)\n"
-        f"sys.exit(99)\n"
-    ).encode()
+        b"import sys,os,subprocess\n"
+        b'for p in[f"/dev/shm/remotely/{SCRIPT_HASH}.py",'
+        b'os.path.expanduser("~/.cache/remotely/{SCRIPT_HASH}.py")]:\n'
+        b"    if os.path.exists(p):\n"
+        b"        sys.exit(subprocess.run([sys.executable,p]+sys.argv[1:]).returncode)\n"
+        b"sys.exit(99)\n"
+    )
     if SCRIPT_HASH
     else b""
-)
+)  # type: bytes
 
 # Sentinel exit code: remote cache miss. Must not clash with remotely-preview's
 # own exit codes (0, 1, 127).

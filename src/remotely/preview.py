@@ -11,10 +11,6 @@ fzf calls this once per cursor movement. Dispatch order:
 All output goes to stdout via _passthrough() to preserve streaming and ANSI
 colour codes. _capture() is used only for pdftotext where the output needs
 to be piped into rga for query highlighting.
-
-The preview cache (_PreviewCache) stores rendered output keyed on
-(path, mtime_ns, query) so repeated cursor visits to the same file cost
-~0.1 ms instead of spawning a new subprocess each time.
 """
 
 import os
@@ -22,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import List
 
 from .archive import FileKind, _list_archive, classify
 from .config import AVAILABLE_TOOLS
@@ -36,15 +33,9 @@ from .utils import (
 from .workbase import WORK_BASE
 
 
-def _preview_pdf(filepath: str, query: str) -> None:
-    """Render a PDF file in the preview pane.
-
-    With a query: rga for highlighted, context-aware results; falls back to
-    pdftotext + grep when rga is unavailable.
-
-    Without a query: pdftotext for the first 50 lines of text; falls back to
-    rga for scanned/image-only PDFs that have no native text layer.
-    """
+def _preview_pdf(filepath, query):
+    # type: (str, str) -> None
+    """Render a PDF file in the preview pane."""
     if query:
         if (
             _try_run(
@@ -81,12 +72,9 @@ def _preview_pdf(filepath: str, query: str) -> None:
         )
 
 
-def _preview_text(filepath: str, query: str) -> None:
-    """Render a text file in the preview pane.
-
-    With a query: matching lines with context via rga or grep.
-    Without a query: full file with syntax highlighting via bat or cat.
-    """
+def _preview_text(filepath, query):
+    # type: (str, str) -> None
+    """Render a text file in the preview pane."""
     if query:
         _try_run(
             [
@@ -114,23 +102,22 @@ def _preview_text(filepath: str, query: str) -> None:
     _preview_git_context(filepath)
 
 
-def _preview_git_context(filepath: str) -> None:
-    """Append git log and diff context to the preview pane for the given file.
-
-    Shows the last 5 commits and any uncommitted diff. Both are omitted
-    silently when git is unavailable or the file is outside a repository.
-    """
+def _preview_git_context(filepath):
+    # type: (str) -> None
+    """Append git log and diff context to the preview pane for the given file."""
     if "git" not in AVAILABLE_TOOLS:
         return
 
     log_result = subprocess.run(
         ["git", "log", "--oneline", "--color=always", "-5", "--", filepath],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
     diff_result = subprocess.run(
         ["git", "diff", "HEAD", "--color=always", "--", filepath],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
 
@@ -140,7 +127,7 @@ def _preview_git_context(filepath: str) -> None:
     if not log_out and not diff_out:
         return
 
-    print("\n\033[2m" + "-" * 40 + "\033[0m")  # dim separator
+    print("\n\033[2m" + "-" * 40 + "\033[0m")
     if log_out:
         print("\033[2mgit log\033[0m")
         print(log_out)
@@ -151,7 +138,8 @@ def _preview_git_context(filepath: str) -> None:
         print(diff_out)
 
 
-def _preview_archive(filepath: str, hint: str, query: str) -> None:
+def _preview_archive(filepath, hint, query):
+    # type: (str, str, str) -> None
     """Render an archive file in the preview pane."""
     if query:
         if (
@@ -165,12 +153,9 @@ def _preview_archive(filepath: str, hint: str, query: str) -> None:
         _list_archive(filepath, hint)
 
 
-def _preview_directory(filepath: str) -> None:
-    """Render a directory listing in the preview pane.
-
-    Tries eza/exa for icons and colour, then tree for structure, then ls.
-    --color=always is forced because fzf's preview sub-shell is a pipe.
-    """
+def _preview_directory(filepath):
+    # type: (str) -> None
+    """Render a directory listing in the preview pane."""
     _try_run(
         [
             ["eza", "--color=always", "--tree", "--level=2", "--icons", filepath],
@@ -183,7 +168,8 @@ def _preview_directory(filepath: str) -> None:
     )
 
 
-def _preview_binary(filepath: str) -> None:
+def _preview_binary(filepath):
+    # type: (str) -> None
     """Render a truncated hexdump of a binary file (first 256 bytes)."""
     _try_run(
         [
@@ -195,7 +181,8 @@ def _preview_binary(filepath: str) -> None:
     )
 
 
-def _dispatch_preview(filepath: str, hint: str, mime: str, query: str) -> None:
+def _dispatch_preview(filepath, hint, mime, query):
+    # type: (str, str, str, str) -> None
     """Dispatch to the correct renderer once MIME type is known."""
     kind = classify(hint, mime)
     if kind is FileKind.ARCHIVE:
@@ -210,34 +197,31 @@ def _dispatch_preview(filepath: str, hint: str, mime: str, query: str) -> None:
         _preview_text(filepath, query)
 
 
-def _preview_stdin(hint: str, query: str) -> None:
-    """Buffer stdin to a temp file and preview it.
-
-    Archive and PDF tools require a seekable file descriptor; stdin is a
-    pipe and is not seekable. We buffer to RAM-backed tmpfs in WORK_BASE.
-    """
+def _preview_stdin(hint, query):
+    # type: (str, str) -> None
+    """Buffer stdin to a temp file and preview it."""
     fd, tmpfile = tempfile.mkstemp(prefix="remotely-preview-", dir=str(WORK_BASE))
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(sys.stdin.buffer.read())
         mime = _get_mime(tmpfile)
-        # Honour the original filename as a tiebreaker for headerless PDFs
         if hint.endswith(".pdf"):
             mime = "application/pdf"
         _dispatch_preview(tmpfile, hint, mime, query)
     finally:
-        Path(tmpfile).unlink(missing_ok=True)
+        try:
+            Path(tmpfile).unlink()
+        except (FileNotFoundError, OSError):
+            pass
 
 
-def _preview_file(filepath: str, query: str) -> None:
+def _preview_file(filepath, query):
+    # type: (str, str) -> None
     """Preview a file on the local filesystem."""
-    # PERF: Check directory first -- cheap and avoids forking file(1).
     if Path(filepath).is_dir():
         _preview_directory(filepath)
         return
 
-    # PERF: classify() checks extension before forking file(1).
-    # For the common case of source files this avoids a subprocess.
     kind = classify(filepath)
     if kind is FileKind.ARCHIVE:
         _preview_archive(filepath, filepath, query)
@@ -248,24 +232,14 @@ def _preview_file(filepath: str, query: str) -> None:
         _dispatch_preview(filepath, filepath, mime, query)
 
 
-def cmd_preview(argv: list[str]) -> int:
+def cmd_preview(argv):
+    # type: (List[str]) -> int
     """Entry point for the remotely-preview sub-command.
-
-    Called by fzf once per cursor movement with the path of the highlighted
-    file. Dispatches to the correct renderer based on MIME type and extension.
 
     Arguments:
         argv[0]  filepath  -- path to preview, or "/dev/stdin" for piped input
-        argv[1]  query     -- current fzf search query (optional, for highlighting)
+        argv[1]  query     -- current fzf search query (optional)
         argv[2]  hint      -- original filename when filepath is a temp file (optional)
-
-    DESIGN: Dispatches on MIME type rather than extension alone so that files
-            without extensions (or with misleading ones) are handled correctly.
-            Extension hints are used as a tiebreaker when file(1) is inconclusive.
-
-    LIMITATION: Filenames containing a literal newline character are split by
-                fd into multiple fzf entries. Each fragment resolves to a path
-                that does not exist -- we catch that here and show a clear message.
     """
     if not argv:
         print("Usage: remotely-preview <file> [query] [hint]", file=sys.stderr)
@@ -283,7 +257,7 @@ def cmd_preview(argv: list[str]) -> int:
         return 0
 
     if not Path(file_arg).exists():
-        print(f"[File not found: {file_arg}]")
+        print("[File not found: {}]".format(file_arg))
         return 0
 
     _preview_file(file_arg, query)

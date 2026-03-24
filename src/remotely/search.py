@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 
 from ._script import SCRIPT_BYTES, VERSION
-from .backends import LocalBackend, RemoteBackend, SearchContext
+from .backends import LocalBackend, RemoteBackend
 from .config import _CONFIG_DEFAULTS, AVAILABLE_TOOLS, CONFIG, HISTORY_PATH
 from .state import _load_state, _save_state
 from .utils import _capture
@@ -86,8 +86,8 @@ def check_dependencies():
         )
 
 
-def _dispatch_cmd(ctx, state_path, subcommand, *extra):
-    self_cmd = _self_cmd(ctx.self_path)
+def _dispatch_cmd(state_path, self_path, subcommand, *extra):
+    self_cmd = _self_cmd(self_path)
     safe_state = shlex.quote(str(state_path))
     parts = [self_cmd, subcommand, safe_state] + list(extra)
     return " ".join(parts)
@@ -104,37 +104,40 @@ def _build_custom_action_binds(self_cmd, safe_state, custom_actions):
     ]
 
 
-def build_fzf_invocation(ctx, fzf_remote_dir, state_path):
+def build_fzf_invocation(state, state_path):
     """Return the complete fzf argv list for one remotely session."""
-    self_cmd = _self_cmd(ctx.self_path)
+    self_path = Path(state["self_path"])
+    self_cmd = _self_cmd(self_path)
     safe_state = shlex.quote(str(state_path))
-    safe_self = shlex.quote(str(ctx.self_path))
-    safe_ctrl = shlex.quote(ctx.ssh_control)
+    safe_self = shlex.quote(str(self_path))
+    safe_ctrl = shlex.quote(state["ssh_control"])
+    safe_remote = shlex.quote(state["remote"])
+    safe_base = shlex.quote(state["base_path"])
     keybindings = CONFIG.get("keybindings", {})
 
-    reload_cmd = _dispatch_cmd(ctx, state_path, "_internal-dispatch", "reload", "{q}")
+    reload_cmd = _dispatch_cmd(state_path, self_path, "_internal-dispatch", "reload", "{q}")
     preview_cmd = _dispatch_cmd(
-        ctx, state_path, "_internal-dispatch", "preview", "{}", "{q}"
+        state_path, self_path, "_internal-dispatch", "preview", "{}", "{q}"
     )
-    get_prompt = f"{self_cmd} _internal-get-prompt {safe_state}"
-    get_header = f"{self_cmd} _internal-get-header {safe_state}"
-    get_search = f"{self_cmd} _internal-get-search-action {safe_state}"
+    get_prompt = f"{self_cmd} _internal-get {safe_state} prompt"
+    get_header = f"{self_cmd} _internal-get {safe_state} header"
+    get_search = f"{self_cmd} _internal-get {safe_state} search-action"
 
-    if ctx.remote:
+    if state["remote"]:
         open_cmd = (
-            f"{self_cmd} remotely-open {ctx.safe_remote} {ctx.safe_base} "
-            f"{ctx.safe_remote} {shlex.quote(str(fzf_remote_dir))} "
+            f"{self_cmd} remotely-open {safe_remote} {safe_base} "
+            f"{safe_remote} {shlex.quote(state['fzf_remote_dir'])} "
             f"{safe_ctrl} {safe_state} {safe_self} {{q}} {{+}}"
         )
     else:
         open_cmd = (
-            f"{self_cmd} remotely-open local {ctx.safe_base} "
+            f"{self_cmd} remotely-open local {safe_base} "
             f"'' '' '' {safe_state} {safe_self} {{q}} {{+}}"
         )
 
     def _toggle(action_name, op):
         key = keybindings.get(action_name, _CONFIG_DEFAULTS["keybindings"][action_name])
-        mutate = f"{self_cmd} _internal-toggle-{op} {safe_state}"
+        mutate = f"{self_cmd} _internal-toggle {safe_state} {op}"
         return (
             f"--bind={key}:"
             f"execute-silent({mutate})"
@@ -425,20 +428,7 @@ def cmd_search(argv):
         }
         _save_state(state_path, state)
 
-        ctx = SearchContext(
-            remote,
-            safe_remote,
-            base_path,
-            safe_base,
-            target,
-            ssh_control,
-            "f",
-            "",
-            state["exclude_patterns"],
-            frozen_self,
-        )
-
-        fzf_args = build_fzf_invocation(ctx, fzf_remote_dir, state_path)
+        fzf_args = build_fzf_invocation(state, state_path)
 
         path_format = state["path_format"]
         file_source = state.get("file_source", "auto")

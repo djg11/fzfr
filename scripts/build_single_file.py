@@ -94,7 +94,7 @@ def _collect_imports(raw_sources):
         except SyntaxError:
             continue
         for node in ast.walk(tree):
-            if not isinstance(node, ast.Import | ast.ImportFrom):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
                 continue
             # Skip intra-package imports
             if isinstance(node, ast.ImportFrom) and (
@@ -161,11 +161,11 @@ def build():
     # Version guard as concatenated string to avoid any triple-quote literals
     version_guard = (
         "import sys as _sys\n\n"
-        "if _sys.version_info < (3, 10):  "
-        "# type: ignore[comparison-overlap, unreachable]\n"
-        "    print(  # type: ignore[unreachable]\n"
-        '        f"Error: remotely requires Python 3.10 or later "\n'
-        '        f"(found {_sys.version_info.major}.{_sys.version_info.minor}).",\n'
+        "if _sys.version_info < (3, 6):\n"
+        "    print(\n"
+        '        \"Error: remotely requires Python 3.6 or later \"\n'
+        '        \"(found {0}.{1}).\"\n'
+        '        .format(_sys.version_info.major, _sys.version_info.minor),\n'
         "        file=_sys.stderr,\n"
         "    )\n"
         "    _sys.exit(1)\n\n"

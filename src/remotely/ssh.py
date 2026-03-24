@@ -7,11 +7,12 @@ remotely defers to the user's ~/.ssh/config.
 
 import shlex
 from pathlib import Path
+from typing import List
 
 from .config import CONFIG
 
 
-def _ssh_opts(ssh_control: str) -> list[str]:
+def _ssh_opts(ssh_control: str) -> List[str]:
     """Return SSH multiplexing flags, or [] to let ~/.ssh/config decide.
 
     Empty ssh_control (the default) → no flags injected. ssh falls through

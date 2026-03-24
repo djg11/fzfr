@@ -1,11 +1,12 @@
-"""remotely.tty — TTY prompt helper.
+"""remotely.tty -- TTY prompt helper.
 
 Opens /dev/tty directly so interactive prompts work even when fzf has
 redirected both stdin and stdout for its own UI.
 """
 
 
-def _tty_prompt(prompt_text: str) -> str | None:
+def _tty_prompt(prompt_text):
+    # type: (str) -> Optional[str]
     """Display a prompt on the terminal and return the user's input.
 
     Opens /dev/tty directly so the prompt works even when fzf has redirected
@@ -21,8 +22,6 @@ def _tty_prompt(prompt_text: str) -> str | None:
     """
     try:
         with open("/dev/tty", "w") as tty_out:
-            # Clear screen and move cursor to top-left before prompting so the
-            # fzf UI does not visually bleed into the input line.
             tty_out.write("\033[2J\033[H")
             tty_out.write(prompt_text)
             tty_out.flush()

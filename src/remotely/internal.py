@@ -8,15 +8,14 @@ import struct
 import subprocess
 import sys
 import termios
-import termios as _t
-import tty as _tty
-from pathlib import Path, PurePosixPath
-from typing import NamedTuple
+import tty
+from pathlib import Path
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from .config import _CONFIG_DEFAULTS, AVAILABLE_TOOLS, CONFIG
 from .state import _load_state, _mutate_state
 from .tty import _tty_prompt
-from .utils import _parse_extensions
+from .utils import _parse_extensions, _resolve_absolute_path
 
 
 # -- Internal sub-commands --
@@ -28,17 +27,14 @@ from .utils import _parse_extensions
 #   - stdout                  (fzf reads it for transform / preview targets)
 #   - exit code               (fzf surfaces non-zero exits as errors)
 #
-# None of them take keyword arguments -- argv is always a raw list[str].
+# None of them take keyword arguments -- argv is always a raw list.
 
 
-def cmd_internal_prompt(argv: list[str]) -> int:
+def cmd_internal_prompt(argv):
+    # type: (List[str]) -> int
     """Prompt for input on the terminal and update one key in the state file.
 
     Usage: remotely _internal-prompt <state_path> <key> <prompt_text>
-
-    LIMITATION: /dev/tty is unavailable in some environments (Docker containers
-                without a TTY, certain CI runners). When _tty_prompt returns
-                None the state update is skipped silently.
     """
     if len(argv) < 3:
         return 1
@@ -53,7 +49,8 @@ def cmd_internal_prompt(argv: list[str]) -> int:
     return _mutate_state(path, lambda s: s.update({key: value}))
 
 
-def cmd_internal_exclude(argv: list[str]) -> int:
+def cmd_internal_exclude(argv):
+    # type: (List[str]) -> int
     """Prompt for a glob pattern and append it to exclude_patterns in state.
 
     An empty input resets the list to the config-level defaults.
@@ -67,7 +64,8 @@ def cmd_internal_exclude(argv: list[str]) -> int:
     if value is None:
         return 1
 
-    def _update(s: dict) -> None:
+    def _update(s):
+        # type: (dict) -> None
         if not value:
             s["exclude_patterns"] = list(CONFIG.get("exclude_patterns", []))
         else:
@@ -79,7 +77,8 @@ def cmd_internal_exclude(argv: list[str]) -> int:
     return _mutate_state(path, _update)
 
 
-def _prompt_str(state: dict) -> str:
+def _prompt_str(state):
+    # type: (dict) -> str
     """Return the fzf prompt string for the given state."""
     mode = state.get("mode", "content")
     ftype = state.get("ftype", "f")
@@ -99,26 +98,28 @@ def _prompt_str(state: dict) -> str:
     if ftype != "d":
         exts = _parse_extensions(ext)
         if exts:
-            prompt_icon += f" [{','.join(exts)}]"
+            prompt_icon += " [{}]".format(",".join(exts))
     if hidden:
         prompt_icon += " (incl. hidden)"
     if exclude_patterns:
         if len(exclude_patterns) > 2:
-            prompt_icon += f" (excl: {exclude_patterns[0]}, ...)"
+            prompt_icon += " (excl: {}, ...)".format(exclude_patterns[0])
         else:
-            prompt_icon += f" (excl: {', '.join(exclude_patterns)})"
+            prompt_icon += " (excl: {})".format(", ".join(exclude_patterns))
 
-    return f"{remote} [{base_path}] {prompt_icon}: " if remote else f"{prompt_icon}: "
+    return "{} [{}] {}: ".format(remote, base_path, prompt_icon) if remote else "{}: ".format(prompt_icon)
 
 
-def _header_str(state: dict) -> str:
+def _header_str(state):
+    # type: (dict) -> str
     """Return the fzf header string for the given state."""
     mode = state.get("mode", "content")
     ftype = state.get("ftype", "f")
     hidden = state.get("show_hidden", False)
     keybindings = CONFIG.get("keybindings", {})
 
-    def _kb(name: str) -> str:
+    def _kb(name):
+        # type: (str) -> str
         return keybindings.get(name, _CONFIG_DEFAULTS["keybindings"][name]).upper()
 
     toggle_key = _kb("toggle_mode")
@@ -139,336 +140,194 @@ def _header_str(state: dict) -> str:
     toggle_type_label = "Dirs" if ftype == "f" else "Files"
     hidden_label = "Hide" if hidden else "Show"
     filter_hint = (
-        "" if ftype == "d" else f" | {filter_key}: Filter | {exclude_key}: Exclude"
+        "" if ftype == "d" else " | {}: Filter | {}: Exclude".format(filter_key, exclude_key)
     )
 
     return (
-        f"{toggle_key}: {toggle_label} | {ftype_key}: {toggle_type_label}"
-        f" | {hidden_key}: {hidden_label} Hidden"
-        f"{filter_hint}"
-        f" | {refresh_key}: Refresh | {sort_key}: Sort | {copy_key}: Copy"
-        f" | Enter: Open | {exit_key}: Exit"
+        "{}: {} | {}: {}"
+        " | {}: {} Hidden"
+        "{}"
+        " | {}: Refresh | {}: Sort | {}: Copy"
+        " | Enter: Open | {}: Exit"
+    ).format(
+        toggle_key, toggle_label,
+        ftype_key, toggle_type_label,
+        hidden_key, hidden_label,
+        filter_hint,
+        refresh_key, sort_key, copy_key,
+        exit_key,
     )
 
 
-def cmd_internal_get_prompt(argv: list[str]) -> int:
-    """Print the current prompt string to stdout (used by transform-prompt).
+def cmd_internal_get(argv):
+    # type: (List[str]) -> int
+    """Print state-derived strings to stdout for fzf.
 
-    Usage: remotely _internal-get-prompt <state_path>
+    Usage: remotely _internal-get <state_path> <prompt|header|search-action>
     """
-    if not argv:
+    if len(argv) < 2:
         return 1
-    state = _load_state(Path(argv[0]))
+    path, op = Path(argv[0]), argv[1]
+    state = _load_state(path)
     if not state:
         return 1
-    print(_prompt_str(state), end="")
+
+    if op == "prompt":
+        print(_prompt_str(state), end="")
+    elif op == "header":
+        print(_header_str(state), end="")
+    elif op == "search-action":
+        print(
+            "disable-search" if state.get("mode") == "content" else "enable-search",
+            end="",
+        )
     return 0
 
 
-def cmd_internal_get_header(argv: list[str]) -> int:
-    """Print the current header string to stdout (used by transform-header).
+def cmd_internal_toggle(argv):
+    # type: (List[str]) -> int
+    """Toggle a boolean or switch between two states in the state file.
 
-    Usage: remotely _internal-get-header <state_path>
+    Usage: remotely _internal-toggle <state_path> <mode|ftype|hidden>
     """
-    if not argv:
+    if len(argv) < 2:
         return 1
-    state = _load_state(Path(argv[0]))
-    if not state:
-        return 1
-    print(_header_str(state), end="")
-    return 0
+    path, op = Path(argv[0]), argv[1]
+
+    def _toggle(s):
+        # type: (dict) -> None
+        if op == "mode":
+            s["mode"] = "content" if s.get("mode") == "name" else "name"
+        elif op == "hidden":
+            s["show_hidden"] = not s.get("show_hidden", False)
+        elif op == "ftype":
+            if s.get("ftype") == "f":
+                s["mode_before_dir"] = s.get("mode", "content")
+                s["ext_before_dir"] = s.get("ext", "")
+                s["ftype"] = "d"
+                s["mode"] = "name"
+                s["ext"] = ""
+            else:
+                s["mode"] = s.pop("mode_before_dir", "content")
+                s["ext"] = s.pop("ext_before_dir", "")
+                s["ftype"] = "f"
+
+    return _mutate_state(path, _toggle)
 
 
-def cmd_internal_get_search_action(argv: list[str]) -> int:
-    """Print 'disable-search' or 'enable-search' based on the current mode.
-
-    Content mode: fzf must not re-filter the result list -- the items ARE the
-    search results. Name mode: fzf fuzzy-filters the list itself.
-
-    Usage: remotely _internal-get-search-action <state_path>
-    """
-    if not argv:
-        return 1
-    state = _load_state(Path(argv[0]))
-    if not state:
-        return 1
-    print(
-        (
-            "disable-search"
-            if state.get("mode", "content") == "content"
-            else "enable-search"
-        ),
-        end="",
-    )
-    return 0
-
-
-def cmd_internal_toggle_mode(argv: list[str]) -> int:
-    """Toggle search mode between 'name' and 'content' in the state file.
-
-    Usage: remotely _internal-toggle-mode <state_path>
-    """
-    if not argv:
-        return 1
-    return _mutate_state(
-        Path(argv[0]),
-        lambda s: s.update({"mode": "content" if s.get("mode") == "name" else "name"}),
-    )
-
-
-def cmd_internal_toggle_ftype(argv: list[str]) -> int:
-    """Toggle ftype between 'f' (files) and 'd' (directories) in the state file.
-
-    DESIGN: Directory mode is always a name search -- extension filters are
-            meaningless for directories (fd ignores -e with --type d).
-
-            f -> d: save current mode and ext, force mode="name", clear ext.
-            d -> f: restore mode and ext from saved values.
-
-    Usage: remotely _internal-toggle-ftype <state_path>
-    """
-    if not argv:
-        return 1
-
-    def _toggle(s: dict) -> None:
-        if s.get("ftype") == "f":
-            s["mode_before_dir"] = s.get("mode", "content")
-            s["ext_before_dir"] = s.get("ext", "")
-            s["ftype"] = "d"
-            s["mode"] = "name"
-            s["ext"] = ""
-        else:
-            s["mode"] = s.pop("mode_before_dir", "content")
-            s["ext"] = s.pop("ext_before_dir", "")
-            s["ftype"] = "f"
-
-    return _mutate_state(Path(argv[0]), _toggle)
-
-
-def cmd_internal_toggle_hidden(argv: list[str]) -> int:
-    """Toggle 'show_hidden' boolean in the state file.
-
-    Usage: remotely _internal-toggle-hidden <state_path>
-    """
-    if not argv:
-        return 1
-    return _mutate_state(
-        Path(argv[0]),
-        lambda s: s.update({"show_hidden": not s.get("show_hidden", False)}),
-    )
-
-
-def _substitute_placeholders(
-    cmd: str, path: str, paths: list[str], base: str, q: str
-) -> str:
+def _substitute_placeholders(cmd, path, paths, base, q):
+    # type: (str, str, List[str], str, str) -> str
     """Substitute remotely placeholders in a custom action cmd string.
-
-    All path values are shell-quoted with shlex.quote() before substitution
-    so filenames containing spaces, quotes, or semicolons cannot inject shell
-    commands. The cmd string itself is user-controlled (same threat model as
-    ~/.bashrc).
 
     Placeholders:
       {path}   -- single highlighted file, shell-quoted
-      {paths}  -- all TAB-selected files, space-joined, each shell-quoted;
-                 falls back to {path} if nothing is multi-selected
+      {paths}  -- all TAB-selected files, space-joined, each shell-quoted
       {dir}    -- directory containing {path}, shell-quoted
       {base}   -- search root BASE_PATH, shell-quoted
       {q}      -- current fzf query string, shell-quoted
-
-    Note: {paths} is substituted before {path} so a cmd containing both
-    placeholders gets the correct value for each.
     """
     safe_path = shlex.quote(path) if path else "''"
-    safe_paths = " ".join(shlex.quote(p) for p in paths) if paths else safe_path
-    safe_dir = shlex.quote(os.path.dirname(path)) if path else "''"
-    safe_base = shlex.quote(base) if base else "''"
-    safe_q = shlex.quote(q) if q else "''"
-
-    result = cmd
-    result = result.replace("{paths}", safe_paths)  # before {path}
-    result = result.replace("{path}", safe_path)
-    result = result.replace("{dir}", safe_dir)
-    result = result.replace("{base}", safe_base)
-    result = result.replace("{q}", safe_q)
-    return result
-
-
-def _abs_path(p: str, remote: str, base_path: str) -> str:
-    """Resolve a relative path to absolute for use in commands.
-
-    For remote sessions, uses PurePosixPath against the remote base_path
-    (no local filesystem access). For local sessions, uses Path against
-    base_path or cwd.
-    """
-    if not p:
-        return p
-    if remote:
-        pp = PurePosixPath(p)
-        return (
-            p
-            if pp.is_absolute()
-            else str(PurePosixPath(base_path) / pp)
-            if base_path
-            else p
-        )
-    pp = Path(p)
-    return (
-        p
-        if pp.is_absolute()
-        else str((Path(base_path) if base_path else Path.cwd()) / pp)
-    )
+    subs = {
+        "{paths}": " ".join(shlex.quote(p) for p in paths) if paths else safe_path,
+        "{path}": safe_path,
+        "{dir}": shlex.quote(os.path.dirname(path)) if path else "''",
+        "{base}": shlex.quote(base) if base else "''",
+        "{q}": shlex.quote(q) if q else "''",
+    }
+    res = cmd
+    for k in ["{paths}", "{path}", "{dir}", "{base}", "{q}"]:
+        res = res.replace(k, subs[k])
+    return res
 
 
-def cmd_internal_exec(argv: list[str], overlay_out: "dict | None" = None) -> int:
-    """Execute a custom action identified by 'group_key.action_key'.
-
-    Looks up the action in CONFIG["custom_actions"], resolves file paths to
-    absolute, substitutes placeholders, and runs the command.
-
-    Usage: remotely _internal-exec <state_path> <action_id> [path ...]
-      state_path  -- session state file (provides base_path, query, remote info)
-      action_id   -- "group_key.action_key" e.g. "f.d"
-      path ...    -- selected file paths from fzf {+} (one or more)
-
-    Output modes:
-      "silent"   -- run silently; stderr is surfaced on non-zero exit only
-      "tmux"     -- open a new tmux window and run the command there
-      "overlay"  -- run the command and return output via overlay_out for the
-                   caller (cmd_internal_action_menu) to display in a box while
-                   fzf is still frozen. Falls back to stdout if called directly.
-
-    Remote execution:
-      When the session has a remote host, the command is run over the existing
-      SSH ControlMaster socket (no new connection). Paths are resolved against
-      the remote base_path using PurePosixPath (no local filesystem access).
-    """
+def cmd_internal_exec(argv, overlay_out=None):
+    # type: (List[str], Optional[dict]) -> int
+    """Execute a custom action identified by 'group_key.action_key'."""
     if len(argv) < 3:
-        print(
-            "Usage: remotely _internal-exec <state_path> <action_id> [path ...]",
-            file=sys.stderr,
-        )
         return 1
 
-    state_path_str, action_id = argv[0], argv[1]
-    selected_paths = argv[2:]
-
+    state_path_str, action_id, selected_paths = argv[0], argv[1], argv[2:]
     parts = action_id.split(".", 1)
     if len(parts) != 2:
-        print(
-            f"[remotely] invalid action_id {action_id!r} -- expected 'group.action'",
-            file=sys.stderr,
-        )
         return 1
     group_key, action_key = parts
 
     state = _load_state(Path(state_path_str))
-    base_path = state.get("base_path", "")
-    q = state.get("last_query", "")
-    remote = state.get("remote", "")  # "user@host" or ""
-    ssh_control = state.get("ssh_control", "")  # ControlMaster socket path
+    base_path, remote, ssh_control = (
+        state.get("base_path", ""),
+        state.get("remote", ""),
+        state.get("ssh_control", ""),
+    )
 
     custom_actions = CONFIG.get("custom_actions", {})
-    groups = custom_actions.get("groups", {})
-    group = groups.get(group_key)
-    if not group:
-        print(f"[remotely] no action group {group_key!r}", file=sys.stderr)
-        return 1
-    action = group.get("actions", {}).get(action_key)
+    group = custom_actions.get("groups", {}).get(group_key)
+    action = group.get("actions", {}).get(action_key) if group else None
     if not action:
-        print(
-            f"[remotely] no action {action_key!r} in group {group_key!r}",
-            file=sys.stderr,
-        )
         return 1
 
-    primary = _abs_path(selected_paths[0], remote, base_path) if selected_paths else ""
-    abs_paths = [_abs_path(p, remote, base_path) for p in selected_paths]
+    primary = _resolve_absolute_path(selected_paths[0], base_path, bool(remote)) if selected_paths else ""
+    abs_paths = [_resolve_absolute_path(p, base_path, bool(remote)) for p in selected_paths]
 
     cmd = _substitute_placeholders(
         action["cmd"],
         path=primary,
         paths=abs_paths,
         base=base_path,
-        q=q,
+        q=state.get("last_query", ""),
     )
-
     output = action.get("output", "silent")
 
-    # Wrap command for remote execution over the existing ControlMaster socket.
-    if remote:
-        ssh_base = (
-            ["ssh", "-S", ssh_control, remote] if ssh_control else ["ssh", remote]
-        )
-
-        def _run(extra: dict):
-            return subprocess.run(ssh_base + [cmd], **extra)
-
-    else:
-        # shell=True is intentional: cmd is a user-defined shell string that
-        # may contain pipes, redirects, or shell operators. All placeholder
-        # values are shlex.quote()'d by _substitute_placeholders before here.
-        def _run(extra: dict):
-            return subprocess.run(  # nosemgrep: remotely-subprocess-shell-true
-                cmd, shell=True, **extra
-            )
+    ssh_base = (
+        (["ssh", "-S", ssh_control, remote] if ssh_control else ["ssh", remote])
+        if remote
+        else []
+    )
 
     if output == "tmux":
         if "tmux" in AVAILABLE_TOOLS:
-            if remote:
-                tmux_cmd = (
-                    " ".join(shlex.quote(a) for a in ssh_base) + " " + shlex.quote(cmd)
-                )
-            else:
-                tmux_cmd = cmd
+            tmux_cmd = (
+                " ".join(shlex.quote(a) for a in ssh_base) + " " + shlex.quote(cmd)
+                if remote
+                else cmd
+            )
             return subprocess.run(["tmux", "new-window", tmux_cmd]).returncode
-        else:
-            return _run({}).returncode
+        output = "silent"
 
-    elif output in ("overlay", "preview"):
-        # Run the command and collect its output. The caller
-        # (cmd_internal_action_menu) owns the TTY and displays the result
-        # box while fzf is still SIGSTOPed. If called directly (no
-        # overlay_out), fall back to printing to stdout.
-        r = _run({"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT})
+    run_kwargs = {}
+    if output in ("overlay", "preview"):
+        run_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.STDOUT}
+    else:
+        run_kwargs = {"stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE}
+
+    if remote:
+        r = subprocess.run(ssh_base + [cmd], **run_kwargs)
+    else:
+        r = subprocess.run(cmd, shell=True, **run_kwargs)
+
+    if output in ("overlay", "preview"):
         raw = r.stdout.decode("utf-8", errors="replace").rstrip()
         lines = raw.splitlines() if raw else ["(no output)"]
         if overlay_out is not None:
-            overlay_out["lines"] = lines
-            overlay_out["title"] = action.get("label") or action_key
-            overlay_out["position"] = action.get(
-                "output_position",
-                custom_actions.get("output_position", "bottom-left"),
+            overlay_out.update(
+                {
+                    "lines": lines,
+                    "title": action.get("label") or action_key,
+                    "position": action.get(
+                        "output_position", custom_actions.get("output_position", "bottom-left")
+                    ),
+                }
             )
         else:
             print("\n".join(lines))
-        return r.returncode
+    elif r.returncode != 0:
+        err = r.stderr.decode("utf-8", errors="replace").strip()
+        if err:
+            print(f"[remotely] {err}", file=sys.stderr)
 
-    else:  # "silent"
-        r = _run({"stdout": subprocess.DEVNULL, "stderr": subprocess.PIPE})
-        if r.returncode != 0:
-            err = r.stderr.decode("utf-8", errors="replace").strip()
-            if err:
-                print(f"[remotely] {err}", file=sys.stderr)
-        return r.returncode
+    return r.returncode
 
 
 # -- Terminal box renderer --
-#
-# Draws a Unicode-bordered box directly on the terminal at any of 9 positions,
-# used by the which-key menu and the "overlay" output mode. fzf is SIGSTOPed
-# for the entire duration so we have exclusive terminal access.
-#
-# Positions:
-#   top-left      top-center      top-right
-#   left-center     center      right-center
-#   bottom-left  bottom-center  bottom-right
-#
-# Box width is sized to content: min 22, max 60 inner characters.
-# Title is centred in the top border; footer hint in the bottom border.
-#
-# _draw_box() returns a _BoxGeometry namedtuple that _erase_box() uses to
-# clear the exact region -- no mutable global state.
 
 
 class _BoxGeometry(NamedTuple):
@@ -479,11 +338,12 @@ class _BoxGeometry(NamedTuple):
     box_w: int
 
 
-_TL, _TR, _BL, _BR = "╭", "╮", "╰", "╯"
-_H, _V = "─", "│"
+_TL, _TR, _BL, _BR = "\u256d", "\u256e", "\u2570", "\u256f"
+_H, _V = "\u2500", "\u2502"
 
 
-def _box_build(lines: list[str], title: str | None, footer: str | None) -> list[str]:
+def _box_build(lines, title, footer):
+    # type: (List[str], Optional[str], Optional[str]) -> List[str]
     """Return the list of strings that make up the box, ready to write."""
     inner = max(
         22,
@@ -498,7 +358,8 @@ def _box_build(lines: list[str], title: str | None, footer: str | None) -> list[
         ),
     )
 
-    def _border(text: str | None, left: str, right: str) -> str:
+    def _border(text, left, right):
+        # type: (Optional[str], str, str) -> str
         if not text:
             return left + _H * (inner + 2) + right
         gap = inner - len(text)
@@ -510,14 +371,13 @@ def _box_build(lines: list[str], title: str | None, footer: str | None) -> list[
 
     rows = [_border(title, _TL, _TR)]
     for line in lines:
-        rows.append(f"{_V}  {line}{' ' * (inner - len(line))}  {_V}")
+        rows.append("{}  {}{}  {}".format(_V, line, " " * (inner - len(line)), _V))
     rows.append(_border(footer, _BL, _BR))
     return rows
 
 
-def _box_origin(
-    rows: int, cols: int, box_h: int, box_w: int, position: str
-) -> tuple[int, int]:
+def _box_origin(rows, cols, box_h, box_w, position):
+    # type: (int, int, int, int, str) -> Tuple[int, int]
     """Return (start_row, start_col) -- 1-indexed terminal coordinates."""
     if position == "top-left":
         return (1, 1)
@@ -539,13 +399,8 @@ def _box_origin(
         return (max(1, rows - box_h + 1), max(1, cols - box_w + 1))
 
 
-def _draw_box(
-    tty_fd: int,
-    lines: list[str],
-    position: str = "bottom-right",
-    title: str | None = None,
-    footer: str | None = None,
-) -> _BoxGeometry:
+def _draw_box(tty_fd, lines, position="bottom-right", title=None, footer=None):
+    # type: (int, List[str], str, Optional[str], Optional[str]) -> _BoxGeometry
     """Draw a bordered box at position and return its geometry for _erase_box."""
     box = _box_build(lines, title, footer)
     box_h = len(box)
@@ -553,41 +408,28 @@ def _draw_box(
     term_rows, term_cols = _terminal_size(tty_fd)
     start_row, start_col = _box_origin(term_rows, term_cols, box_h, box_w, position)
 
-    # \033[s -- save cursor; position each line; \033[u -- restore cursor
     buf = "\033[s"
     for i, line in enumerate(box):
-        buf += f"\033[{start_row + i};{start_col}H{line}"
+        buf += "\033[{};{}H{}".format(start_row + i, start_col, line)
     buf += "\033[u"
     os.write(tty_fd, buf.encode("utf-8"))
 
     return _BoxGeometry(tty_fd, start_row, start_col, box_h, box_w)
 
 
-def _erase_box(geom: _BoxGeometry) -> None:
+def _erase_box(geom):
+    # type: (_BoxGeometry) -> None
     """Erase a box drawn by _draw_box using its returned geometry."""
     buf = "\033[s"
     for i in range(geom.box_h):
-        buf += f"\033[{geom.start_row + i};1H\033[2K"  # move to row, erase whole line
+        buf += "\033[{};1H\033[2K".format(geom.start_row + i)
     buf += "\033[u"
     os.write(geom.tty_fd, buf.encode("utf-8"))
 
 
-# -- TTY key reading --
-
-
-def _read_single_key(tty_fd: int) -> str:
-    """Read one keypress from an open TTY file descriptor.
-
-    Returns the character as a string, or "" for unrecognised input.
-    A bare ESC is returned as "esc"; multi-byte escape sequences (arrow
-    keys, function keys) are consumed and discarded -- callers that need
-    'any key' semantics should use _read_any_key() instead.
-
-    DESIGN: Read one byte. If it is ESC (0x1b), do a non-blocking peek:
-    a bare ESC key sends exactly 0x1b with nothing following; an escape
-    sequence sends 0x1b immediately followed by more bytes. Discard the
-    full sequence and return "" so the menu loop treats it as a no-op.
-    """
+def _read_single_key(tty_fd):
+    # type: (int) -> str
+    """Read one keypress from an open TTY file descriptor."""
     b = os.read(tty_fd, 1)
     if not b:
         return ""
@@ -597,59 +439,42 @@ def _read_single_key(tty_fd: int) -> str:
         fcntl.fcntl(tty_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
         try:
             if os.read(tty_fd, 8):
-                return ""  # escape sequence - discard
+                return ""
         except BlockingIOError:
-            pass  # bare ESC -- nothing followed
+            pass
         finally:
             fcntl.fcntl(tty_fd, fcntl.F_SETFL, flags)
         return "esc"
     return ch
 
 
-def _read_any_key(tty_fd: int) -> None:
-    """Block until any single byte arrives on the TTY.
-
-    Used for 'press any key to dismiss' prompts. Unlike _read_single_key,
-    this does not inspect or discard escape sequences -- the first byte of
-    any keypress (including arrow keys and function keys) is sufficient.
-    """
+def _read_any_key(tty_fd):
+    # type: (int) -> None
+    """Block until any single byte arrives on the TTY."""
     try:
         os.read(tty_fd, 1)
     except OSError:
         pass
 
 
-def _terminal_size(tty_fd: int) -> tuple[int, int]:
-    """Return (rows, cols) of the terminal attached to tty_fd.
-
-    Falls back to (24, 80) if the ioctl fails (e.g. in a pipe or test).
-    """
+def _terminal_size(tty_fd):
+    # type: (int) -> Tuple[int, int]
+    """Return (rows, cols) of the terminal attached to tty_fd."""
     try:
-        packed = fcntl.ioctl(tty_fd, _t.TIOCGWINSZ, b"\x00" * 8)
+        packed = fcntl.ioctl(tty_fd, termios.TIOCGWINSZ, b"\x00" * 8)
         rows, cols = struct.unpack("HHHH", packed)[:2]
         return (rows or 24, cols or 80)
     except Exception:
         return (24, 80)
 
 
-# -- Which-key action menu --
-
-
-def _run_which_key_menu(
-    tty_fd: int,
-    groups: dict,
-    menu_pos: str,
-) -> str:
-    """Drive the two-level which-key navigation and return the chosen action_id.
-
-    Returns "group_key.action_key" on selection, or "" on cancel/ESC.
-    Raises exceptions -- caller is responsible for cleanup.
-    """
+def _run_which_key_menu(tty_fd, groups, menu_pos):
+    # type: (int, dict, str) -> str
+    """Drive the two-level which-key navigation and return the chosen action_id."""
     while True:
-        # Level 1 -- group menu
-        group_items = [f"[{gk}] {gv['label']}" for gk, gv in sorted(groups.items())] + [
-            "[q] cancel"
-        ]
+        group_items = [
+            "[{}] {}".format(gk, gv["label"]) for gk, gv in sorted(groups.items())
+        ] + ["[q] cancel"]
         geom = _draw_box(tty_fd, group_items, menu_pos, title="actions")
 
         gk = _read_single_key(tty_fd)
@@ -666,10 +491,9 @@ def _run_which_key_menu(
             _erase_box(geom)
             continue
 
-        # Level 2 -- action menu
         while True:
             action_items = [
-                f"[{ak}] {av['label']}" for ak, av in sorted(actions.items())
+                "[{}] {}".format(ak, av["label"]) for ak, av in sorted(actions.items())
             ] + ["[q] back"]
             geom = _draw_box(
                 tty_fd, action_items, menu_pos, title=group.get("label", gk)
@@ -678,47 +502,18 @@ def _run_which_key_menu(
             ak = _read_single_key(tty_fd)
             if not ak or ak in ("q", "esc"):
                 _erase_box(geom)
-                break  # back to group menu
+                break
             if ak not in actions:
                 _erase_box(geom)
                 continue
 
             _erase_box(geom)
-            return f"{gk}.{ak}"
+            return "{}.{}".format(gk, ak)
 
 
-def cmd_internal_action_menu(argv: list[str]) -> int:
-    """Present the which-key action menu and execute the chosen action.
-
-    Called by fzf via execute-silent when the user presses the leader key.
-
-    DESIGN -- SIGSTOP/SIGCONT approach:
-      fzf is started with subprocess.Popen; its PID is saved to the state
-      file immediately after launch. When the leader key fires, this function
-      sends SIGSTOP to fzf as its very first operation -- before argv checks,
-      config access, or TTY setup. fzf is frozen before it can react.
-
-      With fzf frozen we take exclusive ownership of /dev/tty, hide the
-      cursor, draw the which-key box, and read keypresses. On exit we show
-      the cursor, restore terminal attrs, SIGCONT fzf, and send SIGWINCH to
-      trigger a clean redraw.
-
-      execute-silent (not execute) is used for the leader bind so fzf does
-      not issue its own redraw when our subprocess exits.
-
-    Flow:
-      1. SIGSTOP fzf   -- freeze before anything else
-      2. Open /dev/tty, setraw, hide cursor
-      3. _run_which_key_menu() -- group -> action key selection
-      4. Run action via cmd_internal_exec
-      5. For overlay output: draw result box, wait for any key, erase box
-      6. Show cursor, restore terminal, SIGCONT fzf, SIGWINCH fzf
-
-    Usage: remotely _internal-action-menu <state_path> [path ...]
-    """
-    # -- Step 1: freeze fzf immediately --
-    # Must be the very first operation. execute-silent is asynchronous --
-    # fzf continues running until we SIGSTOP it.
+def cmd_internal_action_menu(argv):
+    # type: (List[str]) -> int
+    """Present the which-key action menu and execute the chosen action."""
     fzf_pid = None
     if argv:
         try:
@@ -743,44 +538,41 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
             os.kill(fzf_pid, signal.SIGCONT)
         return 0
 
-    # -- Step 2: take over the terminal --
     try:
         tty_fd = os.open("/dev/tty", os.O_RDWR)
         old_attrs = termios.tcgetattr(tty_fd)
-        _tty.setraw(tty_fd)
-        os.write(tty_fd, b"\033[?25l")  # hide cursor
+        tty.setraw(tty_fd)
+        os.write(tty_fd, b"\033[?25l")
     except OSError:
         if fzf_pid:
             os.kill(fzf_pid, signal.SIGCONT)
         return 1
 
-    def _restore() -> None:
-        """Show cursor, restore terminal attrs, unfreeze fzf."""
-        os.write(tty_fd, b"\033[?25h")  # show cursor
+    def _restore():
+        # type: () -> None
+        os.write(tty_fd, b"\033[?25h")
         termios.tcsetattr(tty_fd, termios.TCSADRAIN, old_attrs)
         os.close(tty_fd)
         if fzf_pid:
             os.kill(fzf_pid, signal.SIGCONT)
-            os.kill(fzf_pid, signal.SIGWINCH)  # force fzf to redraw cleanly
+            os.kill(fzf_pid, signal.SIGWINCH)
 
     menu_pos = custom_actions.get("menu_position", "bottom-right")
     action_id = ""
 
-    # -- Step 3: which-key navigation --
     try:
         action_id = _run_which_key_menu(tty_fd, groups, menu_pos)
     except KeyboardInterrupt:
         _restore()
         return 0
     except Exception:
-        pass  # unexpected error -- fall through to _restore() and return 0
+        pass
 
     if not action_id:
         _restore()
         return 0
 
-    # -- Steps 4-5: run action, show overlay if needed --
-    overlay_out: dict = {}
+    overlay_out = {}  # type: dict
     rc = cmd_internal_exec(
         [state_path_str, action_id] + selected_paths,
         overlay_out=overlay_out,
@@ -800,6 +592,5 @@ def cmd_internal_action_menu(argv: list[str]) -> int:
         except Exception:
             pass
 
-    # -- Step 6: hand control back to fzf --
     _restore()
     return rc

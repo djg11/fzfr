@@ -4,7 +4,7 @@ import json
 import shutil
 import sys
 from pathlib import Path
-
+from typing import FrozenSet
 
 CONFIG_PATH = Path.home() / ".config" / "remotely" / "config"
 HISTORY_PATH = Path.home() / ".local" / "share" / "remotely" / "history"
@@ -376,7 +376,7 @@ _ALL_TOOLS = [
     "wl-copy",
     "xdg-open",
 ]
-AVAILABLE_TOOLS: frozenset[str] = frozenset(
+AVAILABLE_TOOLS: FrozenSet[str] = frozenset(
     t for t in _ALL_TOOLS if shutil.which(t) is not None
 )
 

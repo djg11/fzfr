@@ -192,7 +192,10 @@ def acquire_socket(host: str) -> str:
         if _socket_alive(host):
             return str(socket_path(host))
 
-        socket_path(host).unlink(missing_ok=True)
+        try:
+            socket_path(host).unlink()
+        except (FileNotFoundError, OSError):
+            pass
 
         if not _start_master(host):
             return SSH_DEFERRED

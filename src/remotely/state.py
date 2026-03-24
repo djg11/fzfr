@@ -23,8 +23,11 @@ def _load_state(path: Path) -> dict:
               attacker from pointing remotely at an arbitrary file on disk.
     """
     try:
-        if not path.resolve().is_relative_to(WORK_BASE.resolve()):
-            return {}
+        path.resolve().relative_to(WORK_BASE.resolve())
+    except (FileNotFoundError, ValueError):
+        return {}
+
+    try:
         return json.loads(path.read_text())
     except (FileNotFoundError, json.JSONDecodeError, ValueError):
         return {}

@@ -9,6 +9,7 @@ Provides:
 import subprocess
 from enum import Enum, auto
 from pathlib import Path
+from typing import List
 
 from .utils import _is_text_mime, _passthrough
 
@@ -198,7 +199,7 @@ def _list_archive(filepath: str, hint: str) -> None:
     """
     suffix = _hint_suffix(hint)
 
-    def try_pass(cmd: list[str]) -> bool:
+    def try_pass(cmd: List[str]) -> bool:
         return _passthrough(cmd, head_n=50) == 0
 
     def rga_fallback(msg: str) -> None:

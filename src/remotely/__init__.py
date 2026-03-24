@@ -148,13 +148,9 @@ from .internal import (
     cmd_internal_action_menu,
     cmd_internal_exclude,
     cmd_internal_exec,
-    cmd_internal_get_header,
-    cmd_internal_get_prompt,
-    cmd_internal_get_search_action,
+    cmd_internal_get,
     cmd_internal_prompt,
-    cmd_internal_toggle_ftype,
-    cmd_internal_toggle_hidden,
-    cmd_internal_toggle_mode,
+    cmd_internal_toggle,
 )
 from .list import cmd_list
 from .open import cmd_open
@@ -192,12 +188,8 @@ COMMAND_MAP = {
     # -- Main fzf TUI (legacy) --
     "remotely": cmd_search,
     # -- Internal callbacks invoked by fzf bindings --
-    "_internal-get-prompt": cmd_internal_get_prompt,
-    "_internal-get-header": cmd_internal_get_header,
-    "_internal-get-search-action": cmd_internal_get_search_action,
-    "_internal-toggle-mode": cmd_internal_toggle_mode,
-    "_internal-toggle-ftype": cmd_internal_toggle_ftype,
-    "_internal-toggle-hidden": cmd_internal_toggle_hidden,
+    "_internal-get": cmd_internal_get,
+    "_internal-toggle": cmd_internal_toggle,
     "_internal-prompt": cmd_internal_prompt,
     "_internal-exclude": cmd_internal_exclude,
     "_internal-dispatch": cmd_dispatch,

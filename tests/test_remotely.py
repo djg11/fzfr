@@ -621,11 +621,9 @@ class TestAssertNotSymlink(unittest.TestCase):
             target.mkdir()
             link = Path(d) / "link"
             link.symlink_to(target)
-            with (
-                self.assertRaises(SystemExit),
-                contextlib.redirect_stderr(io.StringIO()),
-            ):
-                _assert_not_symlink(link)
+            with self.assertRaises(SystemExit):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    _assert_not_symlink(link)
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +699,8 @@ class TestFindGitRoot(unittest.TestCase):
             os.chdir("/tmp")
             check = subprocess.run(
                 ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 cwd="/tmp",
             )
             if check.returncode == 0:

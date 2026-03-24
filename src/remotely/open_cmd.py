@@ -106,7 +106,8 @@ def _open_remote(host: str, path: str, editor: str) -> int:
         ["ssh"]
         + ssh_opts
         + [host, f"file -L --mime-type -b {_shquote(path)} 2>/dev/null"],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
     )
     mime = mime_result.stdout.strip() if mime_result.returncode == 0 else ""

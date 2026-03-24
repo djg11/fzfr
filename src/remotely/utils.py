@@ -1,4 +1,4 @@
-"""remotely.utils — Low-level subprocess and MIME helpers.
+"""remotely.utils -- Low-level subprocess and MIME helpers.
 
 _capture()         run a command and return (stdout, returncode), bounded
                    by max_bytes to prevent memory exhaustion on large output
@@ -7,13 +7,24 @@ _try_run()         attempt each command in a list until one succeeds
 _get_mime()        detect MIME type via the `file` command
 _is_text_mime()    return True for text/* and inode/x-empty (empty files)
 _parse_extensions() parse and sanitise a whitespace-separated extension string
+_removeprefix()    str.removeprefix() backport for Python 3.6/3.7/3.8
+_shlex_join()      shlex.join() backport for Python 3.6/3.7
+_resolve_absolute_path() resolve relative paths against a base, local or remote
 """
 
 import re
+import shlex
 import subprocess
 import sys
+from pathlib import Path, PurePosixPath
 
 from .config import AVAILABLE_TOOLS
+
+
+def _shlex_join(args):
+    # type: (Iterable[str]) -> str
+    """Backport of shlex.join() for Python 3.6/3.7."""
+    return " ".join(shlex.quote(arg) for arg in args)
 
 
 _CAPTURE_DEFAULT_MAX = 4096  # 4 KB
@@ -23,7 +34,33 @@ _CAPTURE_DEFAULT_MAX = 4096  # 4 KB
 _CAPTURE_PDF_MAX = 512 * 1024  # 512 KB (~250 pages of dense text)
 
 
-def _capture(cmd: list[str], max_bytes: int = _CAPTURE_DEFAULT_MAX) -> tuple[str, int]:
+def _removeprefix(s, prefix):
+    # type: (str, str) -> str
+    """Backport of str.removeprefix() for Python 3.6+."""
+    if prefix and s.startswith(prefix):
+        return s[len(prefix) :]
+    return s
+
+
+def _resolve_absolute_path(path, base_path, remote=False):
+    # type: (str, str, bool) -> str
+    """Resolve path relative to base_path, handling remote (Posix) vs local."""
+    if not path:
+        return path
+    if remote:
+        p = PurePosixPath(path)
+        if p.is_absolute():
+            return path
+        return str(PurePosixPath(base_path) / p) if base_path else path
+
+    p = Path(path)
+    if p.is_absolute():
+        return path
+    return str((Path(base_path) if base_path else Path.cwd()) / p)
+
+
+def _capture(cmd, max_bytes=_CAPTURE_DEFAULT_MAX):
+    # type: (List[str], int) -> Tuple[str, int]
     """Run a command, capture up to max_bytes of stdout, and return (stdout, rc).
 
     Used when we need the output of a command as a Python string, e.g. to
@@ -56,12 +93,13 @@ def _capture(cmd: list[str], max_bytes: int = _CAPTURE_DEFAULT_MAX) -> tuple[str
         return "", 127
 
 
-def _passthrough(cmd: list[str], head_n: int | None = None) -> int:
+def _passthrough(cmd, head_n=None):
+    # type: (List[str], Optional[int]) -> int
     """Run a command and let its stdout flow directly to our stdout.
 
     This is the correct way to run preview commands. Using _capture() and
     then print()ing the result would buffer the entire output in memory and
-    also strip ANSI colour codes that bat/rga/grep emit — causing the fzf
+    also strip ANSI colour codes that bat/rga/grep emit -- causing the fzf
     preview pane to show plain, uncoloured text.
 
     If head_n is given, the output is piped through `head -n <head_n>` so
@@ -94,17 +132,18 @@ def _passthrough(cmd: list[str], head_n: int | None = None) -> int:
         return 127
 
 
-def _try_run(commands: list[list[str]], status_msg: str) -> int:
+def _try_run(commands, status_msg):
+    # type: (List[List[str]], str) -> int
     """Execute each command in sequence until one returns success (0).
 
     Three outcomes per command:
-      rc == 0    success → return immediately, no message printed.
-      rc == 127  tool not installed → skip silently, try next in chain.
-      anything else  tool ran but failed (e.g. no matches) → stop here,
+      rc == 0    success -> return immediately, no message printed.
+      rc == 127  tool not installed -> skip silently, try next in chain.
+      anything else  tool ran but failed (e.g. no matches) -> stop here,
                      print status_msg, return rc. No point trying the next
                      tool; the failure is definitive.
 
-    DESIGN: Centralises tool-fallback logic (e.g. bat → cat) so each call site
+    DESIGN: Centralises tool-fallback logic (e.g. bat -> cat) so each call site
             states the preference chain rather than implementing it. rc==127 is
             the shell convention for "command not found" and is the only case
             where we silently move to the next option; any other failure is
@@ -123,13 +162,14 @@ def _try_run(commands: list[list[str]], status_msg: str) -> int:
         last_rc = rc
         if rc == 127:
             continue  # tool not found (PATH changed at runtime), try next
-        break  # tool ran but failed — stop here
+        break  # tool ran but failed -- stop here
     if status_msg:
         print(f"[{status_msg}]")
     return last_rc
 
 
-def _get_mime(filepath: str) -> str:
+def _get_mime(filepath):
+    # type: (str) -> str
     """Return the MIME type of a file as reported by file(1), e.g. 'text/plain'.
 
     Uses the -b (brief) flag to suppress the filename prefix in the output.
@@ -140,14 +180,15 @@ def _get_mime(filepath: str) -> str:
     return out.strip() if rc == 0 else ""
 
 
-def _is_text_mime(mime: str) -> bool:
+def _is_text_mime(mime):
+    # type: (str) -> bool
     """Return True if the MIME type indicates a file that can be opened in a text editor.
 
     Covers plain text and the most common structured-text application types.
     Used to decide between opening with an editor vs. xdg-open.
 
     inode/x-empty is included because zero-byte files should open in the editor
-    rather than xdg-open — a new empty file is almost always a text file.
+    rather than xdg-open -- a new empty file is almost always a text file.
     """
     return mime.startswith("text/") or mime in (
         "application/json",
@@ -157,7 +198,8 @@ def _is_text_mime(mime: str) -> bool:
     )
 
 
-def _parse_extensions(ext_str: str) -> list[str]:
+def _parse_extensions(ext_str):
+    # type: (str) -> List[str]
     """Sanitize and split a whitespace-separated string of extensions.
 
     Removes leading dots, strips whitespace, and discards empty entries.
@@ -167,7 +209,7 @@ def _parse_extensions(ext_str: str) -> list[str]:
     A crafted extension like "py $(rm -rf ~)" or "py;evil" would survive
     shlex.quote at one shell level but could break out at a second level
     (e.g. inside a remote shell command or a glob argument). Rejecting
-    non-alphanumeric values here closes that path entirely — the offending
+    non-alphanumeric values here closes that path entirely -- the offending
     token is silently dropped rather than passed to fd/rga/grep.
     """
     result = []
@@ -186,7 +228,8 @@ def _parse_extensions(ext_str: str) -> list[str]:
     return result
 
 
-def _validate_exclude_pattern(pattern: str) -> bool:
+def _validate_exclude_pattern(pattern):
+    # type: (str) -> bool
     """Return True if the pattern is safe to pass to fd -E / rga --exclude.
 
     Allows glob metacharacters (* ? [ ] {}) but rejects shell operators

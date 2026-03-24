@@ -65,7 +65,7 @@ dev-install:
 	    echo "Create and activate one first:"; \
 	    echo "  python3 -m venv venv && source venv/bin/activate"; \
 	    exit 1; }
-	pip install --upgrade pip setuptools --quiet
+	pip install --upgrade pip setuptools wheel --quiet
 	pip install -e '.[dev]' --no-build-isolation
 	pre-commit install
 	@echo ""
@@ -91,8 +91,8 @@ examples:
 check:
 	@command -v python3 >/dev/null 2>&1 || { \
 	    echo "Error: python3 is required but not found in PATH."; exit 1; }
-	@python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)" 2>/dev/null || { \
-	    echo "Error: Python 3.10 or later is required."; \
+	@python3 -c "import sys; sys.exit(0 if sys.version_info >= (3,6) else 1)" 2>/dev/null || { \
+	    echo "Error: Python 3.6 or later is required."; \
 	    echo "Found: $$(python3 --version)"; exit 1; }
 	@command -v fzf >/dev/null 2>&1 || \
 	    echo "Warning: fzf not found -- install it before running remotely."

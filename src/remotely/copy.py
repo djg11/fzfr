@@ -11,9 +11,11 @@ from pathlib import Path
 from .backends import LocalBackend
 from .config import AVAILABLE_TOOLS
 from .ssh import _ssh_opts
+from .utils import _removeprefix
 
 
-def cmd_copy(argv: list[str]) -> int:
+def cmd_copy(argv):
+    # type: (list) -> int
     """Entry point for the remotely-copy sub-command.
 
     Copies the selected file path to the local clipboard.
@@ -31,7 +33,7 @@ def cmd_copy(argv: list[str]) -> int:
     remote = remote.strip("'\"")
     ssh_control = ssh_control.strip("'\"")
 
-    choice_clean = choice.removeprefix("./")
+    choice_clean = _removeprefix(choice, "./")
     path_to_copy = (
         choice_clean
         if Path(choice_clean).is_absolute()
@@ -72,7 +74,8 @@ def cmd_copy(argv: list[str]) -> int:
         return 1
 
 
-def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
+def _resolve_remote_path(remote, raw, ssh_control):
+    # type: (str, str, str) -> str
     """Expand a remote path to its absolute form by querying the remote host.
 
     Handles three cases that cannot be resolved locally:
@@ -90,7 +93,8 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
     if not raw or raw == ".":
         r = subprocess.run(
             ["ssh"] + _ssh_opts(ssh_control) + [remote, "pwd"],
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
         )
         if r.returncode != 0:
@@ -110,7 +114,8 @@ def _resolve_remote_path(remote: str, raw: str, ssh_control: str) -> str:
                 "python3 -c 'import os,sys; print(os.path.expanduser(sys.stdin.read().strip()))'",
             ],
             input=raw.encode("utf-8"),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
         )
         if r.returncode != 0:
             print(

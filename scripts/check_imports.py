@@ -11,12 +11,13 @@ Usage: python3 scripts/check_imports.py
 import ast
 import sys
 from pathlib import Path
+from typing import List, Tuple
 
 
 SRC = Path(__file__).parent.parent / "src" / "remotely"
 
 
-def check_file(path: Path) -> list[tuple[int, str]]:
+def check_file(path: Path) -> List[Tuple[int, str]]:
     src = path.read_text()
     try:
         tree = ast.parse(src)
