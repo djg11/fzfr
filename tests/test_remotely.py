@@ -1,5 +1,5 @@
 """
-test_remotely.py — Unit tests for remotely.
+test_remotely.py -- Unit tests for remotely.
 
 Covers the highest-risk functions: quoting, path safety, extension parsing,
 config merging, remote arg building, fzf version parsing, state management,
@@ -26,8 +26,7 @@ from unittest.mock import MagicMock, patch
 # Module import
 #
 # Prefer the src/ package (clean imports, works during development).
-# Fall back to the built single-file remotely script (works after make build,
-# and in CI where src/ may not be on the path).
+# Fall back to the built single-file remotely script (works after make build).
 # ---------------------------------------------------------------------------
 
 here = Path(__file__).parent
@@ -38,18 +37,20 @@ if src_path.exists():
     import remotely
     from remotely._script import _find_self, _is_built_script
     from remotely.archive import FileKind, classify
-    from remotely.backends import LocalBackend, RemoteBackend, backend_from_state
+    from remotely.backends import LocalBackend, RemoteBackend, backend_from_state, _find_git_root
     from remotely.config import _CONFIG_DEFAULTS, _merge_config_key, load_config
-    from remotely.copy import _resolve_remote_path
-    from remotely.open import _dquote
     from remotely.remote import (
         _build_fd_rga_args,
         _build_remote_cmd,
         _parse_remote_reload_args,
     )
-    from remotely.search import _find_git_root, _parse_fzf_version
+    from remotely.utils import _parse_fzf_version
     from remotely.state import _load_state, _mutate_state, _save_state
-    from remotely.utils import _parse_extensions, _validate_exclude_pattern
+    from remotely.utils import (
+        _parse_extensions,
+        _resolve_remote_path,
+        _validate_exclude_pattern,
+    )
     from remotely.workbase import _assert_not_symlink
 else:
     import importlib.util
@@ -70,7 +71,6 @@ else:
     LocalBackend = remotely.LocalBackend
     RemoteBackend = remotely.RemoteBackend
     backend_from_state = remotely.backend_from_state
-    _dquote = remotely._dquote
     _build_fd_rga_args = remotely._build_fd_rga_args
     _build_remote_cmd = remotely._build_remote_cmd
     _parse_remote_reload_args = remotely._parse_remote_reload_args
@@ -146,52 +146,10 @@ class TestParseFzfVersion(unittest.TestCase):
         self.assertEqual(_parse_fzf_version(""), (0, 0))
 
     def test_version_with_non_numeric_prefix_returns_zero(self):
-        # The parser expects a bare version string, not "fzf 0.38.0"
         self.assertEqual(_parse_fzf_version("fzf 0.38.0"), (0, 0))
 
     def test_high_version_numbers(self):
         self.assertEqual(_parse_fzf_version("2.100.5"), (2, 100))
-
-
-# ---------------------------------------------------------------------------
-# _dquote
-# ---------------------------------------------------------------------------
-
-
-class TestDquote(unittest.TestCase):
-    def test_simple_path(self):
-        self.assertEqual(_dquote("/home/user/file.txt"), '"/home/user/file.txt"')
-
-    def test_path_with_spaces(self):
-        self.assertEqual(_dquote("/path/with spaces/file"), '"/path/with spaces/file"')
-
-    def test_dollar_sign_escaped(self):
-        result = _dquote("$HOME/file")
-        self.assertIn("\\$", result)
-
-    def test_backtick_escaped(self):
-        result = _dquote("`cmd`")
-        self.assertIn("\\`", result)
-
-    def test_backslash_escaped(self):
-        result = _dquote("path\\file")
-        self.assertIn("\\\\", result)
-
-    def test_double_quote_escaped(self):
-        result = _dquote('say "hello"')
-        self.assertNotEqual(result.count('"'), 2)  # inner quotes must be escaped
-
-    def test_exclamation_escaped(self):
-        result = _dquote("file!name")
-        self.assertIn("\\!", result)
-
-    def test_empty_string(self):
-        self.assertEqual(_dquote(""), '""')
-
-    def test_result_is_double_quoted(self):
-        result = _dquote("anything")
-        self.assertTrue(result.startswith('"'))
-        self.assertTrue(result.endswith('"'))
 
 
 # ---------------------------------------------------------------------------
@@ -229,7 +187,6 @@ class TestLocalBackendIsSafeSubpath(unittest.TestCase):
             shutil.rmtree(sibling, ignore_errors=True)
 
     def test_nonexistent_subpath_is_safe_if_would_be_inside(self):
-        # A path that doesn't exist yet but resolves inside the base
         inside = os.path.join(self.tmp, "new", "file.txt")
         self.assertTrue(self.be.is_safe_subpath(inside))
 
@@ -273,16 +230,7 @@ class TestMergeConfigKey(unittest.TestCase):
         _merge_config_key(cfg, "exclude_patterns", [], [".git", "*.pyc"])
         self.assertEqual(cfg["exclude_patterns"], [".git", "*.pyc"])
 
-    def test_dict_merged(self):
-        cfg = dict(_CONFIG_DEFAULTS)
-        default_kb = {"toggle_mode": "ctrl-t", "exit": "esc"}
-        user_kb = {"toggle_mode": "ctrl-g"}
-        _merge_config_key(cfg, "keybindings", default_kb, user_kb)
-        self.assertEqual(cfg["keybindings"]["toggle_mode"], "ctrl-g")
-        self.assertEqual(cfg["keybindings"]["exit"], "esc")
-
     def test_empty_string_user_value_accepted(self):
-        # Empty string is a valid user override (clears the editor override)
         cfg = dict(_CONFIG_DEFAULTS)
         _merge_config_key(cfg, "editor", "vim", "")
         self.assertEqual(cfg["editor"], "")
@@ -501,10 +449,8 @@ class TestBackendFromState(unittest.TestCase):
         self.assertIsInstance(backend_from_state(self._state()), LocalBackend)
 
     def test_local_string_treated_as_ssh_host(self):
-        # "local" is handled by cmd_search (target == "local" branch) before
-        # backend_from_state is ever called. State saved for local sessions
-        # always has remote="" not remote="local". This test documents that
-        # backend_from_state treats any non-empty string as an SSH host.
+        # "local" is handled before backend_from_state is called;
+        # any non-empty string is treated as an SSH host here.
         self.assertIsInstance(
             backend_from_state(self._state(remote="local")), RemoteBackend
         )
@@ -586,9 +532,7 @@ class TestState(unittest.TestCase):
         self.assertTrue(loaded["hidden"])
 
     def test_load_outside_workbase_returns_empty(self):
-        # SECURITY: _load_state rejects paths outside WORK_BASE — state paths
-        # arrive as argv elements from fzf callbacks and must not be attacker-
-        # controlled paths outside the session directory.
+        # SECURITY: _load_state rejects paths outside WORK_BASE.
         outside = Path("/tmp/remotely_test_outside_workbase_xyz.json")
         result = _load_state(outside)
         self.assertEqual(result, {})
@@ -662,7 +606,6 @@ class TestClassify(unittest.TestCase):
         )
 
     def test_unknown_extension_no_mime_is_text(self):
-        # Unknown extensions default to TEXT (safe fallback for bat previewer)
         self.assertEqual(classify("unknown.xyz"), FileKind.TEXT)
 
     def test_case_insensitive(self):
@@ -725,10 +668,6 @@ class TestLoadConfig(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(key, cfg)
 
-    def test_keybindings_is_dict(self):
-        cfg = load_config()
-        self.assertIsInstance(cfg["keybindings"], dict)
-
     def test_default_mode_is_valid(self):
         cfg = load_config()
         self.assertIn(cfg["default_mode"], ("name", "content"))
@@ -780,21 +719,15 @@ class TestSecurity(unittest.TestCase):
 
     @patch("subprocess.run")
     def test_resolve_remote_path_tilde_expansion_safe(self, mock_run):
-        # Mock successful expansion
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = b"/home/user/foo\n"
         mock_run.return_value = mock_result
 
-        remote = "user@host"
-        raw = "~/foo"
-        ssh_control = ""
-
-        result = _resolve_remote_path(remote, raw, ssh_control)
+        result = _resolve_remote_path("user@host", "~/foo", "")
 
         self.assertEqual(result, "/home/user/foo")
 
-        # Verify that subprocess.run was called with python3 and stdin
         args, kwargs = mock_run.call_args
         cmd = args[0]
         self.assertIn("python3", " ".join(cmd))
@@ -811,7 +744,6 @@ class TestSecurity(unittest.TestCase):
         result = _resolve_remote_path("host", ".", "")
         self.assertEqual(result, "/current/dir")
 
-        # Verify it used pwd, not python expansion
         cmd = mock_run.call_args[0][0]
         self.assertIn("pwd", cmd)
 

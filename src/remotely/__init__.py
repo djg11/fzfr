@@ -6,52 +6,29 @@ Architecture overview
 Single-file, multi-command tool modelled after busybox: one script contains
 every sub-command. It can be invoked in two ways:
 
-  1. Sub-command mode:   remotely remotely-preview <file>
+  1. Sub-command mode:   remotely list user@host:/path
   2. Symlink mode:       remotely-preview <file>
                          (symlink named "remotely-preview" pointing at this file)
 
-The main command (remotely) launches fzf with --bind and --preview strings that
-call back into this same script. All callbacks embed the absolute path of this
-file (SELF) so they work regardless of what is in PATH when fzf spawns a
-sub-shell.
-
-Call graph (local search)
+Call graph (headless API)
 --------------------------
-  remotely
-    └─ fzf  (--preview, --bind, --transform each call back into:)
-         ├─ remotely _internal-get-prompt   <state>           (transform-prompt)
-         ├─ remotely _internal-get-header   <state>           (transform-header)
-         ├─ remotely _internal-get-search-action <state>      (transform)
-         ├─ remotely _internal-toggle-mode  <state>           (CTRL-T)
-         ├─ remotely _internal-toggle-ftype <state>           (CTRL-D)
-         ├─ remotely _internal-toggle-hidden <state>          (CTRL-H)
-         ├─ remotely _internal-prompt       <state> ext ...   (CTRL-F)
-         ├─ remotely _internal-exclude      <state>           (CTRL-X)
-         ├─ remotely _internal-dispatch     <state> preview {} {q}
-         │    └─ remotely-preview {} [q]
-         ├─ remotely _internal-dispatch     <state> reload {q}
-         │    └─ rga ... or fd | grep ...
-         └─ remotely remotely-open local <base> '' '' {}          (Enter)
+  remotely list user@host:/path
+    -> acquire_socket(host)  [session.py]
+    -> ssh host fd ...       [list.py -> remote.py]
 
-Call graph (remote search)
----------------------------
-  remotely user@host /path
-    └─ fzf
-         ├─ remotely _internal-dispatch <state> preview {} {q}
-         │    └─ remotely-remote-preview host /path <ssh_ctl> {} {q}
-         │         └─ ssh host "python3 - remotely-preview <file> [q]"
-         ├─ remotely _internal-dispatch <state> reload {q}
-         │    └─ remotely-remote-reload host /path <ssh_ctl> {q}
-         │         └─ ssh host "cd /path && rga ... || fd | xargs grep ..."
-         └─ remotely remotely-open host /path host <WORK_BASE>/... <ssh_ctl> {}
-              └─ ssh host -t "nvim <file>"   (text)
-                 or: ssh host "cat <file>" → local temp → xdg-open   (binary)
+  remotely preview user@host:/path [query]
+    -> acquire_socket(host)
+    -> cmd_remote_preview    [preview_cmd.py -> remote.py]
+
+  remotely open user@host:/path
+    -> acquire_socket(host)
+    -> ssh cat -> $EDITOR -> scp back  [open_cmd.py]
 
 SSH connection multiplexing
 ---------------------------
-By default, remotely passes NO extra flags to ssh, deferring entirely to
-~/.ssh/config. If that config already has ControlMaster/ControlPath, all fzf
-callbacks reuse the existing master connection — no key prompts, no latency.
+By default remotely passes NO extra flags to ssh, deferring entirely to
+~/.ssh/config. If that config already has ControlMaster/ControlPath, all
+calls reuse the existing master connection.
 
 If you do NOT have multiplexing in your ssh config, enable it here:
 
@@ -60,12 +37,8 @@ If you do NOT have multiplexing in your ssh config, enable it here:
       "ssh_multiplexing": true
     }
 
-remotely will then create a per-session socket in WORK_BASE and tear it down on
-exit.
-
-WARNING: do NOT set ssh_multiplexing = true if your ~/.ssh/config already
-has ControlMaster/ControlPath. The two sockets would conflict and remotely would
-open a new master connection instead of reusing the existing one -- triggering
+WARNING: do NOT set ssh_multiplexing: true if your ~/.ssh/config already
+has ControlMaster/ControlPath. The conflicting sockets will trigger
 spurious key prompts (e.g. YubiKey touch) on every cursor move.
 
 Quoting discipline
@@ -73,61 +46,30 @@ Quoting discipline
 Three quoting strategies are used deliberately:
 
   list-form subprocess  ->  ["cmd", "--flag", path]
-                            Zero quoting needed for LOCAL calls. The OS passes
-                            each element directly as an argv token -- no shell
-                            sees it. Used for all local subprocess calls (fd,
-                            bat, fzf, tmux, xdg-open, etc.).
+                            Zero quoting needed for LOCAL calls.
 
   shlex.join()          ->  shlex.join(["realpath", "-e", "--", path])
-                            Produces a properly shell-quoted string from a list.
-                            REQUIRED for all SSH remote commands -- SSH
-                            concatenates all arguments after the hostname into a
-                            single string which the remote shell word-splits.
-                            Also used for fzf --bind strings that fzf evaluates
-                            via a shell, and for SSH commands with shell
-                            operators (pipes, &&, redirects).
+                            REQUIRED for all SSH remote commands.
 
-  _dquote()             ->  double-quoted: "path with spaces"
-                            Safe for TWO shell levels. Used only for the editor
-                            command in _open() when it travels through:
-                              local shell (tmux new-window) -> ssh -> remote shell
-                            Single-quoted paths break at the first level because
-                            a single quote cannot appear inside a single-quoted
-                            string.
-
-fzf placeholder quoting
------------------------
-fzf expands {} (selected item) and {q} (current query) into shell-escaped
-tokens automatically. These placeholders must therefore be left UNQUOTED in
-the --preview and --bind strings we pass to fzf. Quoting them (e.g. '{q}')
-would cause double-escaping and break filenames with spaces or special chars.
+  shlex.quote()         ->  for individual tokens within remote commands.
 
 Source layout
 -------------
-The distributable remotely script is built from src/remotely/ by
-scripts/build_single_file.py. Each module is self-contained with correct
-imports so linters work per-file. The build script strips intra-package
-imports and deduplicates stdlib imports into one block at the top.
-
-  _script.py   VERSION, SELF, SCRIPT_BYTES -- no intra-package imports
-  utils.py     subprocess helpers, MIME detection, extension parsing
-  workbase.py  session working directory (prefers /dev/shm)
-  config.py    defaults and user config loading
-  tty.py       /dev/tty prompt helper
-  ssh.py       SSH option construction
-  session.py   host-keyed SSH session manager (socket lifecycle + locking)
-  state.py     session state load/save/mutate
-  cache.py     preview output cache
-  archive.py   archive format detection and listing
-  backends.py  Backend protocol, LocalBackend, RemoteBackend
-  preview.py   file preview rendering
-  internal.py  fzf callback sub-commands (_internal-*)
-  dispatch.py  _internal-dispatch router
-  open.py      file open logic (editor, xdg-open, remote streaming)
-  copy.py      clipboard copy sub-command
-  remote.py    SSH remote search and preview
-  list.py      remotely list headless sub-command
-  search.py    main fzf UI entry point, session lifecycle
+  _script.py    VERSION, SELF, SCRIPT_BYTES
+  utils.py      subprocess helpers, MIME detection, extension parsing, SSH path
+  workbase.py   session working directory (prefers /dev/shm)
+  config.py     defaults and user config loading
+  ssh.py        SSH option construction
+  session.py    host-keyed SSH session manager
+  state.py      session state load/save/mutate
+  cache.py      preview output cache
+  archive.py    archive format detection and listing
+  backends.py   LocalBackend, RemoteBackend
+  preview.py    file preview rendering
+  remote.py     SSH remote search and preview
+  list.py       remotely list headless sub-command
+  preview_cmd.py  remotely preview headless sub-command
+  open_cmd.py   remotely open headless sub-command
 """
 
 import ctypes
@@ -142,26 +84,14 @@ from ._script import (
     SELF,
     VERSION,
 )
-from .copy import cmd_copy
-from .dispatch import cmd_dispatch
-from .internal import (
-    cmd_internal_action_menu,
-    cmd_internal_exclude,
-    cmd_internal_exec,
-    cmd_internal_get,
-    cmd_internal_prompt,
-    cmd_internal_toggle,
-)
 from .list import cmd_list
-from .open import cmd_open
 from .open_cmd import cmd_open_headless
 from .preview import cmd_preview
 from .preview_cmd import cmd_preview_headless
 from .remote import cmd_remote_preview, cmd_remote_reload
-from .search import cmd_search
 
 
-# Re-exported from ._script -- used by remote.py, search.py, and the built flat file.
+# Re-exported from ._script
 __all__ = [
     "VERSION",
     "SELF",
@@ -177,33 +107,18 @@ COMMAND_MAP = {
     "list": cmd_list,
     "preview": cmd_preview_headless,
     "open": cmd_open_headless,
-    # -- Preview / open (internal fzf callbacks, unchanged) --
+    # -- Preview (called by headless API and directly by name) --
     "remotely-preview": cmd_preview,
-    "remotely-open": cmd_open,
-    # -- Remote sub-commands (called by fzf callbacks and headless API) --
+    # -- Remote sub-commands (called by headless API) --
     "remotely-remote-reload": cmd_remote_reload,
     "remotely-remote-preview": cmd_remote_preview,
-    # -- Clipboard --
-    "remotely-copy": cmd_copy,
-    # -- Main fzf TUI (legacy) --
-    "remotely": cmd_search,
-    # -- Internal callbacks invoked by fzf bindings --
-    "_internal-get": cmd_internal_get,
-    "_internal-toggle": cmd_internal_toggle,
-    "_internal-prompt": cmd_internal_prompt,
-    "_internal-exclude": cmd_internal_exclude,
-    "_internal-dispatch": cmd_dispatch,
-    "_internal-exec": cmd_internal_exec,
-    "_internal-action-menu": cmd_internal_action_menu,
 }
 
 
 def _set_process_name(name: str) -> None:
     """Set the process name visible in ps/top via prctl(PR_SET_NAME).
 
-    Linux only -- silently ignored on other platforms. Makes the remote
-    agent appear as 'python3 remotely' rather than 'python3 -' or
-    'python3 /path/to/script.py', reducing visual noise for sysadmins.
+    Linux only -- silently ignored on other platforms.
     """
     try:
         ctypes.CDLL(None).prctl(15, name.encode()[:15] + b"\x00", 0, 0, 0)
@@ -221,7 +136,8 @@ def main():
     elif len(sys.argv) > 1 and sys.argv[1] in COMMAND_MAP:
         fn, args = COMMAND_MAP[sys.argv[1]], sys.argv[2:]
     else:
-        fn, args = cmd_search, sys.argv[1:]
+        # Default to `remotely list` when invoked with no recognised sub-command.
+        fn, args = cmd_list, sys.argv[1:]
 
     sys.exit(fn(args))
 

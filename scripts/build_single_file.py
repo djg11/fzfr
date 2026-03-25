@@ -22,7 +22,6 @@ MODULE_ORDER = [
     "utils",
     "workbase",
     "config",
-    "tty",
     "ssh",
     "session",
     "state",
@@ -30,15 +29,10 @@ MODULE_ORDER = [
     "archive",
     "backends",
     "preview",
-    "internal",
-    "dispatch",
-    "open",
-    "copy",
     "remote",
     "list",
     "preview_cmd",
     "open_cmd",
-    "search",
 ]
 
 # Multi-line intra-package imports (from .X import ... or from remotely.X import ...)
@@ -84,8 +78,7 @@ def _read_module(name):
 
 def _collect_imports(raw_sources):
     # Collect and deduplicate stdlib imports from raw (unstripped) source files.
-    # Uses ast.parse to extract only real import statements -- not lines inside
-    # docstrings or comments that happen to start with "from" or "import".
+    # Uses ast.parse to extract only real import statements.
     seen = set()
     imports = []
     for src in raw_sources:
@@ -100,9 +93,7 @@ def _collect_imports(raw_sources):
             if isinstance(node, ast.ImportFrom) and (
                 node.level
                 and node.level > 0  # relative: from .x import y
-                or (node.module or "").startswith(
-                    "remotely."
-                )  # from remotely.x import y
+                or (node.module or "").startswith("remotely.")  # from remotely.x import y
             ):
                 continue
             # Reconstruct the import line
@@ -125,7 +116,6 @@ def _collect_imports(raw_sources):
 
 def _get_module_doc():
     # Read the module docstring from src/remotely/__init__.py using ast.
-    # This is the single source of truth -- no circular dependency on the built file.
     src = (SRC / "__init__.py").read_text()
     try:
         tree = ast.parse(src)
@@ -147,7 +137,7 @@ def build():
     raw_sources.append((SRC / "__init__.py").read_text())
     stdlib_imports = _collect_imports(raw_sources)
 
-    # Strip and prepare __init__.py (VERSION, SCRIPT_*, COMMAND_MAP, main)
+    # Strip and prepare __init__.py (COMMAND_MAP, main)
     init_src = _strip_docstring((SRC / "__init__.py").read_text())
     init_src = INTRA_IMPORT_RE.sub("", init_src)
     init_src = STDLIB_IMPORT_RE.sub("", init_src)

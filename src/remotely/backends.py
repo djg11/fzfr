@@ -1,24 +1,23 @@
 """remotely.backends -- Backend protocol and implementations for local and remote search.
 
 The Backend protocol abstracts the difference between searching a local filesystem
-and an SSH-remote one. All fzf callbacks (preview, reload, open) go through the
-backend so the rest of the code has no if-remote branches.
+and an SSH-remote one. All preview calls go through the backend so the rest of
+the code has no if-remote branches.
 
-Three concrete types:
+Two concrete types:
 
     SearchContext   -- immutable connection parameters (host, base path, ssh socket)
-    LocalBackend    -- operations on the local filesystem via fd, bat, rga, etc.
+    LocalBackend    -- preview operations on the local filesystem
     RemoteBackend   -- same operations forwarded over SSH; streams the script to the
                       remote python3 interpreter for preview sub-commands
 
 The circular-import problem: LocalBackend.preview() calls cmd_preview, and
-RemoteBackend calls into remote.py and copy.py. Those modules import from this
-one. The cycle is broken at runtime with try/except ImportError late imports;
-the built single-file script has no packages so the except branch fires and
-pulls the function from globals() instead.
+RemoteBackend calls into remote.py. Those modules import from this one. The
+cycle is broken at runtime with try/except ImportError late imports; the built
+single-file script has no packages so the except branch fires and pulls the
+function from globals() instead.
 """
 
-import shlex
 import subprocess
 import sys
 import time
@@ -26,48 +25,17 @@ from pathlib import Path
 from typing import List
 
 from .cache import _PreviewCache
-from .config import AVAILABLE_TOOLS
 from .ssh import _ssh_opts
 from .utils import (
     _capture,
     _get_mime,
-    _parse_extensions,
+    _resolve_remote_path,
     _shlex_join,
-    _validate_exclude_pattern,
 )
 
 
-def _is_git_repo(path):
-    # type: (str) -> bool
-    """Return True if path is inside a git repository."""
-    p = Path(path).resolve()
-    return any((parent / ".git").is_dir() for parent in [p] + list(p.parents))
-
-
-def _git_ls_files_cmd(hidden, exclude_patterns, ext):
-    # type: (bool, List[str], str) -> List[str]
-    """Return the argv list for a git ls-files invocation."""
-    args = ["git", "ls-files", "-c"]
-    if hidden:
-        args += ["--others", "--exclude-standard"]
-    for p in exclude_patterns:
-        if not _validate_exclude_pattern(p):
-            print(
-                f"Warning: ignoring unsafe exclude pattern {p!r}",
-                file=sys.stderr,
-            )
-            continue
-        args += ["--exclude", p]
-    exts = _parse_extensions(ext)
-    if exts:
-        args.append("--")
-        for e in exts:
-            args.append(f"*.{e}")
-    return args
-
-
 class LocalBackend:
-    """Backend implementation for local filesystem searches."""
+    """Backend implementation for local filesystem operations."""
 
     def __init__(
         self,
@@ -88,12 +56,6 @@ class LocalBackend:
         # type: (str) -> str
         if raw:
             return str(Path(raw).resolve())
-        # fmt: off
-        try:
-            from .search import _find_git_root
-        except ImportError:
-            _find_git_root = globals()["_find_git_root"]  # flat built file
-        # fmt: on
         git_root = _find_git_root()
         return git_root if git_root else str(Path.cwd().resolve())
 
@@ -154,121 +116,9 @@ class LocalBackend:
         # fmt: on
         return cmd_preview(preview_args)
 
-    def _use_git(self, ftype, file_source):
-        # type: (str, str) -> bool
-        if ftype != "f":
-            return False
-        if file_source == "git":
-            return True
-        if file_source == "auto" and "git" in AVAILABLE_TOOLS:
-            return _is_git_repo(self.base_path)
-        return False
-
-    def reload(
-        self,
-        query,
-        ftype,
-        ext,
-        mode,
-        hidden=False,
-        exclude_patterns=None,
-        path_format="absolute",
-        file_source="auto",
-    ):
-        # type: (str, str, str, str, bool, Optional[List[str]], str, str) -> int
-        if exclude_patterns is None:
-            exclude_patterns = []
-
-        if mode == "name" and self._use_git(ftype, file_source):
-            return self._reload_git(hidden, exclude_patterns, path_format, query, ext)
-
-        fd_args = ["fd", "-L", "--type", ftype]
-        if hidden:
-            fd_args.append("--hidden")
-        for e in _parse_extensions(ext):
-            fd_args += ["-e", e]
-        for p in exclude_patterns:
-            if not _validate_exclude_pattern(p):
-                print(
-                    f"Warning: ignoring unsafe exclude pattern {p!r}",
-                    file=sys.stderr,
-                )
-                continue
-            fd_args += ["-E", p]
-
-        if path_format == "relative":
-            fd_root, fd_cwd = ["."], self.base_path
-        else:
-            fd_root, fd_cwd = [".", self.base_path], None
-
-        if mode == "name":
-            return subprocess.run(fd_args + fd_root, cwd=fd_cwd).returncode
-
-        if query:
-            return _local_content_search(
-                fd_args,
-                fd_root,
-                fd_cwd,
-                query,
-                ext,
-                hidden,
-                self.base_path,
-                path_format,
-            )
-
-        return subprocess.run(fd_args + fd_root, cwd=fd_cwd).returncode
-
-    def _reload_git(self, hidden, exclude_patterns, path_format, query, ext):
-        # type: (bool, List[str], str, str, str) -> int
-        args = _git_ls_files_cmd(hidden, exclude_patterns, ext)
-
-        if path_format == "relative":
-            return subprocess.run(args, cwd=self.base_path).returncode
-
-        safe_base = self.base_path.rstrip("/")
-        p1 = subprocess.Popen(args, cwd=self.base_path, stdout=subprocess.PIPE)
-        assert p1.stdout is not None
-        p2 = subprocess.run(
-            ["awk", '{{print "{}/{}" $0}}'.format(safe_base, "")],
-            stdin=p1.stdout,
-        )
-        p1.stdout.close()
-        p1.wait()
-        return p2.returncode
-
-    def initial_list_cmd(
-        self,
-        _frozen_self,
-        hidden=False,
-        exclude_patterns=None,
-        path_format="absolute",
-        file_source="auto",
-    ):
-        # type: (Path, bool, Optional[List[str]], str, str) -> List[str]
-        if exclude_patterns is None:
-            exclude_patterns = []
-
-        if self._use_git("f", file_source):
-            return _git_ls_files_cmd(hidden, exclude_patterns, "")
-
-        args = ["fd", "-L", "--type", "f"]
-        if hidden:
-            args.append("--hidden")
-        for p in exclude_patterns:
-            if not _validate_exclude_pattern(p):
-                print(
-                    f"Warning: ignoring unsafe exclude pattern {p!r}",
-                    file=sys.stderr,
-                )
-                continue
-            args += ["-E", p]
-        if path_format == "relative":
-            return args + ["."]
-        return args + [".", self.base_path]
-
 
 class RemoteBackend:
-    """Backend implementation for SSH-remote searches."""
+    """Backend implementation for SSH-remote operations."""
 
     def __init__(
         self,
@@ -291,12 +141,6 @@ class RemoteBackend:
 
     def resolve_base(self, raw):
         # type: (str) -> str
-        # fmt: off
-        try:
-            from .copy import _resolve_remote_path
-        except ImportError:
-            _resolve_remote_path = globals()["_resolve_remote_path"]  # flat built file
-        # fmt: on
         return _resolve_remote_path(self.remote, raw, self.ssh_control)
 
     def is_safe_subpath(self, path):
@@ -381,72 +225,6 @@ class RemoteBackend:
         # fmt: on
         return cmd_remote_preview(args)
 
-    def reload(
-        self,
-        query,
-        ftype,
-        ext,
-        mode,
-        hidden=False,
-        exclude_patterns=None,
-        path_format="absolute",
-        file_source="auto",
-    ):
-        # type: (str, str, str, str, bool, Optional[List[str]], str, str) -> int
-        if exclude_patterns is None:
-            exclude_patterns = []
-        args = [self.remote, self.base_path, self.ssh_control, ftype, ext]
-        if mode == "content" and query:
-            args.append(query)
-        if hidden:
-            args.append("--hidden")
-        for p in exclude_patterns:
-            args.append("--exclude")
-            args.append(p)
-        if path_format == "relative":
-            args.append("--relative")
-        if file_source == "git":
-            args.append("--file-source=git")
-        # fmt: off
-        try:
-            from .remote import cmd_remote_reload
-        except ImportError:
-            cmd_remote_reload = globals()["cmd_remote_reload"]  # flat built file
-        # fmt: on
-        return cmd_remote_reload(args)
-
-    def initial_list_cmd(
-        self,
-        frozen_self,
-        hidden=False,
-        exclude_patterns=None,
-        path_format="absolute",
-        file_source="auto",
-    ):
-        # type: (Path, bool, Optional[List[str]], str, str) -> List[str]
-        if exclude_patterns is None:
-            exclude_patterns = []
-        args = [
-            sys.executable,
-            str(frozen_self),
-            "remotely-remote-reload",
-            self.remote,
-            self.base_path,
-            self.ssh_control,
-            "f",
-            "",
-        ]
-        if hidden:
-            args.append("--hidden")
-        for p in exclude_patterns:
-            args.append("--exclude")
-            args.append(p)
-        if path_format == "relative":
-            args.append("--relative")
-        if file_source == "git":
-            args.append("--file-source=git")
-        return args
-
 
 def backend_from_state(state):
     # type: (dict) -> Union[LocalBackend, RemoteBackend]
@@ -477,47 +255,11 @@ def backend_from_state(state):
     )
 
 
-# =============================================================================
-# Local content search helper
-# =============================================================================
-
-
-def _local_content_search(
-    fd_args,
-    fd_root,
-    fd_cwd,
-    query,
-    ext,
-    hidden,
-    base_path,
-    path_format,
-):
-    # type: (List[str], List[str], Optional[str], str, str, bool, str, str) -> int
-    """Run a local content search using rga or fd+grep fallback."""
-    if "rga" in AVAILABLE_TOOLS:
-        rga_cmd = ["rga"]
-        if hidden:
-            rga_cmd.append("--hidden")
-        for e in _parse_extensions(ext):
-            rga_cmd += ["-g", f"*.{e}"]
-        rga_cmd += [
-            "--files-with-matches",
-            "--fixed-strings",
-            query,
-            "." if path_format == "relative" else base_path,
-        ]
-        r = subprocess.run(rga_cmd, cwd=fd_cwd, stderr=subprocess.DEVNULL)
-        if r.returncode == 0:
-            return 0
-        return r.returncode
-
-    p1 = subprocess.Popen(
-        fd_args + ["-0"] + fd_root,
-        cwd=fd_cwd,
-        stdout=subprocess.PIPE,
-    )
-    assert p1.stdout is not None
-    p1.stdout.close()
-    p2 = subprocess.run(["xargs", "-P4", "-0", "grep", "-ilF", query], stdin=p1.stdout)
-    p1.wait()
-    return p2.returncode
+def _find_git_root():
+    # type: () -> Optional[str]
+    """Search upwards from cwd for a .git folder."""
+    curr = Path.cwd().resolve()
+    for parent in [curr] + list(curr.parents):
+        if (parent / ".git").is_dir():
+            return str(parent)
+    return None

@@ -38,10 +38,9 @@ import sys
 import threading
 
 from .archive import FileKind, classify
-from .copy import _resolve_remote_path
 from .remote import _build_fd_rga_args, _build_remote_cmd
 from .session import SSH_DEFERRED, acquire_socket
-from .utils import _validate_exclude_pattern
+from .utils import _resolve_remote_path, _validate_exclude_pattern
 
 
 # ---------------------------------------------------------------------------
@@ -94,8 +93,6 @@ def _parse_targets(argv: list) -> "tuple[list[dict], list[str], bool, str, str]"
             positional.append(tok)
         i += 1
 
-    # Parse positional args as TARGET [PATH] pairs.
-    # Targets use host:/path or host syntax; "local" means local filesystem.
     if not positional:
         positional = ["local"]
 
@@ -103,11 +100,9 @@ def _parse_targets(argv: list) -> "tuple[list[dict], list[str], bool, str, str]"
         if tok == "local":
             targets.append({"host": "", "path": path_override})
         elif ":" in tok and not tok.startswith("/"):
-            # host:/path or host:~/path
             host, sep, path = tok.partition(":")
             targets.append({"host": host, "path": path_override or path})
         else:
-            # bare host with no path component
             targets.append({"host": tok, "path": path_override})
 
     return targets, exclude_patterns, hidden, path_override, fmt
@@ -154,7 +149,7 @@ def _list_remote(
 
     # Resolve ~ and relative paths on the remote before passing to fd.
     # shlex.quote("~/demo") produces '~/demo' which the shell does not expand
-    # when passed as an fd argument -- must be resolved to an absolute path first.
+    # when passed as an fd argument -- must be resolved to absolute first.
     if path.startswith("~") or not path.startswith("/"):
         ssh_control = sock if sock and sock is not SSH_DEFERRED else ""
         path = _resolve_remote_path(host, path, ssh_control)
@@ -178,15 +173,13 @@ def _list_remote(
     # extra flags and let ssh use the user's config unchanged.
     if sock and sock is not SSH_DEFERRED:
         ssh_opts = [
-            "-o",
-            "ControlMaster=no",
-            "-o",
-            f"ControlPath={sock}",
-            "-o",
-            "ConnectTimeout=5",
+            "-o", "ControlMaster=no",
+            "-o", f"ControlPath={sock}",
+            "-o", "ConnectTimeout=5",
         ]
     else:
         ssh_opts = []
+
     proc = subprocess.Popen(
         ["ssh"] + ssh_opts + [host, remote_cmd],
         stdout=subprocess.PIPE,
@@ -198,11 +191,10 @@ def _list_remote(
         line = raw.decode("utf-8", errors="replace").rstrip("\n")
         if not line:
             continue
-        prefixed = f"{host}:{line}"
         if fmt == "json":
             out_queue.put({"host": host, "path": line, "kind": _kind_for_path(line)})
         else:
-            out_queue.put(prefixed)
+            out_queue.put(f"{host}:{line}")
 
     proc.stdout.close()
     proc.wait()

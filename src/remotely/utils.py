@@ -1,15 +1,17 @@
-"""remotely.utils -- Low-level subprocess and MIME helpers.
+"""remotely.utils -- Low-level subprocess, MIME, and SSH path helpers.
 
-_capture()         run a command and return (stdout, returncode), bounded
-                   by max_bytes to prevent memory exhaustion on large output
-_passthrough()     run a command with inherited stdout (streaming, no capture)
-_try_run()         attempt each command in a list until one succeeds
-_get_mime()        detect MIME type via the `file` command
-_is_text_mime()    return True for text/* and inode/x-empty (empty files)
-_parse_extensions() parse and sanitise a whitespace-separated extension string
-_removeprefix()    str.removeprefix() backport for Python 3.6/3.7/3.8
-_shlex_join()      shlex.join() backport for Python 3.6/3.7
+_capture()               run a command and return (stdout, returncode), bounded
+                         by max_bytes to prevent memory exhaustion on large output
+_passthrough()           run a command with inherited stdout (streaming, no capture)
+_try_run()               attempt each command in a list until one succeeds
+_get_mime()              detect MIME type via the `file` command
+_is_text_mime()          return True for text/* and inode/x-empty (empty files)
+_parse_extensions()      parse and sanitise a whitespace-separated extension string
+_validate_exclude_pattern() reject patterns containing shell operators
+_removeprefix()          str.removeprefix() backport for Python 3.6/3.7/3.8
+_shlex_join()            shlex.join() backport for Python 3.6/3.7
 _resolve_absolute_path() resolve relative paths against a base, local or remote
+_resolve_remote_path()   expand tilde and relative paths on a remote host via SSH
 """
 
 import re
@@ -19,6 +21,7 @@ import sys
 from pathlib import Path, PurePosixPath
 
 from .config import AVAILABLE_TOOLS
+from .ssh import _ssh_opts
 
 
 def _shlex_join(args):
@@ -38,7 +41,7 @@ def _removeprefix(s, prefix):
     # type: (str, str) -> str
     """Backport of str.removeprefix() for Python 3.6+."""
     if prefix and s.startswith(prefix):
-        return s[len(prefix) :]
+        return s[len(prefix):]
     return s
 
 
@@ -57,6 +60,60 @@ def _resolve_absolute_path(path, base_path, remote=False):
     if p.is_absolute():
         return path
     return str((Path(base_path) if base_path else Path.cwd()) / p)
+
+
+def _resolve_remote_path(remote, raw, ssh_control):
+    # type: (str, str, str) -> str
+    """Expand a remote path to its absolute form by querying the remote host.
+
+    Handles three cases that cannot be resolved locally:
+      - Empty or ".": ask the remote shell for its cwd via pwd.
+      - "~" or "~/...": expand via python3 -c on the remote (no shell injection).
+      - Anything else: return as-is.
+
+    SECURITY: Tilde expansion uses python3 stdin rather than shell expansion
+    to avoid injection from a crafted remote path.
+
+    DESIGN: Both SSH branches sys.exit() on failure. Without this, a network
+    or auth failure would return an empty string and fzf would silently search
+    from the remote filesystem root (/).
+    """
+    if not raw or raw == ".":
+        r = subprocess.run(
+            ["ssh"] + _ssh_opts(ssh_control) + [remote, "pwd"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        if r.returncode != 0:
+            print(
+                f"Error: SSH failed to resolve path for {remote} (rc={r.returncode})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return r.stdout.strip()
+
+    if raw == "~" or raw.startswith("~"):
+        r = subprocess.run(
+            ["ssh"]
+            + _ssh_opts(ssh_control)
+            + [
+                remote,
+                "python3 -c 'import os,sys; print(os.path.expanduser(sys.stdin.read().strip()))'",
+            ],
+            input=raw.encode("utf-8"),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if r.returncode != 0:
+            print(
+                f"Error: SSH failed to expand tilde for {remote} (rc={r.returncode})",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return r.stdout.decode("utf-8", errors="replace").strip()
+
+    return raw
 
 
 def _capture(cmd, max_bytes=_CAPTURE_DEFAULT_MAX):
@@ -99,8 +156,7 @@ def _passthrough(cmd, head_n=None):
 
     This is the correct way to run preview commands. Using _capture() and
     then print()ing the result would buffer the entire output in memory and
-    also strip ANSI colour codes that bat/rga/grep emit -- causing the fzf
-    preview pane to show plain, uncoloured text.
+    also strip ANSI colour codes that bat/rga/grep emit.
 
     If head_n is given, the output is piped through `head -n <head_n>` so
     we don't flood the preview pane with thousands of lines from large archives.
@@ -122,8 +178,8 @@ def _passthrough(cmd, head_n=None):
             p2.wait()
             p1.wait()
             # DESIGN: p1 may exit with SIGPIPE (rc=141) because head closed the
-            #         read end of the pipe before p1 finished writing. That is
-            #         normal and expected; we treat p2's success as overall success.
+            # read end of the pipe before p1 finished writing. That is normal
+            # and expected; we treat p2's success as overall success.
             return 0 if p2.returncode == 0 else p1.returncode
         else:
             r = subprocess.run(cmd, stderr=subprocess.DEVNULL)
@@ -139,21 +195,15 @@ def _try_run(commands, status_msg):
     Three outcomes per command:
       rc == 0    success -> return immediately, no message printed.
       rc == 127  tool not installed -> skip silently, try next in chain.
-      anything else  tool ran but failed (e.g. no matches) -> stop here,
-                     print status_msg, return rc. No point trying the next
-                     tool; the failure is definitive.
+      anything else  tool ran but failed -> stop here, print status_msg.
 
-    DESIGN: Centralises tool-fallback logic (e.g. bat -> cat) so each call site
-            states the preference chain rather than implementing it. rc==127 is
-            the shell convention for "command not found" and is the only case
-            where we silently move to the next option; any other failure is
-            definitive and stops the chain.
+    DESIGN: rc==127 is the shell convention for "command not found" and is
+    the only case where we silently move to the next option; any other
+    failure is definitive and stops the chain.
     """
     last_rc = 127
     for cmd in commands:
         # PERF: Skip the fork entirely if the tool is known-absent at startup.
-        #       _passthrough() would catch FileNotFoundError and return 127,
-        #       but that still costs a fork()+exec() pair on every call.
         if cmd[0] not in AVAILABLE_TOOLS:
             continue
         rc = _passthrough(cmd)
@@ -185,10 +235,8 @@ def _is_text_mime(mime):
     """Return True if the MIME type indicates a file that can be opened in a text editor.
 
     Covers plain text and the most common structured-text application types.
-    Used to decide between opening with an editor vs. xdg-open.
-
     inode/x-empty is included because zero-byte files should open in the editor
-    rather than xdg-open -- a new empty file is almost always a text file.
+    rather than xdg-open.
     """
     return mime.startswith("text/") or mime in (
         "application/json",
@@ -206,11 +254,9 @@ def _parse_extensions(ext_str):
     Example: ".txt  .pdf py" -> ["txt", "pdf", "py"]
 
     SECURITY: Only alphanumeric characters are accepted after dot-stripping.
-    A crafted extension like "py $(rm -rf ~)" or "py;evil" would survive
-    shlex.quote at one shell level but could break out at a second level
-    (e.g. inside a remote shell command or a glob argument). Rejecting
-    non-alphanumeric values here closes that path entirely -- the offending
-    token is silently dropped rather than passed to fd/rga/grep.
+    A crafted extension like "py$(rm -rf ~)" would survive shlex.quote at
+    one shell level but could break out at a second level. Rejecting
+    non-alphanumeric values here closes that path entirely.
     """
     result = []
     for raw in ext_str.split():
@@ -228,6 +274,16 @@ def _parse_extensions(ext_str):
     return result
 
 
+def _parse_fzf_version(version_str):
+    # type: (str) -> Tuple[int, int]
+    """Parse a fzf version string and return (major, minor).
+
+    Returns (0, 0) if the string does not match the expected format.
+    """
+    m = re.match(r"(\d+)\.(\d+)", version_str.strip())
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
 def _validate_exclude_pattern(pattern):
     # type: (str) -> bool
     """Return True if the pattern is safe to pass to fd -E / rga --exclude.
@@ -236,18 +292,7 @@ def _validate_exclude_pattern(pattern):
     that could inject commands into remote shell fragments.
     """
     SHELL_OPERATORS = (
-        ";",
-        "|",
-        "&&",
-        "||",
-        "$",
-        "`",
-        ">",
-        "<",
-        "\n",
-        "(",
-        ")",
-        "&",
-        "\\",
+        ";", "|", "&&", "||", "$", "`", ">", "<", "\n",
+        "(", ")", "&", "\\",
     )
     return not any(op in pattern for op in SHELL_OPERATORS)

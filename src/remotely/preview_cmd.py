@@ -22,7 +22,7 @@ Usage:
     syntax-highlighted match context (rga / grep).
 
 Examples:
-    remotely preview local /etc/hosts
+    remotely preview /etc/hosts
     remotely preview user@host:/var/log/app.log
     remotely preview user@host:/var/log/app.log "error"
     remotely preview user@host:~/projects/main.py
@@ -31,10 +31,10 @@ Examples:
 import sys
 from pathlib import Path
 
-from .copy import _resolve_remote_path
 from .preview import cmd_preview
 from .remote import cmd_remote_preview
 from .session import SSH_DEFERRED, acquire_socket
+from .utils import _resolve_remote_path
 
 
 # ---------------------------------------------------------------------------
@@ -51,8 +51,7 @@ def _parse_target_path(arg: str) -> "tuple[str, str]":
     Rules:
     - If arg starts with / or ~ or . it is always local.
     - Otherwise split on the first : that is followed by / or ~.
-      A bare hostname with no colon is treated as local (avoids misreading
-      Windows-style drive letters, though this tool targets Unix only).
+      A bare hostname with no colon is treated as local.
     - user@host:/path  -> ("user@host", "/path")
     - user@host:~/p    -> ("user@host", "~/p")
     - /local/path      -> ("", "/local/path")
@@ -60,12 +59,10 @@ def _parse_target_path(arg: str) -> "tuple[str, str]":
     if arg.startswith("/") or arg.startswith("~") or arg.startswith("."):
         return "", arg
 
-    # Find first colon followed by / or ~
     for i, ch in enumerate(arg):
         if ch == ":" and i > 0 and i + 1 < len(arg) and arg[i + 1] in ("/", "~"):
-            return arg[:i], arg[i + 1 :]
+            return arg[:i], arg[i + 1:]
 
-    # No host prefix found -- treat as local path
     return "", arg
 
 
@@ -90,7 +87,6 @@ def cmd_preview_headless(argv: list) -> int:
     host, path = _parse_target_path(target_path)
 
     if not host:
-        # Local: delegate to the existing cmd_preview unchanged.
         args = [path]
         if query:
             args.append(query)
@@ -98,11 +94,8 @@ def cmd_preview_headless(argv: list) -> int:
 
     # Remote: ensure a session socket exists, then call cmd_remote_preview.
     sock = acquire_socket(host)
-    # SSH_DEFERRED means ~/.ssh/config handles multiplexing -- pass "" as
-    # ssh_control so cmd_remote_preview uses no ControlPath override.
     ssh_control = sock if sock is not SSH_DEFERRED else ""
 
-    # Resolve ~ to an absolute path on the remote before use.
     if path.startswith("~"):
         path = _resolve_remote_path(host, path, ssh_control)
         if not path:
@@ -111,9 +104,6 @@ def cmd_preview_headless(argv: list) -> int:
             )
             return 1
 
-    # cmd_remote_preview argv: remote base_path ssh_control filename [query]
-    # base_path is the directory portion of path; filename is the full path
-    # (cmd_remote_preview handles absolute paths correctly).
     base_path = str(Path(path).parent) if not path.endswith("/") else path
     args = [host, base_path, ssh_control, path]
     if query:

@@ -11,9 +11,10 @@ Usage:
     remotely open [TARGET:]PATH
 
     TARGET:PATH uses the same format as remotely list output:
-        /local/path               -- local file
-        user@host:/remote/path    -- remote file
-        user@host:~/remote/path   -- remote file, tilde path
+        /absolute/local/path          -- local file, no prefix
+        ~/relative/path               -- local file, no prefix
+        user@host:/remote/path        -- remote file, host prefix
+        user@host:~/remote/path       -- remote file, tilde path
 
 Examples:
     remotely open /etc/hosts
@@ -34,7 +35,7 @@ from pathlib import Path
 from .config import AVAILABLE_TOOLS, CONFIG
 from .preview_cmd import _parse_target_path
 from .session import SSH_DEFERRED, acquire_socket
-from .utils import _is_text_mime
+from .utils import _is_text_mime, _resolve_remote_path
 from .workbase import WORK_BASE
 
 
@@ -84,28 +85,23 @@ def _open_remote(host: str, path: str, editor: str) -> int:
       6. Remove the temp file.
 
     SECURITY: mkstemp creates the file with mode 0o600 (O_CREAT|O_EXCL).
-    The temp file lives in WORK_BASE which is 0o700 -- not accessible to
-    other local users.
+    The temp file lives in WORK_BASE which is 0o700.
     """
     sock = acquire_socket(host)
     # SSH_DEFERRED means ~/.ssh/config handles multiplexing.
     if sock and sock is not SSH_DEFERRED:
         ssh_opts = [
-            "-o",
-            "ControlMaster=no",
-            "-o",
-            f"ControlPath={sock}",
-            "-o",
-            "ConnectTimeout=5",
+            "-o", "ControlMaster=no",
+            "-o", f"ControlPath={sock}",
+            "-o", "ConnectTimeout=5",
         ]
     else:
         ssh_opts = []
 
-    # Check the remote file exists and get its MIME type.
+    # Check MIME type to refuse binary files early.
     mime_result = subprocess.run(
-        ["ssh"]
-        + ssh_opts
-        + [host, f"file -L --mime-type -b {_shquote(path)} 2>/dev/null"],
+        ["ssh"] + ssh_opts + [host,
+            f"file -L --mime-type -b {shlex.quote(path)} 2>/dev/null"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -128,7 +124,7 @@ def _open_remote(host: str, path: str, editor: str) -> int:
     try:
         with os.fdopen(fd, "wb") as fh:
             r = subprocess.run(
-                ["ssh"] + ssh_opts + [host, f"cat {_shquote(path)}"],
+                ["ssh"] + ssh_opts + [host, f"cat {shlex.quote(path)}"],
                 stdout=fh,
             )
         if r.returncode != 0:
@@ -137,7 +133,6 @@ def _open_remote(host: str, path: str, editor: str) -> int:
 
         mtime_before = os.stat(tmp_path).st_mtime
 
-        # Launch editor.
         editor_parts = editor.split()
         rc = subprocess.run(editor_parts + [tmp_path]).returncode
 
@@ -166,11 +161,6 @@ def _open_remote(host: str, path: str, editor: str) -> int:
             pass
 
 
-def _shquote(s: str) -> str:
-    """Shell-quote a single argument for use in an SSH command string."""
-    return shlex.quote(s)
-
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -191,5 +181,17 @@ def cmd_open_headless(argv: list) -> int:
 
     if not host:
         return _open_local(path, editor)
+
+    sock = acquire_socket(host)
+    ssh_control = sock if sock is not SSH_DEFERRED else ""
+
+    # Resolve ~ to an absolute path on the remote before use.
+    if path.startswith("~"):
+        path = _resolve_remote_path(host, path, ssh_control)
+        if not path:
+            print(
+                f"remotely open: could not resolve path on {host}", file=sys.stderr
+            )
+            return 1
 
     return _open_remote(host, path, editor)

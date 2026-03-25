@@ -7,9 +7,8 @@ from pathlib import Path
 from typing import FrozenSet
 
 CONFIG_PATH = Path.home() / ".config" / "remotely" / "config"
-HISTORY_PATH = Path.home() / ".local" / "share" / "remotely" / "history"
 
-# All supported overlay box positions — used by menu_position and output_position.
+# All supported overlay box positions.
 _VALID_POSITIONS = {
     "top-left",
     "top-center",
@@ -28,52 +27,11 @@ _CONFIG_DEFAULTS: dict = {
     "editor": "",
     "default_mode": "content",
     "ssh_strict_host_key_checking": True,
-    "search_history": False,
     "show_hidden": False,
     "exclude_patterns": [],
     "max_stream_mb": 100,
-    "keybindings": {
-        "toggle_mode": "ctrl-t",
-        "toggle_ftype": "ctrl-d",
-        "toggle_hidden": "ctrl-h",
-        "filter_ext": "ctrl-f",
-        "add_exclude": "ctrl-x",
-        "refresh_list": "ctrl-r",
-        "sort_list": "ctrl-s",
-        "copy_path": "ctrl-c",
-        "open_file": "enter",
-        "preview_half_page_down": "alt-j",
-        "preview_half_page_up": "alt-k",
-        "history_prev": "ctrl-p",
-        "history_next": "ctrl-n",
-        "exit": "esc",
-    },
     "path_format": "relative",
     "file_source": "auto",
-    "custom_actions": {
-        "leader": "ctrl-b",
-        "menu_position": "bottom-right",
-        "output_position": "bottom-left",
-        "groups": {},
-    },
-}
-
-_RESERVED_KEYS = {
-    "ctrl-t",
-    "ctrl-d",
-    "ctrl-h",
-    "ctrl-f",
-    "ctrl-x",
-    "ctrl-r",
-    "ctrl-s",
-    "ctrl-c",
-    "ctrl-p",
-    "ctrl-n",
-    "ctrl-g",  # fzf hardcoded exit — cannot be overridden
-    "enter",
-    "esc",
-    "alt-j",
-    "alt-k",
 }
 
 _VALID_OUTPUTS = {"tmux", "overlay", "silent"}
@@ -83,8 +41,8 @@ def _validate_position(value: object, key: str, default: str) -> str:
     """Validate a position string; warn and return default if invalid."""
     if not isinstance(value, str) or value not in _VALID_POSITIONS:
         print(
-            f"Warning: custom_actions.{key} {value!r} must be one of "
-            f"{sorted(_VALID_POSITIONS)} — using default {default!r}.",
+            f"Warning: {key} {value!r} must be one of "
+            f"{sorted(_VALID_POSITIONS)} -- using default {default!r}.",
             file=sys.stderr,
         )
         return default
@@ -98,13 +56,13 @@ def _validate_action(
     if not isinstance(ak, str) or len(ak) != 1:
         print(
             f"Warning: custom_actions group {gk!r} action key {ak!r} must be a "
-            f"single character — skipping action.",
+            f"single character -- skipping action.",
             file=sys.stderr,
         )
         return None
     if not isinstance(av, dict):
         print(
-            f"Warning: custom_actions group {gk!r} action {ak!r} must be a dict — skipping.",
+            f"Warning: custom_actions group {gk!r} action {ak!r} must be a dict -- skipping.",
             file=sys.stderr,
         )
         return None
@@ -112,7 +70,7 @@ def _validate_action(
     if not isinstance(cmd, str) or not cmd:
         print(
             f"Warning: custom_actions group {gk!r} action {ak!r} requires a "
-            f"non-empty 'cmd' string — skipping.",
+            f"non-empty 'cmd' string -- skipping.",
             file=sys.stderr,
         )
         return None
@@ -122,22 +80,20 @@ def _validate_action(
         action_label = ""
 
     output = av.get("output", "silent")
-    # Accept "preview" as a deprecated alias for "overlay"
     if output == "preview":
-        output = "overlay"
+        output = "overlay"  # deprecated alias
     if output not in _VALID_OUTPUTS:
         print(
             f"Warning: custom_actions group {gk!r} action {ak!r} output "
-            f"{output!r} must be one of {sorted(_VALID_OUTPUTS)} — defaulting to 'silent'.",
+            f"{output!r} must be one of {sorted(_VALID_OUTPUTS)} -- defaulting to 'silent'.",
             file=sys.stderr,
         )
         output = "silent"
 
-    # Per-action output_position overrides the global default
     action_out_pos = (
         _validate_position(
             av["output_position"],
-            f"groups.{gk}.actions.{ak}.output_position",
+            f"custom_actions.groups.{gk}.actions.{ak}.output_position",
             global_output_position,
         )
         if "output_position" in av
@@ -157,13 +113,13 @@ def _validate_group(gk: str, gv: object, global_output_position: str) -> "dict |
     if not isinstance(gk, str) or len(gk) != 1:
         print(
             f"Warning: custom_actions group key {gk!r} must be a single "
-            f"character — skipping group.",
+            f"character -- skipping group.",
             file=sys.stderr,
         )
         return None
     if not isinstance(gv, dict):
         print(
-            f"Warning: custom_actions group {gk!r} must be a dict — skipping.",
+            f"Warning: custom_actions group {gk!r} must be a dict -- skipping.",
             file=sys.stderr,
         )
         return None
@@ -171,7 +127,7 @@ def _validate_group(gk: str, gv: object, global_output_position: str) -> "dict |
     label = gv.get("label", "")
     if not isinstance(label, str):
         print(
-            f"Warning: custom_actions group {gk!r} label must be a string — skipping.",
+            f"Warning: custom_actions group {gk!r} label must be a string -- skipping.",
             file=sys.stderr,
         )
         return None
@@ -179,7 +135,7 @@ def _validate_group(gk: str, gv: object, global_output_position: str) -> "dict |
     raw_actions = gv.get("actions", {})
     if not isinstance(raw_actions, dict):
         print(
-            f"Warning: custom_actions group {gk!r} actions must be a dict — skipping.",
+            f"Warning: custom_actions group {gk!r} actions must be a dict -- skipping.",
             file=sys.stderr,
         )
         return None
@@ -200,20 +156,7 @@ def _validate_custom_actions(value: object) -> "dict | None":
     """Validate the custom_actions config block.
 
     Returns a cleaned dict on success, or None if the top-level structure is
-    invalid. Individual bad groups or actions are skipped with a warning so
-    a single misconfigured action never prevents remotely from launching.
-
-    Rules:
-      - value must be a dict
-      - leader: non-empty string, not in the reserved binding set
-      - menu_position / output_position: one of the 9 valid positions
-      - groups: dict of single-character keys
-      - each group: "label" (str) + "actions" (dict)
-      - each action key: single character
-      - each action: non-empty "cmd" (str), "label" (str)
-      - action "output": one of "tmux", "overlay", "silent"
-        ("preview" accepted as a deprecated alias for "overlay")
-      - action "output_position" (optional): one of the 9 valid positions
+    invalid. Individual bad groups or actions are skipped with a warning.
     """
     if not isinstance(value, dict):
         print(
@@ -228,19 +171,16 @@ def _validate_custom_actions(value: object) -> "dict | None":
             file=sys.stderr,
         )
         leader = "ctrl-b"
-    if leader in _RESERVED_KEYS:
-        print(
-            f"Warning: custom_actions.leader {leader!r} conflicts with a reserved "
-            f"remotely keybinding. Choose a different key.",
-            file=sys.stderr,
-        )
-        leader = "ctrl-b"
 
     menu_position = _validate_position(
-        value.get("menu_position", "bottom-right"), "menu_position", "bottom-right"
+        value.get("menu_position", "bottom-right"),
+        "custom_actions.menu_position",
+        "bottom-right",
     )
     output_position = _validate_position(
-        value.get("output_position", "bottom-left"), "output_position", "bottom-left"
+        value.get("output_position", "bottom-left"),
+        "custom_actions.output_position",
+        "bottom-left",
     )
 
     raw_groups = value.get("groups", {})
@@ -276,22 +216,6 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
             return
         cfg[key] = user_value
 
-    elif key == "keybindings":
-        if not isinstance(user_value, dict):
-            print(
-                "Warning: config key 'keybindings' has wrong type (expected dict), using default.",
-                file=sys.stderr,
-            )
-            return
-        for action, kbd in user_value.items():
-            if not isinstance(kbd, str):
-                print(
-                    f"Warning: keybinding for '{action}' has wrong type (expected string), using default.",
-                    file=sys.stderr,
-                )
-            else:
-                cfg[key][action] = kbd
-
     elif key == "file_source":
         if user_value not in ("auto", "fd", "git"):
             print(
@@ -320,13 +244,7 @@ def _merge_config_key(cfg: dict, key: str, default: object, user_value: object) 
 def load_config() -> dict:
     """Load ~/.config/remotely/config (JSON) and merge with defaults."""
     cfg = dict(_CONFIG_DEFAULTS)
-    cfg["keybindings"] = dict(_CONFIG_DEFAULTS["keybindings"])
-    cfg["custom_actions"] = {
-        "leader": _CONFIG_DEFAULTS["custom_actions"]["leader"],
-        "menu_position": _CONFIG_DEFAULTS["custom_actions"]["menu_position"],
-        "output_position": _CONFIG_DEFAULTS["custom_actions"]["output_position"],
-        "groups": {},
-    }
+    cfg["exclude_patterns"] = list(_CONFIG_DEFAULTS["exclude_patterns"])
     if not CONFIG_PATH.exists():
         return cfg
     try:
@@ -371,14 +289,8 @@ _ALL_TOOLS = [
     "ls",
     "xxd",
     "hexdump",
-    "xclip",
-    "pbcopy",
-    "wl-copy",
     "xdg-open",
 ]
 AVAILABLE_TOOLS: FrozenSet[str] = frozenset(
     t for t in _ALL_TOOLS if shutil.which(t) is not None
 )
-
-HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
-HISTORY_PATH.touch(mode=0o600, exist_ok=True)
