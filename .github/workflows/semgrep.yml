@@ -17,11 +17,23 @@ jobs:
       contents: read
     env:
       SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-    container:
-      image: semgrep/semgrep
     steps:
     - uses: actions/checkout@v4
+
+    # Semgrep and ruff both require Python 3.7+; use 3.10 as the dev baseline.
+    - name: Set up Python 3.10 (dev toolchain)
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+
     - name: Run Semgrep platform scan
-      run: semgrep ci
+      uses: docker://semgrep/semgrep
+      with:
+        entrypoint: semgrep
+        args: ci
+
     - name: Run custom rules
-      run: semgrep scan --config .semgrep/semgrep.yml --error .
+      uses: docker://semgrep/semgrep
+      with:
+        entrypoint: semgrep
+        args: scan --config .semgrep/semgrep.yml --error .

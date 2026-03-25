@@ -93,7 +93,9 @@ def _collect_imports(raw_sources):
             if isinstance(node, ast.ImportFrom) and (
                 node.level
                 and node.level > 0  # relative: from .x import y
-                or (node.module or "").startswith("remotely.")  # from remotely.x import y
+                or (node.module or "").startswith(
+                    "remotely."
+                )  # from remotely.x import y
             ):
                 continue
             # Reconstruct the import line
@@ -153,9 +155,9 @@ def build():
         "import sys as _sys\n\n"
         "if _sys.version_info < (3, 6):\n"
         "    print(\n"
-        '        \"Error: remotely requires Python 3.6 or later \"\n'
-        '        \"(found {0}.{1}).\"\n'
-        '        .format(_sys.version_info.major, _sys.version_info.minor),\n'
+        '        "Error: remotely requires Python 3.6 or later "\n'
+        '        "(found {0}.{1})."\n'
+        "        .format(_sys.version_info.major, _sys.version_info.minor),\n"
         "        file=_sys.stderr,\n"
         "    )\n"
         "    _sys.exit(1)\n\n"

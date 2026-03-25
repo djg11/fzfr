@@ -173,9 +173,12 @@ def _list_remote(
     # extra flags and let ssh use the user's config unchanged.
     if sock and sock is not SSH_DEFERRED:
         ssh_opts = [
-            "-o", "ControlMaster=no",
-            "-o", f"ControlPath={sock}",
-            "-o", "ConnectTimeout=5",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            f"ControlPath={sock}",
+            "-o",
+            "ConnectTimeout=5",
         ]
     else:
         ssh_opts = []

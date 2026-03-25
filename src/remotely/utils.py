@@ -41,7 +41,7 @@ def _removeprefix(s, prefix):
     # type: (str, str) -> str
     """Backport of str.removeprefix() for Python 3.6+."""
     if prefix and s.startswith(prefix):
-        return s[len(prefix):]
+        return s[len(prefix) :]
     return s
 
 
@@ -292,7 +292,18 @@ def _validate_exclude_pattern(pattern):
     that could inject commands into remote shell fragments.
     """
     SHELL_OPERATORS = (
-        ";", "|", "&&", "||", "$", "`", ">", "<", "\n",
-        "(", ")", "&", "\\",
+        ";",
+        "|",
+        "&&",
+        "||",
+        "$",
+        "`",
+        ">",
+        "<",
+        "\n",
+        "(",
+        ")",
+        "&",
+        "\\",
     )
     return not any(op in pattern for op in SHELL_OPERATORS)

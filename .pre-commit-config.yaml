@@ -1,16 +1,36 @@
 # Pre-commit hooks for remotely.
-# Optimized for Gentoo Musl / Python 3.6 compatibility.
-# Note: ruff is disabled here as it requires Python 3.7+ to run.
+# Dev toolchain requires Python 3.10+. All hooks run under the venv python.
+# Install once with: make install-hooks
 
 repos:
   - repo: local
     hooks:
+      # -- Formatting and linting (ruff requires Python 3.7+ to run) ----------
+
+      - id: ruff-check
+        name: ruff lint
+        entry: ruff check --fix
+        language: system
+        types: [python]
+        pass_filenames: true
+
+      - id: ruff-format
+        name: ruff format
+        entry: ruff format
+        language: system
+        types: [python]
+        pass_filenames: true
+
+      # -- Whitespace ----------------------------------------------------------
+
       - id: trailing-whitespace
         name: trailing whitespace
         entry: python3 -c 'import sys; [open(f, "rb+").write(open(f, "rb").read().rstrip() + b"\n") for f in sys.argv[1:]]'
         language: system
         types: [text]
         exclude: '\.md$'
+
+      # -- Config file syntax --------------------------------------------------
 
       - id: check-json
         name: check json
@@ -21,7 +41,7 @@ repos:
 
       - id: check-toml
         name: check toml
-        entry: python3 -c 'import sys, toml; [toml.load(open(f)) for f in sys.argv[1:]]'
+        entry: python3 -c 'import sys, tomllib; [tomllib.loads(open(f).read()) for f in sys.argv[1:]]'
         language: system
         types: [toml]
 
@@ -30,3 +50,12 @@ repos:
         entry: python3 -c 'import sys, yaml; [yaml.safe_load(open(f)) for f in sys.argv[1:]]'
         language: system
         types: [yaml]
+
+      # -- Build safety --------------------------------------------------------
+
+      - id: check-imports
+        name: check late imports
+        entry: python3 scripts/check_imports.py
+        language: system
+        pass_filenames: false
+        files: '^src/remotely/.*\.py$'

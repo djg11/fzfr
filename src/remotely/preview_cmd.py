@@ -61,7 +61,7 @@ def _parse_target_path(arg: str) -> "tuple[str, str]":
 
     for i, ch in enumerate(arg):
         if ch == ":" and i > 0 and i + 1 < len(arg) and arg[i + 1] in ("/", "~"):
-            return arg[:i], arg[i + 1:]
+            return arg[:i], arg[i + 1 :]
 
     return "", arg
 

@@ -37,17 +37,22 @@ if src_path.exists():
     import remotely
     from remotely._script import _find_self, _is_built_script
     from remotely.archive import FileKind, classify
-    from remotely.backends import LocalBackend, RemoteBackend, backend_from_state, _find_git_root
+    from remotely.backends import (
+        LocalBackend,
+        RemoteBackend,
+        _find_git_root,
+        backend_from_state,
+    )
     from remotely.config import _CONFIG_DEFAULTS, _merge_config_key, load_config
     from remotely.remote import (
         _build_fd_rga_args,
         _build_remote_cmd,
         _parse_remote_reload_args,
     )
-    from remotely.utils import _parse_fzf_version
     from remotely.state import _load_state, _mutate_state, _save_state
     from remotely.utils import (
         _parse_extensions,
+        _parse_fzf_version,
         _resolve_remote_path,
         _validate_exclude_pattern,
     )
@@ -565,9 +570,10 @@ class TestAssertNotSymlink(unittest.TestCase):
             target.mkdir()
             link = Path(d) / "link"
             link.symlink_to(target)
-            with self.assertRaises(SystemExit):
-                with contextlib.redirect_stderr(io.StringIO()):
-                    _assert_not_symlink(link)
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(
+                io.StringIO()
+            ):
+                _assert_not_symlink(link)
 
 
 # ---------------------------------------------------------------------------

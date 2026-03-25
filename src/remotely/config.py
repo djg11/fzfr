@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import FrozenSet
 
+
 CONFIG_PATH = Path.home() / ".config" / "remotely" / "config"
 
 # All supported overlay box positions.

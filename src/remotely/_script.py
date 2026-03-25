@@ -3,7 +3,7 @@
 This module has NO imports from other remotely submodules so it can be
 safely imported by any module without creating circular dependencies.
 
-Constants exported for use by remote.py and search.py:
+Constants exported:
 
     VERSION          -- human-readable version string
     SELF             -- absolute path to the built single-file remotely script
@@ -77,32 +77,47 @@ SCRIPT_BYTES = Path(SELF).read_bytes() if SELF else b""
 
 SCRIPT_HASH = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES else ""  # type: str
 
-# Bootstrap script sent to the remote on every preview call (~250 bytes).
-#
-# Checks /dev/shm/remotely/<hash>.py first (tmpfs, RAM-backed, preferred) then
-# ~/.cache/remotely/<hash>.py (persistent disk fallback on macOS and systems
-# without /dev/shm). On hit: runs the cached file directly as a path argument
-# -- one python3 process. On miss: exits 99 so _upload_remote_script() uploads
-# to exactly one of those locations and retries.
-#
-# PERF: Uses os.path.exists() only -- no file read, no hash computation on
-# the hot path. The hash embedded in the filename is the integrity check:
-# _upload_remote_script writes atomically (tmp -> rename) so the file at
-# that path is always either absent or complete. Reading and hashing 60KB on
-# every preview call adds measurable latency on low-latency (LAN) links where
-# the SSH RTT is only ~1ms, so the exists() check is deliberately kept cheap.
-SCRIPT_BOOTSTRAP = (
-    (
+
+def _build_bootstrap(script_hash):
+    # type: (str) -> bytes
+    """Build the bootstrap bytes with the hash value substituted in.
+
+    DESIGN: The bootstrap is sent to the remote via SSH stdin and executed
+    by the remote python3 as literal source code. The hash must therefore
+    be embedded as a literal string in the remote source -- it cannot be
+    an f-string referencing a local variable (SCRIPT_HASH is defined here
+    but is NOT defined on the remote when the bootstrap runs).
+
+    The substitution is done with .replace() on a bytes template so the
+    result is a plain Python script with the hash baked in as a constant,
+    not a reference to any local name.
+    """
+    if not script_hash:
+        return b""
+    template = (
         b"import sys,os,subprocess\n"
-        b'for p in[f"/dev/shm/remotely/{SCRIPT_HASH}.py",'
-        b'os.path.expanduser("~/.cache/remotely/{SCRIPT_HASH}.py")]:\n'
+        b"_h='__HASH__'\n"
+        b"for p in['/dev/shm/remotely/'+_h+'.py',"
+        b"os.path.expanduser('~/.cache/remotely/'+_h+'.py')]:\n"
         b"    if os.path.exists(p):\n"
         b"        sys.exit(subprocess.run([sys.executable,p]+sys.argv[1:]).returncode)\n"
         b"sys.exit(99)\n"
     )
-    if SCRIPT_HASH
-    else b""
-)  # type: bytes
+    return template.replace(b"__HASH__", script_hash.encode("ascii"))
+
+
+# Bootstrap script sent to the remote on every preview call (~250 bytes).
+#
+# Checks /dev/shm/remotely/<hash>.py first (tmpfs, RAM-backed, preferred) then
+# ~/.cache/remotely/<hash>.py (persistent disk fallback on macOS and systems
+# without /dev/shm). On hit: runs the cached file directly. On miss: exits 99
+# so _upload_remote_script() uploads and retries.
+#
+# PERF: Uses os.path.exists() only -- no file read, no hash computation on
+# the hot path. The hash embedded in the filename is the integrity check:
+# _upload_remote_script writes atomically (tmp -> rename) so the file at
+# that path is always either absent or complete.
+SCRIPT_BOOTSTRAP = _build_bootstrap(SCRIPT_HASH)  # type: bytes
 
 # Sentinel exit code: remote cache miss. Must not clash with remotely-preview's
 # own exit codes (0, 1, 127).

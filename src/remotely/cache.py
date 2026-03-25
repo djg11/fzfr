@@ -8,7 +8,6 @@ round-trip plus script transfer (remote).
 
 import hashlib
 import os
-import shlex
 from pathlib import Path
 
 from .utils import _capture, _shlex_join

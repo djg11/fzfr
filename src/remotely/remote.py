@@ -26,7 +26,6 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
-from typing import List
 
 from ._script import _BOOTSTRAP_CACHE_MISS, SCRIPT_BOOTSTRAP, SCRIPT_BYTES, SCRIPT_HASH
 from .ssh import _ssh_opts
@@ -119,7 +118,7 @@ class _RemoteReloadArgs:
         hidden=False,
         relative=False,
         exclude_patterns=None,
-        file_source="fd"
+        file_source="fd",
     ):
 
         self.remote = remote
@@ -244,7 +243,9 @@ def _upload_remote_script(ssh_prefix):
 def _remote_preview_run(ssh_prefix, remote_cmd, capture):
     # type: (List[str], str, bool) -> Union[Tuple[int, bytes], int]
     """Run a remote preview command using the bootstrap/upload/inline strategy."""
-    run_kwargs = {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE} if capture else {}  # type: dict
+    run_kwargs = (
+        {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE} if capture else {}
+    )  # type: dict
 
     def _run(input_bytes):
         # type: (bytes) -> subprocess.CompletedProcess

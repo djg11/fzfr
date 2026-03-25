@@ -91,17 +91,21 @@ def _open_remote(host: str, path: str, editor: str) -> int:
     # SSH_DEFERRED means ~/.ssh/config handles multiplexing.
     if sock and sock is not SSH_DEFERRED:
         ssh_opts = [
-            "-o", "ControlMaster=no",
-            "-o", f"ControlPath={sock}",
-            "-o", "ConnectTimeout=5",
+            "-o",
+            "ControlMaster=no",
+            "-o",
+            f"ControlPath={sock}",
+            "-o",
+            "ConnectTimeout=5",
         ]
     else:
         ssh_opts = []
 
     # Check MIME type to refuse binary files early.
     mime_result = subprocess.run(
-        ["ssh"] + ssh_opts + [host,
-            f"file -L --mime-type -b {shlex.quote(path)} 2>/dev/null"],
+        ["ssh"]
+        + ssh_opts
+        + [host, f"file -L --mime-type -b {shlex.quote(path)} 2>/dev/null"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -189,9 +193,7 @@ def cmd_open_headless(argv: list) -> int:
     if path.startswith("~"):
         path = _resolve_remote_path(host, path, ssh_control)
         if not path:
-            print(
-                f"remotely open: could not resolve path on {host}", file=sys.stderr
-            )
+            print(f"remotely open: could not resolve path on {host}", file=sys.stderr)
             return 1
 
     return _open_remote(host, path, editor)

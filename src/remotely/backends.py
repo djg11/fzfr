@@ -22,7 +22,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List
 
 from .cache import _PreviewCache
 from .ssh import _ssh_opts
