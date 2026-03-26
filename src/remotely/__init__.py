@@ -1,5 +1,5 @@
 """
-remotely - Fuzzy file search for local and remote filesystems.
+remotely - Zero-install SSH file transport for fuzzy-finders (fzf, Television, etc.).
 
 Architecture overview
 ---------------------
@@ -13,63 +13,72 @@ every sub-command. It can be invoked in two ways:
 Call graph (headless API)
 --------------------------
   remotely list user@host:/path
-    -> acquire_socket(host)  [session.py]
-    -> ssh host fd ...       [list.py -> remote.py]
+    -> get_session_dir() / ensure_reaper()  [session.py]
+    -> acquire_socket(host)                 [session.py]
+    -> ssh host fd ...                      [list.py -> remote.py]
 
   remotely preview user@host:/path [query]
+    -> get_session_dir() / ensure_reaper()
     -> acquire_socket(host)
-    -> cmd_remote_preview    [preview_cmd.py -> remote.py]
+    -> cache check (session_dir/preview/)   [cache.py]
+    -> _cmd_remote_preview_capture          [preview_cmd.py -> remote.py]
+    -> cache store
 
   remotely open user@host:/path
+    -> get_session_dir() / ensure_reaper()
     -> acquire_socket(host)
-    -> ssh cat -> $EDITOR -> scp back  [open_cmd.py]
+    -> text:   ssh cat -> $EDITOR -> scp back       [open_cmd.py]
+    -> binary: stat + OOM check -> stream to cache
+               -> xdg-open detached                 [open_cmd.py]
+
+  remotely gc
+    -> gc_stale_sessions()                          [session.py]
+
+Session lifecycle
+-----------------
+Each remotely invocation calls get_session_dir(anchor_pid=os.getppid()).
+All invocations spawned by the same fzf process share the same anchor PID
+and therefore the same session directory.
+
+ensure_reaper() spawns a detached background process (double-fork) that
+polls os.kill(anchor_pid, 0) every 2 seconds.  When the shell exits the
+reaper removes the session directory and closes any ControlMaster sockets.
 
 SSH connection multiplexing
 ---------------------------
-By default remotely passes NO extra flags to ssh, deferring entirely to
-~/.ssh/config. If that config already has ControlMaster/ControlPath, all
-calls reuse the existing master connection.
-
-If you do NOT have multiplexing in your ssh config, enable it here:
+By default remotely passes NO extra flags to ssh (SSH_DEFERRED), deferring
+entirely to ~/.ssh/config.  Enable managed multiplexing with:
 
   ~/.config/remotely/config:
-    {
-      "ssh_multiplexing": true
-    }
+    { "ssh_multiplexing": true }
 
-WARNING: do NOT set ssh_multiplexing: true if your ~/.ssh/config already
-has ControlMaster/ControlPath. The conflicting sockets will trigger
-spurious key prompts (e.g. YubiKey touch) on every cursor move.
+WARNING: do NOT set ssh_multiplexing: true if ~/.ssh/config already has
+ControlMaster.  Conflicting sockets trigger spurious auth prompts.
 
 Quoting discipline
 ------------------
-Three quoting strategies are used deliberately:
-
-  list-form subprocess  ->  ["cmd", "--flag", path]
-                            Zero quoting needed for LOCAL calls.
-
-  shlex.join()          ->  shlex.join(["realpath", "-e", "--", path])
-                            REQUIRED for all SSH remote commands.
-
-  shlex.quote()         ->  for individual tokens within remote commands.
+  list-form subprocess  ->  ["cmd", "--flag", path]    local calls
+  shlex.join()          ->  for SSH remote commands
+  shlex.quote()         ->  for individual tokens in remote commands
 
 Source layout
 -------------
-  _script.py    VERSION, SELF, SCRIPT_BYTES
-  utils.py      subprocess helpers, MIME detection, extension parsing, SSH path
-  workbase.py   session working directory (prefers /dev/shm)
-  config.py     defaults and user config loading
-  ssh.py        SSH option construction
-  session.py    host-keyed SSH session manager
-  state.py      session state load/save/mutate
-  cache.py      preview output cache
-  archive.py    archive format detection and listing
-  backends.py   LocalBackend, RemoteBackend
-  preview.py    file preview rendering
-  remote.py     SSH remote search and preview
-  list.py       remotely list headless sub-command
-  preview_cmd.py  remotely preview headless sub-command
-  open_cmd.py   remotely open headless sub-command
+  _script.py     VERSION, SELF, SCRIPT_BYTES
+  utils.py       subprocess helpers, MIME detection, extension parsing, SSH path
+  workbase.py    session working directory (prefers /dev/shm)
+  config.py      defaults and user config loading
+  ssh.py         SSH option construction
+  session.py     anchor-PID session manager, reaper, SSH sockets
+  state.py       session state load/save/mutate
+  cache.py       per-session file-backed LRU preview cache
+  archive.py     archive format detection and listing
+  backends.py    LocalBackend, RemoteBackend
+  preview.py     file preview rendering
+  remote.py      SSH remote search and preview
+  list.py        remotely list headless sub-command
+  preview_cmd.py remotely preview headless sub-command
+  open_cmd.py    remotely open headless sub-command (text + binary)
+  gc.py          remotely gc sub-command
 """
 
 import ctypes
@@ -84,6 +93,7 @@ from ._script import (
     SELF,
     VERSION,
 )
+from .gc import cmd_gc
 from .list import cmd_list
 from .open_cmd import cmd_open_headless
 from .preview import cmd_preview
@@ -112,6 +122,8 @@ COMMAND_MAP = {
     # -- Remote sub-commands (called by headless API) --
     "remotely-remote-reload": cmd_remote_reload,
     "remotely-remote-preview": cmd_remote_preview,
+    # -- Maintenance --
+    "gc": cmd_gc,
 }
 
 
@@ -136,7 +148,6 @@ def main():
     elif len(sys.argv) > 1 and sys.argv[1] in COMMAND_MAP:
         fn, args = COMMAND_MAP[sys.argv[1]], sys.argv[2:]
     else:
-        # Default to `remotely list` when invoked with no recognised sub-command.
         fn, args = cmd_list, sys.argv[1:]
 
     sys.exit(fn(args))

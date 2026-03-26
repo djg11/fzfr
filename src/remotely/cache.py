@@ -1,121 +1,163 @@
-"""remotely.cache -- Preview output cache keyed on (path, mtime, query).
+"""remotely.cache -- Per-session file-backed LRU preview cache.
 
-_PreviewCache stores the rendered bytes that would be written to stdout by
-the preview renderer (bat, cat, rga, or the remote SSH preview). On a hit the
-bytes are replayed directly, saving a subprocess spawn (local) or an SSH
-round-trip plus script transfer (remote).
+Cache directory: <session_dir>/preview/
+Cache key:       "local:<path>:<mtime_ns>:<query>"
+                 "remote:<host>:<path>:<mtime_epoch>:<query>"
+Cache entry:     raw bytes written to stdout by the preview renderer.
+
+On a hit the bytes are replayed to stdout directly, saving:
+  - a subprocess spawn + disk read for local previews
+  - an SSH round-trip + script transfer for remote previews
+
+Eviction: LRU by file atime.  When the entry count exceeds MAX_ENTRIES the
+oldest entry (by atime) is deleted before the new entry is written.
+
+The session directory is created and managed by session.py.  The cache is
+automatically cleaned up by the reaper when the anchor shell exits.
 """
 
 import hashlib
 import os
 from pathlib import Path
+from typing import Optional
 
 from .utils import _capture, _shlex_join
 
 
+MAX_ENTRIES = 200
+
+
+def _cache_dir() -> Path:
+    """Return (and create) the preview cache directory for this session.
+
+    DESIGN: get_session_dir is imported inside this function to break the
+    cache->session->config/workbase import cycle at module load time.
+    The try/except ImportError pattern is the established pattern for
+    circular-import resolution in the flat built file (see backends.py).
+    """
+    # fmt: off
+    try:
+        from .session import get_session_dir
+    except ImportError:
+        get_session_dir = globals()["get_session_dir"]  # flat built file
+    # fmt: on
+    d = get_session_dir() / "preview"
+    d.mkdir(mode=0o700, exist_ok=True)
+    return d
+
+
+def _entry_path(cache_key: str) -> Path:
+    h = hashlib.blake2b(cache_key.encode(), digest_size=16).hexdigest()
+    return _cache_dir() / h
+
+
+def _evict_if_needed(cache_d: Path) -> None:
+    """Remove the LRU entry when MAX_ENTRIES is exceeded."""
+    try:
+        entries = list(cache_d.iterdir())
+        if len(entries) < MAX_ENTRIES:
+            return
+        oldest = min(entries, key=lambda p: p.stat().st_atime)
+        try:
+            oldest.unlink()
+        except (FileNotFoundError, OSError):
+            pass
+    except OSError:
+        pass
+
+
+def get(cache_key: str) -> Optional[bytes]:
+    """Return cached bytes for cache_key, or None on miss."""
+    try:
+        p = _entry_path(cache_key)
+        data = p.read_bytes()
+        p.touch()  # update atime for LRU ordering
+        return data
+    except OSError:
+        return None
+
+
+def put(cache_key: str, data: bytes) -> None:
+    """Store data under cache_key, evicting the LRU entry if needed."""
+    if not data:
+        return
+    try:
+        cache_d = _cache_dir()
+        _evict_if_needed(cache_d)
+        h = hashlib.blake2b(cache_key.encode(), digest_size=16).hexdigest()
+        (cache_d / h).write_bytes(data)
+    except OSError:
+        pass  # cache write failure is non-fatal; preview still rendered
+
+
+def local_mtime(path: str) -> Optional[int]:
+    """Return nanosecond mtime for a local path, or None if stat fails."""
+    try:
+        return os.stat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def remote_mtime(ssh_prefix, path: str) -> Optional[str]:
+    # type: (list, str) -> Optional[str]
+    """Return mtime string for a remote path, or None on failure.
+
+    Tries Linux stat -c %Y first, then macOS/BSD stat -f %m.
+    """
+    out, rc = _capture(ssh_prefix + [_shlex_join(["stat", "-c", "%Y", path])])
+    if rc == 0 and out.strip():
+        return out.strip()
+    out, rc = _capture(ssh_prefix + [_shlex_join(["stat", "-f", "%m", path])])
+    return out.strip() if rc == 0 and out.strip() else None
+
+
+def local_cache_key(path: str, mtime: int, query: str) -> str:
+    return "local:" + path + ":" + str(mtime) + ":" + query
+
+
+def remote_cache_key(host: str, path: str, mtime: str, query: str) -> str:
+    return "remote:" + host + ":" + path + ":" + mtime + ":" + query
+
+
+# ---------------------------------------------------------------------------
+# Compat shim -- backends.py instantiates _PreviewCache.
+# Delegates to the module-level functions above.
+# ---------------------------------------------------------------------------
+
+
 class _PreviewCache:
-    """File-backed preview output cache keyed on (path, mtime_ns, query).
+    """Backwards-compatible wrapper used by backends.py.
 
-    Each cache entry is the raw bytes that would be written to stdout by the
-    preview renderer (bat, cat, rga, or the remote SSH preview). On a cache
-    hit the bytes are replayed to stdout directly, saving the subprocess
-    spawn (local) or SSH round-trip + ~60 KB script transfer (remote).
-
-    Storage: one file per entry under <session_dir>/preview-cache/.
-    The directory is inside the existing session dir so it is automatically
-    cleaned up on session exit by the existing _cleanup() logic.
-
-    Eviction: LRU by file mtime. When the entry count exceeds MAX_ENTRIES
-    the oldest entry (by atime/mtime) is deleted before writing the new one.
-    With typical previews of 2-20 KB and MAX_ENTRIES=200 the cache stays
-    well under 5 MB.
-
-    Thread-safety: each fzf callback runs in its own process (fzf spawns a
-    new python3 for every preview), so there are no concurrent writes from
-    the same session. Multiple sessions have distinct cache dirs.
+    The session_dir constructor argument is accepted but ignored -- the
+    cache directory is now derived from the anchor PID via session.py.
     """
 
-    MAX_ENTRIES = 200
+    MAX_ENTRIES = MAX_ENTRIES
 
-    def __init__(self, session_dir):
-        # type: (Path) -> None
-        self._dir = session_dir / "preview-cache"
-        self._dir.mkdir(mode=0o700, exist_ok=True)
+    def __init__(self, session_dir=None):
+        # session_dir ignored; kept for API compatibility
+        pass
 
     @staticmethod
     def _local_mtime(path):
         # type: (str) -> Optional[int]
-        """Return nanosecond mtime for a local path, or None if stat fails."""
-        try:
-            return os.stat(path).st_mtime_ns
-        except OSError:
-            return None
+        return local_mtime(path)
 
     @staticmethod
     def _remote_mtime(ssh_prefix, path):
         # type: (list, str) -> Optional[str]
-        """Return mtime string for a remote path via stat, or None on failure.
-
-        Tries Linux stat first (stat -c %Y), then macOS/BSD stat (stat -f %m).
-        Both return seconds since epoch, sufficient for cache key uniqueness.
-        """
-        # Linux: stat -c %Y (seconds since epoch)
-        out, rc = _capture(ssh_prefix + [_shlex_join(["stat", "-c", "%Y", path])])
-        if rc == 0 and out.strip():
-            return out.strip()
-        # macOS / BSD: stat -f %m (seconds since epoch, same meaning)
-        out, rc = _capture(ssh_prefix + [_shlex_join(["stat", "-f", "%m", path])])
-        return out.strip() if rc == 0 and out.strip() else None
-
-    def _entry_path(self, cache_key):
-        # type: (str) -> Path
-        """Return the Path for a cache entry given its string key."""
-        h = hashlib.blake2b(cache_key.encode(), digest_size=16).hexdigest()
-        return self._dir / h
+        return remote_mtime(ssh_prefix, path)
 
     def get(self, cache_key):
         # type: (str) -> Optional[bytes]
-        """Return cached bytes for cache_key, or None on miss/error."""
-        p = self._entry_path(cache_key)
-        try:
-            data = p.read_bytes()
-            # Touch atime for LRU ordering.
-            p.touch()
-            return data
-        except OSError:
-            return None
+        return get(cache_key)
 
     def put(self, cache_key, data):
         # type: (str, bytes) -> None
-        """Store data under cache_key, evicting the oldest entry if needed."""
-        if not data:
-            return
-        try:
-            entries = list(self._dir.iterdir())
-            if len(entries) >= self.MAX_ENTRIES:
-                # Evict the entry with the oldest modification time.
-                oldest = min(entries, key=lambda p: p.stat().st_mtime)
-                try:
-                    oldest.unlink()
-                except (FileNotFoundError, OSError):
-                    pass
-            self._entry_path(cache_key).write_bytes(data)
-        except OSError:
-            pass  # Cache write failure is non-fatal; preview still rendered.
+        put(cache_key, data)
 
     @classmethod
     def from_state(cls, state):
-        # type: (dict) -> Optional["_PreviewCache"]
-        """Construct a cache from the persisted state dict, or None if unavailable.
-
-        Derives the session dir from self_path (session_dir/remotely-frozen.py).
-        Returns None when self_path is absent (e.g. stdin-mode invocations) so
-        callers can treat None as "cache disabled" without special-casing.
-        """
-        self_path_str = state.get("self_path", "")
-        if not self_path_str or self_path_str == "None":
-            return None
-        try:
-            return cls(Path(self_path_str).parent)
-        except OSError:
-            return None
+        # type: (dict) -> "_PreviewCache"
+        """Always returns a live cache -- no longer depends on session state."""
+        return cls()

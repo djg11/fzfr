@@ -33,6 +33,7 @@ MODULE_ORDER = [
     "list",
     "preview_cmd",
     "open_cmd",
+    "gc",
 ]
 
 # Multi-line intra-package imports (from .X import ... or from remotely.X import ...)
@@ -128,7 +129,7 @@ def _get_module_doc():
     except SyntaxError:
         pass
     tq = chr(34) * 3
-    return tq + "remotely - Fuzzy file search for local and remote filesystems." + tq
+    return tq + "remotely - Zero-install SSH file transport for fuzzy-finders." + tq
 
 
 def build():
@@ -187,7 +188,9 @@ def build():
         output,
     )
 
-    # Safety pass: strip any remaining relative imports that slipped through
+    # Safety pass: strip any remaining relative imports that slipped through.
+    # EXCEPTION: the late import in cache.py (_cache_dir imports get_session_dir)
+    # is intentional and handled by the try/except ImportError pattern above.
     output = re.sub(r"^[ \t]*from \.[^\n]+\n", "", output, flags=re.MULTILINE)
 
     try:
