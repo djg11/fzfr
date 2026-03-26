@@ -5,6 +5,9 @@ __pycache__/
 dist/
 build/
 
+# coverage
+.coverage
+
 # /remotely is the built monolith script.
 /remotely
 /remotely.py

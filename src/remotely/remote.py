@@ -1,24 +1,26 @@
 """remotely.remote -- SSH remote search and preview sub-commands.
 
-Two public entry points:
+Public entry points
+-------------------
+cmd_remote_reload    Run fd (or git ls-files) on a remote host and stream
+                     results to stdout. Called once at startup and on every
+                     reload keystroke.
 
-    cmd_remote_reload   -- runs fd (or git ls-files) on the remote host and
-                          streams results back to local fzf as its item list.
-                          Called once at startup and on every reload keystroke.
+cmd_remote_preview   Preview a single remote file. Uses a two-phase bootstrap
+                     to minimise data transfer:
+                       1. Send SCRIPT_BOOTSTRAP (~250 bytes), which checks the
+                          remote script cache at /dev/shm/remotely/<hash>.py
+                          then ~/.cache/remotely/<hash>.py.
+                       2. On cache miss (exit 99), upload the full script once
+                          via _upload_remote_script(), then retry.
+                     After the first call, all subsequent calls send only the
+                     250-byte bootstrap.
 
-    cmd_remote_preview  -- previews a single remote file. Uses a two-phase
-                          bootstrap to avoid sending the full ~60 KB script on
-                          every cursor movement:
-                            1. Send SCRIPT_BOOTSTRAP (~250 bytes) which checks
-                               /dev/shm/remotely/<hash>.py then ~/.cache/remotely/<hash>.py.
-                            2. On cache miss (exit 99), upload the full script
-                               once via _upload_remote_script(), then retry.
-                          After the first preview call, all subsequent calls
-                          hit the remote cache and transfer ~250 bytes.
-
-The remote host only needs python3 and fd in its PATH. No installation or
-file copying is required beyond the automatic bootstrap on first use.
-git is optional -- only needed when file_source="git" is configured.
+Remote requirements
+-------------------
+Only ``python3`` and ``fd`` need to be in PATH on the remote host. No prior
+installation or configuration is required beyond the automatic first-use
+bootstrap. ``git`` is optional and only used when file_source="git".
 """
 
 import re
@@ -32,16 +34,21 @@ from .ssh import _ssh_opts
 from .utils import _parse_extensions, _shlex_join, _validate_exclude_pattern
 
 
+# ---------------------------------------------------------------------------
+# Remote command construction
+# ---------------------------------------------------------------------------
+
+
 def _build_remote_cmd(fd_args, rga_glob_args, query, base_path, relative):
     # type: (List[str], List[str], str, str, bool) -> str
-    """Build the shell command string to run on the remote host via SSH.
+    """Build a shell command string to run on the remote host via SSH.
 
-    Returns a shell fragment safe to pass as the final argument to ssh.
-    All tokens are built with shlex.join / shlex.quote so no injection
-    is possible from unusual base_path, query, or extension values.
+    Returns a fragment safe to pass as the final argument to ssh. All tokens
+    are built with shlex.join / shlex.quote so base_path, query, and extension
+    values cannot inject shell commands.
 
-    relative=True  -- cd to base_path first; output paths are relative.
-    relative=False -- pass base_path directly; output paths are absolute.
+    relative=True  -- ``cd`` to base_path first; output paths are relative.
+    relative=False -- pass base_path as the fd search root; output is absolute.
     """
     safe_base = shlex.quote(base_path)
     fd_cmd = _shlex_join(fd_args)
@@ -76,18 +83,22 @@ def _build_remote_cmd(fd_args, rga_glob_args, query, base_path, relative):
 
 def _build_git_remote_cmd(hidden, exclude_patterns, base_path, relative, ext=""):
     # type: (bool, List[str], str, bool, str) -> str
-    """Build a git ls-files shell command for the remote host."""
+    """Build a ``git ls-files`` command string for the remote host."""
     safe_base = shlex.quote(base_path)
+
     git_args = ["git", "ls-files", "-c"]
     if hidden:
         git_args += ["--others", "--exclude-standard"]
-    for p in exclude_patterns:
-        if _validate_exclude_pattern(p):
-            git_args += ["--exclude", shlex.quote(p)]
+
+    for pattern in exclude_patterns:
+        if _validate_exclude_pattern(pattern):
+            git_args += ["--exclude", shlex.quote(pattern)]
+
     exts = _parse_extensions(ext)
     if exts:
         git_args.append("--")
         git_args.extend(f"*.{e}" for e in exts)
+
     git_cmd = _shlex_join(git_args)
 
     if relative:
@@ -95,13 +106,54 @@ def _build_git_remote_cmd(hidden, exclude_patterns, base_path, relative, ext="")
             f"cd {safe_base} 2>/dev/null && {git_cmd} "
             "|| { echo 'Error: cannot access git repository' >&2; exit 1; }"
         )
-    awk_cmd = _shlex_join(
-        ["awk", '{{print "{}/{}" $0}}'.format(base_path.rstrip("/"), "")]
-    )
+
+    # Absolute mode: stay out of the shell cwd and prefix the repo path to each line.
+    base_prefix = base_path.rstrip("/")
+    awk_cmd = _shlex_join(["awk", "-v", f"base={base_prefix}", '{print base "/" $0}'])
+
+    git_cmd_abs = _shlex_join(["git", "-C", base_path] + git_args[1:])
+
     return (
-        f"cd {safe_base} 2>/dev/null && {git_cmd} | {awk_cmd} "
+        f"{git_cmd_abs} | {awk_cmd} "
         "|| { echo 'Error: cannot access git repository' >&2; exit 1; }"
     )
+
+
+def _build_fd_rga_args(ftype, ext, hidden, exclude_patterns):
+    # type: (str, str, bool, List[str]) -> Tuple[List[str], List[str]]
+    """Build fd and rga argument lists from shared search parameters.
+
+    Returns (fd_args, rga_glob_args) -- two parallel argument lists that
+    encode the same search constraints (hidden flag, extensions, excludes)
+    in the syntax each tool expects.
+    """
+    fd_args = ["fd", "-L", "--type", ftype]  # type: List[str]
+    rga_glob_args = []  # type: List[str]
+
+    if hidden:
+        fd_args.append("--hidden")
+        rga_glob_args.append("--hidden")
+
+    for ext_item in _parse_extensions(ext):
+        fd_args += ["-e", ext_item]
+        rga_glob_args += ["-g", f"*.{ext_item}"]
+
+    for pattern in exclude_patterns:
+        if not _validate_exclude_pattern(pattern):
+            print(
+                f"Warning: ignoring unsafe exclude pattern {pattern!r}",
+                file=sys.stderr,
+            )
+            continue
+        fd_args += ["-E", pattern]
+        rga_glob_args += ["--exclude", pattern]
+
+    return fd_args, rga_glob_args
+
+
+# ---------------------------------------------------------------------------
+# Argument parser for cmd_remote_reload
+# ---------------------------------------------------------------------------
 
 
 class _RemoteReloadArgs:
@@ -120,7 +172,6 @@ class _RemoteReloadArgs:
         exclude_patterns=None,
         file_source="fd",
     ):
-
         self.remote = remote
         self.base_path = base_path
         self.ssh_control = ssh_control
@@ -135,11 +186,12 @@ class _RemoteReloadArgs:
 
 def _parse_remote_reload_args(argv):
     # type: (List[str]) -> Optional[_RemoteReloadArgs]
-    """Parse argv for cmd_remote_reload. Returns None on error."""
+    """Parse argv for cmd_remote_reload. Returns None and prints usage on error."""
     if len(argv) < 5:
         print(
-            "Usage: remotely-remote-reload <remote> <base_path> <ssh_control> <type> <ext> "
-            "[query] [--hidden] [--relative] [--exclude <pattern> ...] [--file-source=git]",
+            "Usage: remotely-remote-reload <remote> <base_path> <ssh_control> "
+            "<type> <ext> [query] [--hidden] [--relative] "
+            "[--exclude <pattern> ...] [--file-source=git]",
             file=sys.stderr,
         )
         return None
@@ -167,32 +219,18 @@ def _parse_remote_reload_args(argv):
     return args
 
 
-def _build_fd_rga_args(ftype, ext, hidden, exclude_patterns):
-    # type: (str, str, bool, List[str]) -> Tuple[List[str], List[str]]
-    """Build fd and rga argument lists from shared search parameters."""
-    fd_args = ["fd", "-L", "--type", ftype]  # type: List[str]
-    rga_glob_args = []  # type: List[str]
-    if hidden:
-        fd_args.append("--hidden")
-        rga_glob_args.append("--hidden")
-    for e in _parse_extensions(ext):
-        fd_args += ["-e", e]
-        rga_glob_args += ["-g", f"*.{e}"]
-    for p in exclude_patterns:
-        if not _validate_exclude_pattern(p):
-            print(
-                f"Warning: ignoring unsafe exclude pattern {p!r}",
-                file=sys.stderr,
-            )
-            continue
-        fd_args += ["-E", p]
-        rga_glob_args += ["--exclude", p]
-    return fd_args, rga_glob_args
+# ---------------------------------------------------------------------------
+# Entry points
+# ---------------------------------------------------------------------------
 
 
 def cmd_remote_reload(argv):
     # type: (List[str]) -> int
-    """Entry point for the remotely-remote-reload sub-command."""
+    """Entry point for the remotely-remote-reload sub-command.
+
+    Runs fd or git ls-files on the remote host and streams the file list
+    to stdout for fzf to consume.
+    """
     args = _parse_remote_reload_args(argv)
     if args is None:
         return 1
@@ -215,11 +253,25 @@ def cmd_remote_reload(argv):
     return r.returncode
 
 
+# ---------------------------------------------------------------------------
+# Script upload and remote preview execution
+# ---------------------------------------------------------------------------
+
+
 def _upload_remote_script(ssh_prefix):
     # type: (List[str]) -> bool
-    """Upload SCRIPT_BYTES to the remote script cache in one SSH call."""
+    """Upload the full remotely script to the remote cache in one SSH call.
+
+    Writes to a temp file then atomically renames to the final path so the
+    remote bootstrap's os.path.exists() check never sees a partial upload.
+
+    SECURITY: SCRIPT_HASH is verified as a 16-char hex string before
+    interpolation to ensure the generated shell commands cannot be injected
+    via a crafted hash value.
+    """
     if not SCRIPT_BYTES or not SCRIPT_HASH:
         return False
+
     assert re.fullmatch(r"[0-9a-f]{16}", SCRIPT_HASH), (
         f"Unexpected SCRIPT_HASH format: {SCRIPT_HASH!r}"
     )
@@ -242,7 +294,17 @@ def _upload_remote_script(ssh_prefix):
 
 def _remote_preview_run(ssh_prefix, remote_cmd, capture):
     # type: (List[str], str, bool) -> Union[Tuple[int, bytes], int]
-    """Run a remote preview command using the bootstrap/upload/inline strategy."""
+    """Execute a remote preview command via the bootstrap / upload / inline strategy.
+
+    Three-phase execution:
+      1. Send SCRIPT_BOOTSTRAP -- hit: return immediately.
+      2. On cache miss (exit 99): upload the script and retry the bootstrap.
+      3. If upload fails or bootstrap is unavailable: fall back to sending
+         the full SCRIPT_BYTES inline (slow but always works).
+
+    Returns (returncode, stdout_bytes) when capture=True, or just returncode
+    when capture=False.
+    """
     run_kwargs = (
         {"stdout": subprocess.PIPE, "stderr": subprocess.PIPE} if capture else {}
     )  # type: dict
@@ -253,7 +315,7 @@ def _remote_preview_run(ssh_prefix, remote_cmd, capture):
             ssh_prefix + [remote_cmd], input=input_bytes, **run_kwargs
         )
 
-    def _emit(r):
+    def _result(r):
         # type: (subprocess.CompletedProcess) -> Union[Tuple[int, bytes], int]
         if capture:
             return r.returncode, r.stdout
@@ -262,19 +324,24 @@ def _remote_preview_run(ssh_prefix, remote_cmd, capture):
     if SCRIPT_BOOTSTRAP:
         r = _run(SCRIPT_BOOTSTRAP)
         if r.returncode == 0:
-            return _emit(r)
+            return _result(r)
         if r.returncode == _BOOTSTRAP_CACHE_MISS and _upload_remote_script(ssh_prefix):
             r = _run(SCRIPT_BOOTSTRAP)
             if r.returncode == 0:
-                return _emit(r)
+                return _result(r)
 
+    # Fallback: pipe the full script bytes. Slower but always available.
     r = _run(SCRIPT_BYTES)
-    return _emit(r)
+    return _result(r)
 
 
 def _cmd_remote_preview_capture(argv):
     # type: (List[str]) -> Tuple[int, bytes]
-    """Capturing variant of cmd_remote_preview -- returns (rc, stdout_bytes)."""
+    """Capturing variant of cmd_remote_preview -- returns (returncode, stdout_bytes).
+
+    Used by preview_cmd.py and backends.py when the caller needs to store
+    the preview output in the cache before writing it to stdout.
+    """
     if len(argv) < 4:
         return 1, b""
     remote, base_path, ssh_control, filename = argv[0], argv[1], argv[2], argv[3]
@@ -294,13 +361,22 @@ def _cmd_remote_preview_capture(argv):
 
 def cmd_remote_preview(argv):
     # type: (List[str]) -> int
-    """Entry point for the remotely-remote-preview sub-command."""
+    """Entry point for the remotely-remote-preview sub-command.
+
+    Previews a single remote file by running the remotely-preview sub-command
+    on the remote host via the bootstrap / upload / inline strategy.
+
+    Usage:
+        remotely-remote-preview <remote> <base_path> <ssh_control> <filename> [query]
+    """
     if len(argv) < 4:
         print(
-            "Usage: remotely-remote-preview <remote> <base_path> <ssh_control> <filename> [query]",
+            "Usage: remotely-remote-preview <remote> <base_path> "
+            "<ssh_control> <filename> [query]",
             file=sys.stderr,
         )
         return 1
+
     remote, base_path, ssh_control, filename = argv[0], argv[1], argv[2], argv[3]
     query = argv[4] if len(argv) > 4 else ""
 

@@ -1,16 +1,19 @@
-"""remotely._script -- VERSION and script-self-reference constants.
+"""remotely._script -- VERSION constant and script self-reference.
 
-This module has NO imports from other remotely submodules so it can be
-safely imported by any module without creating circular dependencies.
+This module is imported by every other remotely module, so it must have
+NO imports from other remotely submodules to avoid circular dependencies.
 
-Constants exported:
-
-    VERSION          -- human-readable version string
-    SELF             -- absolute path to the built single-file remotely script
-    SCRIPT_BYTES     -- full contents of the built script (read once at startup)
-    SCRIPT_HASH      -- 16-char hex SHA-256 prefix of SCRIPT_BYTES
-    SCRIPT_BOOTSTRAP -- tiny bootstrap sent to the remote on every preview call
-    _BOOTSTRAP_CACHE_MISS -- sentinel exit code meaning the remote cache is cold
+Exported constants
+------------------
+VERSION          -- human-readable version string, e.g. "0.9.5"
+SELF             -- absolute path to the built single-file remotely script,
+                   or None when running without a built file
+SCRIPT_BYTES     -- full contents of the built script (read once at startup)
+SCRIPT_HASH      -- 16-char hex SHA-256 prefix of SCRIPT_BYTES; used as the
+                   remote cache filename stem
+SCRIPT_BOOTSTRAP -- ~250-byte Python script sent to the remote host on every
+                   preview call to check the local cache before uploading
+_BOOTSTRAP_CACHE_MISS -- sentinel exit code (99) meaning "remote cache miss"
 """
 
 import hashlib
@@ -20,7 +23,6 @@ from pathlib import Path
 
 VERSION = "0.9.5"
 
-
 _SHEBANG = b"#!/usr/bin/env python3"
 
 
@@ -28,8 +30,10 @@ def _is_built_script(path):
     # type: (Path) -> bool
     """Return True if path is the built single-file remotely script.
 
-    Checks for the shebang line rather than file size -- size thresholds are
-    fragile as the codebase grows or shrinks.
+    Identifies the built file by its shebang line rather than by size or
+    name -- size thresholds break as the codebase grows, and the filename
+    varies between the installed ``remotely`` binary and ``remotely.py``
+    used during PyPI packaging.
     """
     try:
         with path.open("rb") as f:
@@ -40,24 +44,30 @@ def _is_built_script(path):
 
 def _find_self():
     # type: () -> Optional[str]
-    """Locate the built single-file remotely script.
+    """Locate the built single-file remotely script and return its path.
 
-    When running from the built file: returns __file__ (the script itself).
-    When running from the src/ package: walks up to the repo root to find
-    the built remotely, so SCRIPT_BYTES contains the full script for SSH remote
-    preview. Falls back to __file__ if the built file is absent.
+    Search order:
+      1. ``__file__`` itself -- when running from the built monolith.
+      2. Two levels up from ``__file__`` (``src/remotely/`` -> repo root) --
+         when running from the ``src/`` package during development.
+      3. Falls back to ``__file__`` with a warning if no built file is found.
+         Local search still works; SSH remote preview will transfer the wrong
+         (package) file and likely fail on the remote.
+
+    Returns None only if no file exists at all (e.g. running via stdin).
     """
     here = Path(__file__).resolve()
     if _is_built_script(here):
         return str(here)
-    # Package: look for the built remotely two levels up (src/remotely/ -> repo root)
+
+    # Development layout: src/remotely/_script.py -> repo root / remotely
     built = here.parent.parent.parent / "remotely"
     if _is_built_script(built):
         return str(built)
-    # Fallback: running from src/ without a built file.
-    # Local search works fine; SSH remote preview will send the wrong script.
+
     print(
-        "remotely: warning: built remotely not found -- run 'make build' for SSH remote preview.",
+        "remotely: warning: built script not found -- "
+        "run 'make build' to enable SSH remote preview.",
         file=sys.stderr,
     )
     return str(here) if here.exists() else None
@@ -65,35 +75,33 @@ def _find_self():
 
 SELF = _find_self()
 
-# PERF:     Read once at import time and reused for every remotely-remote-preview
-#           call. Without caching, each cursor movement would read ~60 KB from
-#           disk at fzf's typical 50-100 ms preview latency budget.
+# PERF: Read once at import time and reused for every SSH remote preview call.
+#       Without caching each cursor movement would re-read ~100 KB from disk.
 # SECURITY: Snapshot is taken at process start. Replacing the source file on
-#           disk after launch has no effect on the running session.
-# LIMITATION: If this script is executed via 'python3 -' (stdin), SELF is None
-#             and SCRIPT_BYTES is empty. Remote callbacks then have no script to
-#             pipe and will silently produce no preview output.
+#           disk mid-session has no effect on the running process.
 SCRIPT_BYTES = Path(SELF).read_bytes() if SELF else b""
 
+# 16-char hex prefix of the SHA-256 of the script. Used as the remote cache
+# filename stem so the remote host can identify a cached copy without reading
+# or hashing the file contents (the name IS the integrity check).
 SCRIPT_HASH = hashlib.sha256(SCRIPT_BYTES).hexdigest()[:16] if SCRIPT_BYTES else ""  # type: str
 
 
 def _build_bootstrap(script_hash):
     # type: (str) -> bytes
-    """Build the bootstrap bytes with the hash value substituted in.
+    """Return the bootstrap script with script_hash substituted in.
 
-    DESIGN: The bootstrap is sent to the remote via SSH stdin and executed
-    by the remote python3 as literal source code. The hash must therefore
-    be embedded as a literal string in the remote source -- it cannot be
-    an f-string referencing a local variable (SCRIPT_HASH is defined here
-    but is NOT defined on the remote when the bootstrap runs).
+    DESIGN: The bootstrap is piped to the remote python3 via SSH stdin and
+    executed as literal source code. The hash must therefore be a string
+    literal baked into the script -- it cannot reference a Python variable
+    that only exists on the local side.
 
-    The substitution is done with .replace() on a bytes template so the
-    result is a plain Python script with the hash baked in as a constant,
-    not a reference to any local name.
+    Uses bytes.replace() on a template rather than an f-string so the
+    result is always a plain, self-contained Python script.
     """
     if not script_hash:
         return b""
+
     template = (
         b"import sys,os,subprocess\n"
         b"_h='__HASH__'\n"
@@ -106,19 +114,18 @@ def _build_bootstrap(script_hash):
     return template.replace(b"__HASH__", script_hash.encode("ascii"))
 
 
-# Bootstrap script sent to the remote on every preview call (~250 bytes).
+# Bootstrap sent to the remote on every preview call (~250 bytes).
 #
-# Checks /dev/shm/remotely/<hash>.py first (tmpfs, RAM-backed, preferred) then
-# ~/.cache/remotely/<hash>.py (persistent disk fallback on macOS and systems
-# without /dev/shm). On hit: runs the cached file directly. On miss: exits 99
-# so _upload_remote_script() uploads and retries.
+# Checks /dev/shm/remotely/<hash>.py (tmpfs, RAM-backed) then
+# ~/.cache/remotely/<hash>.py (disk fallback for macOS / no-/dev/shm systems).
+#   Hit  -> run the cached script directly; exit with its return code.
+#   Miss -> exit 99 so _upload_remote_script() uploads and retries.
 #
-# PERF: Uses os.path.exists() only -- no file read, no hash computation on
-# the hot path. The hash embedded in the filename is the integrity check:
-# _upload_remote_script writes atomically (tmp -> rename) so the file at
-# that path is always either absent or complete.
+# PERF: Only os.path.exists() calls on the hot path -- no file reads, no
+#       hashing. The hash in the filename is the integrity check: uploads are
+#       atomic (tmp -> rename) so the file at that path is always complete.
 SCRIPT_BOOTSTRAP = _build_bootstrap(SCRIPT_HASH)  # type: bytes
 
-# Sentinel exit code: remote cache miss. Must not clash with remotely-preview's
-# own exit codes (0, 1, 127).
+# Exit code 99 signals "remote cache miss". Must not collide with remotely's
+# own exit codes (0 = success, 1 = error, 127 = command not found).
 _BOOTSTRAP_CACHE_MISS = 99

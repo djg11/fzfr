@@ -7,23 +7,39 @@ only for compatibility with toolchains that do not support PEP 517/518
 Do not add new configuration here -- use pyproject.toml instead.
 """
 
+from __future__ import annotations
+
+import re
 from pathlib import Path
 
 from setuptools import find_packages, setup
 
 
-def get_version():
+ROOT = Path(__file__).resolve().parent
+SCRIPT_FILE = ROOT / "src" / "remotely" / "_script.py"
+README_FILE = ROOT / "README.md"
+
+
+def get_version() -> str:
     """Read VERSION from _script.py without importing the package."""
-    with open("src/remotely/_script.py", "r") as f:
-        for line in f:
-            if line.startswith("VERSION"):
-                return line.split("=")[1].strip().strip("\"'")
-    raise RuntimeError("VERSION not found in src/remotely/_script.py")
+    text = SCRIPT_FILE.read_text(encoding="utf-8")
+
+    patterns = (
+        r"^\s*VERSION\s*=\s*[\"']([^\"']+)[\"']\s*(?:#.*)?$",
+        r"^\s*__version__\s*=\s*[\"']([^\"']+)[\"']\s*(?:#.*)?$",
+    )
+
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.MULTILINE)
+        if match:
+            return match.group(1)
+
+    raise RuntimeError(
+        f"VERSION not found in {SCRIPT_FILE}. Expected a line like: VERSION = '0.1.0'"
+    )
 
 
-README = Path(__file__).parent / "README.md"
-with README.open("r", encoding="utf-8") as f:
-    long_description = f.read()
+long_description = README_FILE.read_text(encoding="utf-8")
 
 setup(
     name="remotely-ssh",
@@ -46,6 +62,7 @@ setup(
             "pre-commit>=3.0.0",
             "pyright>=1.1.0",
             "pytest>=7.0.0",
+            "pytest-cov>=4.0.0",
         ],
     },
     entry_points={

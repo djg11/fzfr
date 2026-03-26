@@ -1,6 +1,12 @@
 PREFIX  ?= $(HOME)/.local
 BINDIR  := $(PREFIX)/bin
 SCRIPT  := remotely
+
+PYTHON  ?= python3
+PIP     := $(PYTHON) -m pip
+TESTDIR := tests
+COVERAGE_PACKAGE := remotely
+
 # Symlinks for sub-commands that are invoked by name.
 # remotely-open and remotely-copy are removed (headless API uses sub-command
 # dispatch: `remotely open`, `remotely list`, etc.).
@@ -11,23 +17,24 @@ SYMLINKS := remotely-preview remotely-remote-reload remotely-remote-preview
 #
 # Workflow for runtime testing:
 #   make build           -- build + run tests under dev python (3.10+)
+#   make test            -- run tests (uses pytest-cov if available)
+#   make coverage        -- run tests with coverage report
 #   make test36          -- verify the built script under python3.6
 #   make install         -- install to $(BINDIR)
 
-.PHONY: build test test36 lint format pre-commit install-hooks dev-install \
-        install uninstall check check-dev check-imports examples
+.PHONY: all build test test36 coverage coverage-html lint format pre-commit \
+        install-hooks dev-install install uninstall check check-dev \
+        check-imports examples
+
+all: build
 
 # ---------------------------------------------------------------------------
 # Primary targets
 # ---------------------------------------------------------------------------
 
 build: check-dev check-imports
-	python3 scripts/build_single_file.py
-	@if command -v pytest >/dev/null 2>&1; then \
-	    pytest tests/ -q; \
-	else \
-	    python3 -m unittest discover -s tests -q; \
-	fi
+	$(PYTHON) scripts/build_single_file.py
+	@$(MAKE) test TEST_COVERAGE=0
 
 install: build
 	@mkdir -p $(BINDIR)
@@ -53,13 +60,38 @@ uninstall:
 # Testing
 # ---------------------------------------------------------------------------
 
+# TEST_COVERAGE=1 enables pytest-cov when available.
+# build/test36 override this as needed.
+TEST_COVERAGE ?= 1
+
 test:
-	@command -v python3 >/dev/null 2>&1 || { echo "Error: python3 not found."; exit 1; }
-	@if command -v pytest >/dev/null 2>&1; then \
-	    pytest tests/ -v; \
+	@command -v $(PYTHON) >/dev/null 2>&1 || { \
+	    echo "Error: $(PYTHON) not found."; \
+	    exit 1; }
+	@if $(PYTHON) -c "import pytest" >/dev/null 2>&1; then \
+	    if [ "$(TEST_COVERAGE)" = "1" ] && $(PYTHON) -c "import pytest_cov" >/dev/null 2>&1; then \
+	        $(PYTHON) -m pytest $(TESTDIR)/ -v --cov=$(COVERAGE_PACKAGE) --cov-report=term-missing; \
+	    else \
+	        $(PYTHON) -m pytest $(TESTDIR)/ -v; \
+	    fi; \
 	else \
-	    python3 -m unittest discover -s tests -v; \
+	    $(PYTHON) -m unittest discover -s $(TESTDIR) -v; \
 	fi
+
+coverage:
+	@command -v $(PYTHON) >/dev/null 2>&1 || { \
+	    echo "Error: $(PYTHON) not found."; \
+	    exit 1; }
+	@$(PYTHON) -c "import pytest" >/dev/null 2>&1 || { \
+	    echo "Error: pytest not found. Install with: pip install pytest"; \
+	    exit 1; }
+	@$(PYTHON) -c "import pytest_cov" >/dev/null 2>&1 || { \
+	    echo "Error: pytest-cov not found. Install with: pip install pytest-cov"; \
+	    exit 1; }
+	$(PYTHON) -m pytest $(TESTDIR)/ -v --cov=$(COVERAGE_PACKAGE) --cov-report=term-missing --cov-report=html
+
+coverage-html: coverage
+	@echo "Coverage HTML written to htmlcov/index.html"
 
 # Verify the BUILT SCRIPT (not the src package) runs correctly under the
 # minimum supported remote Python. Requires python3.6 in PATH.
@@ -70,11 +102,11 @@ test36:
 	    echo "Error: python3.6 not found in PATH."; \
 	    echo "Install it or use: pyenv local 3.6.15"; \
 	    exit 1; }
-	@test -f remotely || { \
-	    echo "Error: built script 'remotely' not found. Run 'make build' first."; \
+	@test -f $(SCRIPT) || { \
+	    echo "Error: built script '$(SCRIPT)' not found. Run 'make build' first."; \
 	    exit 1; }
 	@echo "Verifying built script under Python 3.6..."
-	python -m unittest discover -s tests -v
+	python -m unittest discover -s $(TESTDIR) -v
 	@echo "Python 3.6 verification passed."
 
 # ---------------------------------------------------------------------------
@@ -105,27 +137,28 @@ install-hooks:
 	@echo "Pre-commit hooks installed. Ruff will run automatically on git commit."
 
 check-imports:
-	@python3 scripts/check_imports.py
+	@$(PYTHON) scripts/check_imports.py
 
 # ---------------------------------------------------------------------------
 # Dev environment bootstrap
 # ---------------------------------------------------------------------------
 
 dev-install: check-dev
-	@python3 -c "import sys; sys.exit(0 if hasattr(sys, 'real_prefix') or sys.prefix != sys.base_prefix else 1)" 2>/dev/null || { \
+	@$(PYTHON) -c "import sys; sys.exit(0 if hasattr(sys, 'real_prefix') or sys.prefix != sys.base_prefix else 1)" 2>/dev/null || { \
 	    echo "Error: no virtual environment active."; \
 	    echo "Create and activate one first:"; \
-	    echo "  python3 -m venv .venv && source .venv/bin/activate"; \
+	    echo "  $(PYTHON) -m venv .venv && source .venv/bin/activate"; \
 	    exit 1; }
-	pip install --upgrade pip setuptools wheel --quiet
-	pip install -e '.[dev]' --no-build-isolation
+	$(PIP) install --upgrade pip setuptools wheel --quiet
+	$(PIP) install -e '.[dev]' --no-build-isolation
 	pre-commit install
 	@echo ""
-	@echo "Dev environment ready (Python $$(python3 --version))."
+	@echo "Dev environment ready (Python $$($(PYTHON) --version))."
 	@echo ""
 	@echo "Available commands:"
 	@echo "  make build       -- rebuild remotely + run tests (requires 3.10+)"
 	@echo "  make test        -- run tests only"
+	@echo "  make coverage    -- run tests with coverage"
 	@echo "  make test36      -- verify built script under python3.6"
 	@echo "  make lint        -- ruff check + format check"
 	@echo "  make format      -- ruff check --fix + ruff format"
@@ -139,11 +172,11 @@ dev-install: check-dev
 # Used by build and dev-install to catch accidental use of a 3.6 interpreter
 # for development tasks that require 3.10+ (ruff, modern typing syntax, etc.).
 check-dev:
-	@command -v python3 >/dev/null 2>&1 || { \
-	    echo "Error: python3 not found in PATH."; exit 1; }
-	@python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null || { \
+	@command -v $(PYTHON) >/dev/null 2>&1 || { \
+	    echo "Error: $(PYTHON) not found in PATH."; exit 1; }
+	@$(PYTHON) -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null || { \
 	    echo "Error: dev toolchain requires Python 3.10+."; \
-	    echo "Found: $$(python3 --version)"; \
+	    echo "Found: $$($(PYTHON) --version)"; \
 	    echo ""; \
 	    echo "Activate a 3.10+ virtualenv, e.g.:"; \
 	    echo "  python3.10 -m venv .venv && source .venv/bin/activate"; \
@@ -162,4 +195,4 @@ check: check-dev
 # ---------------------------------------------------------------------------
 
 examples:
-	python3 scripts/generate_examples.py
+	$(PYTHON) scripts/generate_examples.py
