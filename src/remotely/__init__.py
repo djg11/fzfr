@@ -27,12 +27,13 @@ Call graph (headless API)
   remotely open user@host:/path
     -> get_session_dir() / ensure_reaper()
     -> acquire_socket(host)
-    -> text:   ssh cat -> $EDITOR -> scp back       [open_cmd.py]
+    -> text:   ssh cat -> $EDITOR (tmux new-window -d if inside tmux)
+               -> tmux wait-for -> scp back       [open_cmd.py]
     -> binary: stat + OOM check -> stream to cache
-               -> xdg-open detached                 [open_cmd.py]
+               -> xdg-open detached               [open_cmd.py]
 
   remotely gc
-    -> gc_stale_sessions()                          [session.py]
+    -> gc_stale_sessions()                        [session.py]
 
 Session lifecycle
 -----------------
@@ -142,6 +143,11 @@ def main():
     """Resolve which sub-command to run and execute it."""
     _set_process_name("python3 remotely")
     invoked_as = Path(sys.argv[0]).name
+
+    # -- Version flag: handle before sub-command dispatch --------------------
+    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
+        print("remotely " + VERSION)
+        sys.exit(0)
 
     if invoked_as in COMMAND_MAP and invoked_as != "remotely":
         fn, args = COMMAND_MAP[invoked_as], sys.argv[1:]

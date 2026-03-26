@@ -66,6 +66,13 @@ SSH_DEFERRED = ""
 
 _SOCKET_READY_TIMEOUT = 10
 
+# Timeout for the Python-side subprocess.run() backstop on SSH calls.
+# Must be larger than the SSH-side ConnectTimeout so SSH's own timeout
+# fires first and produces a clean error message.
+_SSH_CHECK_TIMEOUT = 5  # for ssh -O check (local socket probe, no TCP)
+_SSH_CONNECT_TIMEOUT = 10  # ConnectTimeout passed to ssh -o
+_SSH_RUN_TIMEOUT = 15  # subprocess.run() backstop for _start_master
+
 
 # ---------------------------------------------------------------------------
 # Anchor PID
@@ -136,11 +143,15 @@ _REAPER_SCRIPT = "\n".join(
         "        except OSError:",
         "            pass",
         "        if host:",
-        "            subprocess.run(",
-        "                ['ssh', '-O', 'exit', '-o', 'ControlPath=' + sock, host],",
-        "                stdout=subprocess.DEVNULL,",
-        "                stderr=subprocess.DEVNULL,",
-        "            )",
+        "            try:",
+        "                subprocess.run(",
+        "                    ['ssh', '-O', 'exit', '-o', 'ControlPath=' + sock, host],",
+        "                    stdout=subprocess.DEVNULL,",
+        "                    stderr=subprocess.DEVNULL,",
+        "                    timeout=5,",
+        "                )",
+        "            except Exception:",
+        "                pass",
         "",
         "while True:",
         "    time.sleep(2)",
@@ -280,11 +291,22 @@ def gc_stale_sessions() -> None:
                 except OSError:
                     pass
                 if host:
-                    subprocess.run(
-                        ["ssh", "-O", "exit", "-o", "ControlPath=" + str(sock), host],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
+                    try:
+                        subprocess.run(
+                            [
+                                "ssh",
+                                "-O",
+                                "exit",
+                                "-o",
+                                "ControlPath=" + str(sock),
+                                host,
+                            ],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=5,
+                        )
+                    except subprocess.TimeoutExpired:
+                        pass
             shutil.rmtree(str(sess_dir), ignore_errors=True)
         except OSError:
             pass
@@ -317,14 +339,47 @@ def _host_file_path(sess_dir: Path, host: str) -> Path:
 
 
 def _socket_alive(sock: Path, host: str) -> bool:
+    """Return True if the ControlMaster socket is present and responsive.
+
+    ssh -O check only probes the local socket file -- no TCP connection is
+    opened -- so ConnectTimeout is irrelevant here. A Python-side timeout=
+    guards against a hung ssh process in pathological cases (e.g. the master
+    process is in an uninterruptible sleep).
+    """
     if not sock.exists():
         return False
-    r = subprocess.run(
-        ["ssh", "-O", "check", "-o", "ControlPath=" + str(sock), host],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return r.returncode == 0
+    try:
+        r = subprocess.run(
+            ["ssh", "-O", "check", "-o", "ControlPath=" + str(sock), host],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_SSH_CHECK_TIMEOUT,
+        )
+        return r.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def _close_stale_master(sock: Path, host: str) -> None:
+    """Attempt a graceful ssh -O exit before unlinking a dead socket.
+
+    If the ControlMaster process is still alive but not responding to
+    check, sending exit gives it a chance to shut down cleanly. Errors
+    and timeouts are ignored -- we unlink the socket regardless.
+    """
+    try:
+        subprocess.run(
+            ["ssh", "-O", "exit", "-o", "ControlPath=" + str(sock), host],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_SSH_CHECK_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+    try:
+        sock.unlink()
+    except (FileNotFoundError, OSError):
+        pass
 
 
 def _start_master(sess_dir: Path, host: str) -> bool:
@@ -349,7 +404,7 @@ def _start_master(sess_dir: Path, host: str) -> bool:
         "-o",
         "ControlPersist=" + str(persist),
         "-o",
-        "ConnectTimeout=10",
+        f"ConnectTimeout={_SSH_CONNECT_TIMEOUT}",
         "-o",
         "ServerAliveInterval=15",
         "-o",
@@ -360,7 +415,18 @@ def _start_master(sess_dir: Path, host: str) -> bool:
         "UserKnownHostsFile=" + str(known_hosts),
     ]
 
-    r = subprocess.run(["ssh"] + opts + [host])
+    try:
+        r = subprocess.run(
+            ["ssh"] + opts + [host],
+            timeout=_SSH_RUN_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            "remotely: SSH connection to " + host + " timed out",
+            file=sys.stderr,
+        )
+        return False
+
     if r.returncode != 0:
         print(
             "remotely: SSH connection to "
@@ -394,6 +460,8 @@ def acquire_socket(host: str) -> str:
     MANAGED MODE (ssh_multiplexing = true):
         Creates or reuses a per-session ControlMaster socket.
         Uses flock so parallel preview callbacks wait rather than race.
+        Detects stale sockets (host rebooted, network change) and
+        recreates the connection automatically.
     """
     if not CONFIG.get("ssh_multiplexing", False):
         return SSH_DEFERRED
@@ -409,10 +477,9 @@ def acquire_socket(host: str) -> str:
         if _socket_alive(sock, host):
             return str(sock)
 
-        try:
-            sock.unlink()
-        except (FileNotFoundError, OSError):
-            pass
+        # Socket is dead or missing. Close the stale master gracefully
+        # before recreating so two masters don't conflict.
+        _close_stale_master(sock, host)
 
         if not _start_master(sess_dir, host):
             return SSH_DEFERRED
@@ -428,11 +495,15 @@ def release_session(host: str) -> None:
         sess_dir = get_session_dir()
         sock = _socket_path(sess_dir, host)
         if sock.exists():
-            subprocess.run(
-                ["ssh", "-O", "exit", "-o", "ControlPath=" + str(sock), host],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            try:
+                subprocess.run(
+                    ["ssh", "-O", "exit", "-o", "ControlPath=" + str(sock), host],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=_SSH_CHECK_TIMEOUT,
+                )
+            except subprocess.TimeoutExpired:
+                pass
     except OSError:
         pass
 
@@ -456,7 +527,7 @@ def ssh_opts_for(host: str) -> List[str]:
         "-o",
         "ControlPersist=" + str(persist),
         "-o",
-        "ConnectTimeout=5",
+        f"ConnectTimeout={_SSH_CONNECT_TIMEOUT}",
         "-o",
         "ServerAliveInterval=15",
         "-o",

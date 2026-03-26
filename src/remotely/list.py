@@ -11,11 +11,19 @@ Usage:
         user@host           -- single remote host, searches ~/ by default
         user@host:/path     -- remote host with explicit base path
         user@host:~/path    -- remote host with tilde-expanded path
+        .                   -- local filesystem, current directory (shorthand)
+        /abs/path           -- local filesystem, absolute path (shorthand)
+        ~/path              -- local filesystem, tilde path (shorthand)
+        examples            -- local filesystem, relative path (any bare word
+                               without "@" or ":" is treated as a local path)
 
     Multiple targets are accepted. Results from all targets are streamed
     to stdout in arrival order, each line prefixed with "host:" so that
     remotely preview and remotely open can route back to the correct host.
     Local results are not prefixed.
+
+    SSH host strings must contain either "@" (user@host) or ":" (host:/path)
+    to be distinguished from local relative directory names.
 
 Options:
     --path PATH         Base path to search (alternative to host:/path syntax)
@@ -25,6 +33,8 @@ Options:
                         instead of plain paths
 
 Examples:
+    remotely list .
+    remotely list examples
     remotely list local ~/projects
     remotely list user@host:/var/log
     remotely list host1:/var/log host2:/var/log --hidden
@@ -48,10 +58,39 @@ from .utils import _resolve_remote_path, _validate_exclude_pattern
 # ---------------------------------------------------------------------------
 
 
+def _is_local_path(tok: str) -> bool:
+    """Return True when tok should be treated as a local filesystem path.
+
+    Tokens that are unambiguously local paths (not SSH host strings):
+      - "local"       -- explicit keyword
+      - "."           -- current directory
+      - "./"          -- relative path prefix
+      - "/"           -- absolute path prefix
+      - "~"  "~/"     -- tilde home expansion
+      - no "@" and no ":"  -- bare word with no SSH indicators (e.g. "examples",
+                              "logs", any relative directory name). SSH host
+                              strings always contain either "@" (user@host) or
+                              ":" (host:/path). A bare word like "examples" is
+                              therefore always a local relative path.
+    """
+    return (
+        tok == "local"
+        or tok.startswith(".")
+        or tok.startswith("/")
+        or tok.startswith("~")
+        or ("@" not in tok and ":" not in tok)
+    )
+
+
 def _parse_targets(argv: list) -> "tuple[list[dict], list[str], bool, str, str]":
     """Parse argv into (targets, exclude_patterns, hidden, path_override, fmt).
 
     Each target dict has keys: host (str, "" for local), path (str).
+
+    Positional tokens are classified as:
+      - local path (starts with . / ~, is "local", or has no @ and no :) -> local target
+      - host:/path or host:~/path -> remote target
+      - user@host (contains @, no :) -> remote target, path=""
     """
     targets = []
     exclude_patterns: list = []
@@ -94,15 +133,21 @@ def _parse_targets(argv: list) -> "tuple[list[dict], list[str], bool, str, str]"
         i += 1
 
     if not positional:
+        # No positional args: default to local current directory.
         positional = ["local"]
 
     for tok in positional:
-        if tok == "local":
-            targets.append({"host": "", "path": path_override})
-        elif ":" in tok and not tok.startswith("/"):
+        if _is_local_path(tok):
+            # Local path: "local" keyword maps to path_override or "",
+            # any other local-looking token is used as the path directly.
+            path = path_override if tok == "local" else (path_override or tok)
+            targets.append({"host": "", "path": path})
+        elif ":" in tok:
+            # Remote with explicit path: user@host:/path or user@host:~/path
             host, sep, path = tok.partition(":")
             targets.append({"host": host, "path": path_override or path})
         else:
+            # Contains "@" but no ":": bare SSH host (user@host), path=""
             targets.append({"host": tok, "path": path_override})
 
     return targets, exclude_patterns, hidden, path_override, fmt
@@ -150,9 +195,9 @@ def _list_remote(
     # Resolve ~ and relative paths on the remote before passing to fd.
     # shlex.quote("~/demo") produces '~/demo' which the shell does not expand
     # when passed as an fd argument -- must be resolved to absolute first.
-    if path.startswith("~") or not path.startswith("/"):
+    if not path or path.startswith("~") or not path.startswith("/"):
         ssh_control = sock if sock and sock is not SSH_DEFERRED else ""
-        path = _resolve_remote_path(host, path, ssh_control)
+        path = _resolve_remote_path(host, path or "", ssh_control)
         if not path:
             out_queue.put(None)
             return
@@ -181,7 +226,7 @@ def _list_remote(
             "ConnectTimeout=5",
         ]
     else:
-        ssh_opts = []
+        ssh_opts = ["-o", "ConnectTimeout=10"]
 
     proc = subprocess.Popen(
         ["ssh"] + ssh_opts + [host, remote_cmd],
