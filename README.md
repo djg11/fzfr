@@ -29,6 +29,8 @@ and `fd` in `$PATH`.
   or `grep` fallback.
 - **SSH multiplexing** — optional managed ControlMaster for fast parallel
   preview calls, or defer to `~/.ssh/config` (the default).
+- **Preview cache** — LRU cache keyed on `(path, mtime, query)` avoids
+  repeated SSH round-trips for unchanged files.
 
 ---
 
@@ -48,7 +50,7 @@ script against a local Python 3.6 interpreter before releasing.
 
 ## Requirements
 
-**On the local machine (running `remotely list` / `preview` / `open`):**
+**On the local machine:**
 
 | Tool | Purpose |
 |------|---------|
@@ -56,14 +58,14 @@ script against a local Python 3.6 interpreter before releasing.
 | [fd](https://github.com/sharkdp/fd) | Local file listing |
 | `ssh` | Remote access |
 
-**On the remote host (installed automatically):**
+**On the remote host (installed automatically on first use):**
 
 | Tool | Purpose |
 |------|---------|
 | Python ≥ 3.6 | Runs the bootstrapped remotely agent |
 | [fd](https://github.com/sharkdp/fd) | Remote file listing |
 
-**Optional — each adds a capability (local or remote as noted):**
+**Optional — each adds a capability:**
 
 | Tool | Where | Capability |
 |------|-------|-----------|
@@ -71,6 +73,7 @@ script against a local Python 3.6 interpreter before releasing.
 | [rga](https://github.com/phiresky/ripgrep-all) | remote | Content search inside PDFs and archives |
 | [pdftotext](https://poppler.freedesktop.org/) | remote | PDF text extraction fallback |
 | [tmux](https://github.com/tmux/tmux) | local | Open files in a new window |
+| [fzf](https://github.com/junegunn/fzf) | local | Interactive fuzzy-finder UI |
 
 ---
 
@@ -104,6 +107,27 @@ pip install remotely-ssh
 make uninstall
 pipx uninstall remotely-ssh
 ```
+
+---
+
+## Quick start
+
+The simplest possible usage — browse a remote host with fzf, preview files,
+and open them in your `$EDITOR`:
+
+```sh
+remotely list pi5.box:~/demo \
+  | fzf --preview 'remotely preview {}' \
+        --bind 'enter:execute(remotely open {})'
+```
+
+That one line gives you:
+- Fuzzy search over all files under `~/demo` on `pi5.box`
+- Live syntax-highlighted preview as you move the cursor
+- Press Enter to open the selected file in `$EDITOR` and sync back on save
+
+See [EXAMPLES.md](EXAMPLES.md) for more patterns including multi-host search,
+shell functions, and Television integration.
 
 ---
 
@@ -221,11 +245,6 @@ and caches it at `~/.cache/remotely/<hash>.py` (or `/dev/shm/remotely/`
 on Linux for RAM-backed storage). Subsequent calls send only a ~250-byte
 bootstrap that checks the cache.
 
-```sh
-remotely list user@server /var/log
-remotely list myserver ~/projects
-```
-
 **SSH multiplexing:** By default remotely defers entirely to `~/.ssh/config`.
 Enable remotely's own ControlMaster only if you have no `ControlMaster` in
 your SSH config:
@@ -248,6 +267,7 @@ remotely uses busybox-style dispatch — one script, multiple commands:
 | `remotely list` | Stream file paths from one or more targets to stdout |
 | `remotely preview` | Render a file to stdout (local or remote) |
 | `remotely open` | Open a file in `$EDITOR`, sync back on save |
+| `remotely gc` | Remove orphaned session directories |
 | `remotely-preview` | Low-level preview (called internally by preview UIs) |
 | `remotely-remote-reload` | Internal: list files on a remote host |
 | `remotely-remote-preview` | Internal: preview a file on a remote host |
@@ -268,6 +288,7 @@ make test           # run tests only
 make test36         # verify built script under python3.6 (runtime target)
 make lint           # ruff check + format check
 make format         # ruff check --fix + ruff format
+make coverage       # run tests with coverage report
 ```
 
 The distributable `remotely` script is built from source modules in
@@ -290,6 +311,7 @@ src/remotely/
   list.py        remotely list headless sub-command
   preview_cmd.py remotely preview headless sub-command
   open_cmd.py    remotely open headless sub-command
+  gc.py          remotely gc sub-command
 scripts/
   build_single_file.py   concatenates src/ -> remotely
   check_imports.py       detects late imports that break the build
@@ -311,7 +333,7 @@ make build
 
 ## Roadmap
 
-See [TODO.md](TODO.md) for planned features (multi-host groups, minification,
+See [TODO.md](TODO.md) for planned features (named host groups, minification,
 `memfd_create` in-memory execution, Television reference configs).
 
 ---

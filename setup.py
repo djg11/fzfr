@@ -88,4 +88,10 @@ setup(
         "Programming Language :: Python :: 3.12",
         "Topic :: Utilities",
     ],
+    project_urls={
+        "Homepage": "https://github.com/djg11/remotely",
+        "Repository": "https://github.com/djg11/remotely",
+        "Issues": "https://github.com/djg11/remotely/issues",
+        "Changelog": "https://github.com/djg11/remotely/releases",
+    },
 )

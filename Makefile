@@ -8,8 +8,6 @@ TESTDIR := tests
 COVERAGE_PACKAGE := remotely
 
 # Symlinks for sub-commands that are invoked by name.
-# remotely-open and remotely-copy are removed (headless API uses sub-command
-# dispatch: `remotely open`, `remotely list`, etc.).
 SYMLINKS := remotely-preview remotely-remote-reload remotely-remote-preview
 
 # Dev toolchain requirement: Python 3.10+ must be active in the venv.
@@ -140,6 +138,15 @@ check-imports:
 	@$(PYTHON) scripts/check_imports.py
 
 # ---------------------------------------------------------------------------
+# Security scanning
+# ---------------------------------------------------------------------------
+
+semgrep:
+	@command -v semgrep >/dev/null 2>&1 || { \
+	    echo "Error: semgrep not found. Install with: pip install semgrep"; exit 1; }
+	semgrep scan --config .semgrep/semgrep.yml --error .
+
+# ---------------------------------------------------------------------------
 # Dev environment bootstrap
 # ---------------------------------------------------------------------------
 
@@ -162,6 +169,7 @@ dev-install: check-dev
 	@echo "  make test36      -- verify built script under python3.6"
 	@echo "  make lint        -- ruff check + format check"
 	@echo "  make format      -- ruff check --fix + ruff format"
+	@echo "  make semgrep     -- run custom security rules"
 	@echo "  make pre-commit  -- run all pre-commit hooks"
 
 # ---------------------------------------------------------------------------
@@ -169,8 +177,6 @@ dev-install: check-dev
 # ---------------------------------------------------------------------------
 
 # check-dev: verify the ACTIVE python meets the dev toolchain requirement (3.10+).
-# Used by build and dev-install to catch accidental use of a 3.6 interpreter
-# for development tasks that require 3.10+ (ruff, modern typing syntax, etc.).
 check-dev:
 	@command -v $(PYTHON) >/dev/null 2>&1 || { \
 	    echo "Error: $(PYTHON) not found in PATH."; exit 1; }
@@ -184,7 +190,7 @@ check-dev:
 	    echo "To test against Python 3.6 (runtime target), use: make test36"; \
 	    exit 1; }
 
-# check: legacy alias kept for backwards compatibility (e.g. called by old CI).
+# check: legacy alias kept for backwards compatibility.
 check: check-dev
 	@command -v fd >/dev/null 2>&1 || \
 	    echo "Warning: fd not found -- required for 'remotely list' local mode."

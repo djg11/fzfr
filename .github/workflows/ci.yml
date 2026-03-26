@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Dev toolchain tests: build, lint, full test suite.
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e '.[dev]' --no-build-isolation
+
+      - name: Lint (ruff check)
+        run: ruff check src/ tests/
+
+      - name: Format check (ruff format)
+        run: ruff format --check src/ tests/
+
+      - name: Check for late imports
+        run: python scripts/check_imports.py
+
+      - name: Build single-file script
+        run: python scripts/build_single_file.py
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  test-runtime-target:
+    name: Test built script (Python 3.6 runtime target)
+    runs-on: ubuntu-latest
+    # Run after the build job so we can reuse the built script.
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10 (build toolchain)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build ruff
+
+      - name: Build single-file script
+        run: python scripts/build_single_file.py
+
+      - name: Set up Python 3.6 (runtime target)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.6"
+
+      - name: Verify script imports cleanly under Python 3.6
+        run: python3.6 -c "import ast; ast.parse(open('remotely').read()); print('syntax OK')"
+
+      - name: Run tests against built script under Python 3.6
+        run: python3.6 -m unittest discover -s tests -v
