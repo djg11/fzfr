@@ -80,12 +80,21 @@ _SSH_RUN_TIMEOUT = 15  # subprocess.run() backstop for _start_master
 
 
 def get_anchor_pid() -> int:
-    """Return the PID of the direct parent of this process.
+    """Return the PID of the anchor process for this session.
 
-    When called from a fzf --preview or --bind callback, this is fzf's PID.
-    When called from 'remotely list' (invoked by the shell), this is the
-    shell's PID.  In both cases it is a stable anchor for the session.
+    By default, this is the direct parent PID. When called from fzf, this is
+    fzf's PID. When called from the shell, it is the shell's PID.
+
+    Can be overridden via the REMOTELY_SESSION_PID environment variable to
+    force multiple processes (e.g. a wrapper script and its fzf child) into
+    the same session.
     """
+    env_pid = os.environ.get("REMOTELY_SESSION_PID")
+    if env_pid:
+        try:
+            return int(env_pid)
+        except ValueError:
+            pass
     return os.getppid()
 
 
@@ -547,3 +556,22 @@ def ssh_opts_for(host: str) -> List[str]:
 def session_dir(host: str) -> Path:
     """Deprecated: use get_session_dir() instead."""
     return get_session_dir()
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def cmd_session_dir(argv: List[str]) -> int:
+    """Entry point for the remotely session-dir sub-command.
+
+    Prints the path to the current session directory to stdout and exits.
+    Used by wrappers to store session-scoped state (e.g. search mode).
+    """
+    try:
+        print(get_session_dir())
+        return 0
+    except OSError as e:
+        print(f"remotely session-dir: {e}", file=sys.stderr)
+        return 1

@@ -64,16 +64,13 @@ def _parse_target_path(arg: str) -> "tuple[str, str]":
 
     Rules:
     - If arg starts with / or ~ or . it is always local.
-    - Otherwise split on the first : that is followed by / or ~.
-    - user@host:/path  -> ("user@host", "/path")
-    - user@host:~/p    -> ("user@host", "~/p")
-    - /local/path      -> ("", "/local/path")
+    - Otherwise split on the first : if followed by / or ~ or .
     """
     if arg.startswith("/") or arg.startswith("~") or arg.startswith("."):
         return "", arg
 
     for i, ch in enumerate(arg):
-        if ch == ":" and i > 0 and i + 1 < len(arg) and arg[i + 1] in ("/", "~"):
+        if ch == ":" and i > 0 and i + 1 < len(arg) and arg[i + 1] in ("/", "~", "."):
             return arg[:i], arg[i + 1 :]
 
     return "", arg

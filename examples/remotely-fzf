@@ -1,0 +1,140 @@
+#!/bin/bash
+# wrap-remotely -- simplified fuzzy-search using the remotely transport.
+# Works for both local directories and remote SSH hosts.
+# Supports 2x2 modes: [Files|Directories] x [Name|Content]
+# Toggle Modes: CTRL-T (Name/Content), CTRL-D (Files/Directories)
+
+wrap-remotely() {
+	# 0. Ensure 'remotely' is available
+	if ! command -v remotely &>/dev/null; then
+		if [[ -x "./remotely" ]]; then
+			export PATH="$PWD:$PATH"
+		else
+			echo "Error: 'remotely' command not found." >&2
+			exit 1
+		fi
+	fi
+
+	# 1. Configuration
+	local TARGETS=("$@")
+	[[ ${#TARGETS[@]} -eq 0 ]] && TARGETS=(".")
+
+	local ESCAPED_TARGETS
+	ESCAPED_TARGETS=$(printf '%q ' "${TARGETS[@]}")
+
+	local QUERY=""
+
+	# 2. Session Management
+	export REMOTELY_SESSION_PID=$$
+
+	local SESS_DIR
+	SESS_DIR=$(remotely session-dir) || {
+		echo "Error: could not get session directory" >&2
+		exit 1
+	}
+	local QTYPE_FILE="$SESS_DIR/wrap-qtype"
+	local TTYPE_FILE="$SESS_DIR/wrap-ttype"
+
+	# Defaults
+	[[ ! -f "$QTYPE_FILE" ]] && echo "content" >"$QTYPE_FILE"
+	[[ ! -f "$TTYPE_FILE" ]] && echo "f" >"$TTYPE_FILE"
+
+	while true; do
+		local QTYPE
+		QTYPE=$(cat "$QTYPE_FILE") # name | content
+		local TTYPE
+		TTYPE=$(cat "$TTYPE_FILE") # f | d (files | directories)
+
+		# UI Prompts
+		local P_TARGET="Files"
+		[[ "$TTYPE" == "d" ]] && P_TARGET="Dirs"
+		local P_SEARCH="Name"
+		[[ "$QTYPE" == "content" ]] && P_SEARCH="Content"
+
+		local PROMPT="[$P_TARGET] $P_SEARCH: "
+
+		# Next States for the toggle
+		local NEXT_QTYPE="name"
+		[[ "$QTYPE" == "name" ]] && NEXT_QTYPE="content"
+		local NEXT_TTYPE="f"
+		[[ "$TTYPE" == "f" ]] && NEXT_TTYPE="d"
+
+		# 3. Prepare fzf options
+		# PREVIEW:
+		# Content Search: Pass {q} to filter/highlight inside the item.
+		# Name Search: Omit {q} to show the full tree/content.
+		local PREVIEW_CMD="remotely preview {}"
+		[[ "$QTYPE" == "content" ]] && PREVIEW_CMD="remotely preview {} {q}"
+
+		# ENTER ACTION
+		local ENTER_ACTION
+		if [[ "$TTYPE" == "d" ]]; then
+			# Directory Browse: Spawn a new instance for the selected directory
+			local WRAPPER_PATH
+			WRAPPER_PATH=$(realpath "$0")
+			if [[ -n "$TMUX" ]]; then
+				ENTER_ACTION="execute(tmux new-window \"$WRAPPER_PATH '{}'\")"
+			else
+				ENTER_ACTION="execute(\"$WRAPPER_PATH\" '{}')"
+			fi
+		else
+			# File Open
+			ENTER_ACTION="execute(remotely open {})"
+		fi
+
+		local FZF_OPTS=(
+			"--prompt" "$PROMPT"
+			"--header" "Enter: Open/Browse | CTRL-T: Name/Cont | CTRL-D: File/Dir | ESC: Exit"
+			"--bind" "ctrl-t:execute-silent(echo $NEXT_QTYPE > \"$QTYPE_FILE\")+abort"
+			"--bind" "ctrl-d:execute-silent(echo $NEXT_TTYPE > \"$TTYPE_FILE\")+abort"
+			"--bind" "alt-k:preview-half-page-up,alt-j:preview-half-page-down"
+			"--bind" "enter:$ENTER_ACTION"
+			"--preview" "$PREVIEW_CMD"
+			"--preview-window" "right:60%:wrap"
+			"--ansi"
+			"--print-query"
+			"--query" "$QUERY"
+		)
+
+		local LIST_CMD=(remotely list "${TARGETS[@]}")
+
+		if [[ "$QTYPE" == "content" ]]; then
+			FZF_OPTS+=("--phony")
+			if [[ "$TTYPE" == "f" ]]; then
+				# Files + Content
+				FZF_OPTS+=("--bind" "change:reload:remotely list $ESCAPED_TARGETS --query {q} || true")
+				LIST_CMD+=(--query "$QUERY")
+			else
+				# Dirs + Content: Find dirs containing matches for {q}
+				FZF_OPTS+=("--bind" "change:reload:remotely list $ESCAPED_TARGETS --query {q} --query-type name --parents --type a || true")
+				LIST_CMD+=(--query "$QUERY" --query-type name --parents --type a)
+			fi
+		else
+			# Name Search
+			LIST_CMD+=(--type "$TTYPE")
+		fi
+
+		# 4. Launch fzf
+		local OUT
+		OUT=$("${LIST_CMD[@]}" | fzf "${FZF_OPTS[@]}")
+		local EXIT_CODE=$?
+
+		# Capture current query so it persists if we switch modes
+		QUERY=$(echo "$OUT" | head -n 1)
+
+		# 5. Handle exit/mode switch
+		if [[ -f "$QTYPE_FILE" && -f "$TTYPE_FILE" ]]; then
+			local CUR_QTYPE
+			CUR_QTYPE=$(cat "$QTYPE_FILE")
+			local CUR_TTYPE
+			CUR_TTYPE=$(cat "$TTYPE_FILE")
+			if [[ "$CUR_QTYPE" != "$QTYPE" || "$CUR_TTYPE" != "$TTYPE" ]]; then
+				continue # Loop to restart with new mode
+			fi
+		fi
+
+		break
+	done
+}
+
+wrap-remotely "$@"

@@ -39,27 +39,55 @@ from .utils import _parse_extensions, _shlex_join, _validate_exclude_pattern
 # ---------------------------------------------------------------------------
 
 
-def _build_remote_cmd(fd_args, rga_glob_args, query, base_path, relative):
-    # type: (List[str], List[str], str, str, bool) -> str
+def _build_remote_cmd(
+    fd_args,
+    rga_glob_args,
+    query,
+    base_path,
+    relative,
+    search_type="content",
+    parents=False,
+):
+    # type: (List[str], List[str], str, str, bool, str, bool) -> str
     """Build a shell command string to run on the remote host via SSH.
 
-    Returns a fragment safe to pass as the final argument to ssh. All tokens
-    are built with shlex.join / shlex.quote so base_path, query, and extension
-    values cannot inject shell commands.
-
-    relative=True  -- ``cd`` to base_path first; output paths are relative.
-    relative=False -- pass base_path as the fd search root; output is absolute.
+    search_type="content" -- search inside files (uses rga/grep).
+    search_type="name"    -- search for matching filenames (uses fd).
+    parents=True          -- return the parent directory of each match.
     """
     safe_base = shlex.quote(base_path)
     fd_cmd = _shlex_join(fd_args)
-    grep_cmd = _shlex_join(["xargs", "-P4", "-0", "grep", "-ilF", query])
     error_suffix = "|| { echo 'Error: cannot access directory' >&2; exit 1; }"
 
-    if not query:
-        root = "." if relative else f". {safe_base}"
-        prefix = f"cd {safe_base} 2>/dev/null && " if relative else ""
-        return f"{prefix}{fd_cmd} {root} {error_suffix}"
+    # Determine if we are primarily looking for directories (to add trailing slashes)
+    is_dir_search = parents or "--type d" in " ".join(fd_args)
 
+    post_process = ""
+    if is_dir_search:
+        # Filter out . and .. then deduplicate and add trailing slash
+        post_process = " | grep -vE '^\\.?\\.?$' | sort -u | sed 's|[^/]$|&/|'"
+
+    if parents:
+        # prepend dirname to post_process
+        post_process = " | xargs -d '\\n' dirname" + post_process
+
+    if not query:
+        root = "." if relative else safe_base
+        prefix = f"cd {safe_base} 2>/dev/null && " if relative else ""
+        # Search '.' inside root to avoid redundancy
+        cmd = f"{prefix}{fd_cmd} . {root}"
+        return f"({cmd}){post_process} {error_suffix}"
+
+    if search_type == "name":
+        # Name search: query is passed to fd as a pattern
+        if relative:
+            cmd = f"cd {safe_base} 2>/dev/null && {fd_cmd} {shlex.quote(query)} ."
+        else:
+            cmd = f"{fd_cmd} {shlex.quote(query)} {safe_base}"
+        return f"({cmd}){post_process} {error_suffix}"
+
+    # Content search (default)
+    grep_cmd = _shlex_join(["xargs", "-P4", "-0", "grep", "-ilF", query])
     if relative:
         rga_cmd = _shlex_join(
             ["rga"]
@@ -67,7 +95,7 @@ def _build_remote_cmd(fd_args, rga_glob_args, query, base_path, relative):
             + ["--files-with-matches", "--fixed-strings", query, "."]
         )
         fd_grep_cmd = _shlex_join(fd_args + ["-0", "."])
-        return (
+        cmd = (
             f"cd {safe_base} 2>/dev/null && "
             f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
         )
@@ -77,8 +105,10 @@ def _build_remote_cmd(fd_args, rga_glob_args, query, base_path, relative):
             + rga_glob_args
             + ["--files-with-matches", "--fixed-strings", query, base_path]
         )
-        fd_grep_cmd = _shlex_join(fd_args + ["-0", ".", base_path])
-        return f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
+        fd_grep_cmd = _shlex_join(fd_args + ["-0", base_path])
+        cmd = f"({rga_cmd} 2>/dev/null || {fd_grep_cmd} | {grep_cmd} 2>/dev/null)"
+
+    return f"({cmd}){post_process} {error_suffix}"
 
 
 def _build_git_remote_cmd(hidden, exclude_patterns, base_path, relative, ext=""):
@@ -127,7 +157,10 @@ def _build_fd_rga_args(ftype, ext, hidden, exclude_patterns):
     encode the same search constraints (hidden flag, extensions, excludes)
     in the syntax each tool expects.
     """
-    fd_args = ["fd", "-L", "--type", ftype]  # type: List[str]
+    fd_args = ["fd", "-L"]  # type: List[str]
+    if ftype and ftype != "a":
+        fd_args += ["--type", ftype]
+
     rga_glob_args = []  # type: List[str]
 
     if hidden:

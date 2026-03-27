@@ -100,6 +100,7 @@ from .open_cmd import cmd_open_headless
 from .preview import cmd_preview
 from .preview_cmd import cmd_preview_headless
 from .remote import cmd_remote_preview, cmd_remote_reload
+from .session import cmd_session_dir
 
 
 # Re-exported from ._script
@@ -118,6 +119,7 @@ COMMAND_MAP = {
     "list": cmd_list,
     "preview": cmd_preview_headless,
     "open": cmd_open_headless,
+    "session-dir": cmd_session_dir,
     # -- Preview (called by headless API and directly by name) --
     "remotely-preview": cmd_preview,
     # -- Remote sub-commands (called by headless API) --

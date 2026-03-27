@@ -152,19 +152,30 @@ def _preview_archive(filepath, hint, query):
         _list_archive(filepath, hint)
 
 
-def _preview_directory(filepath):
-    # type: (str) -> None
-    """Render a directory listing in the preview pane."""
-    _try_run(
-        [
-            ["eza", "--color=always", "--tree", "--level=2", "--icons", filepath],
-            ["exa", "--color=always", "--tree", "--level=2", filepath],
-            ["tree", "-L", "2", "-C", filepath],
-            ["ls", "-la", "--color=always", filepath],
-            ["ls", "-la", filepath],
-        ],
-        "Directory preview failed",
-    )
+def _preview_directory(filepath, query=""):
+    # type: (str, str) -> None
+    """Render a directory listing in the preview pane, optionally filtered by query."""
+    if query:
+        # If there's a query, we use fd to find matching names inside the directory
+        # as requested ("search by file names or directory names within that particular directory").
+        _try_run(
+            [
+                ["fd", "-L", "--color=always", query, filepath],
+                ["ls", "-R", filepath, "|", "grep", "-i", "--color=always", query],
+            ],
+            "No matching files or subdirectories found",
+        )
+    else:
+        _try_run(
+            [
+                ["eza", "--color=always", "--tree", "--level=2", "--icons", filepath],
+                ["exa", "--color=always", "--tree", "--level=2", filepath],
+                ["tree", "-L", "2", "-C", filepath],
+                ["ls", "-la", "--color=always", filepath],
+                ["ls", "-la", filepath],
+            ],
+            "Directory preview failed",
+        )
 
 
 def _preview_binary(filepath):
@@ -189,7 +200,7 @@ def _dispatch_preview(filepath, hint, mime, query):
     elif kind is FileKind.PDF:
         _preview_pdf(filepath, query)
     elif kind is FileKind.DIRECTORY:
-        _preview_directory(filepath)
+        _preview_directory(filepath, query)
     elif mime and not _is_text_mime(mime):
         _preview_binary(filepath)
     else:
@@ -218,7 +229,7 @@ def _preview_file(filepath, query):
     # type: (str, str) -> None
     """Preview a file on the local filesystem."""
     if Path(filepath).is_dir():
-        _preview_directory(filepath)
+        _preview_directory(filepath, query)
         return
 
     kind = classify(filepath)
